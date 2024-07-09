@@ -1,0 +1,63 @@
+# Fonts
+font.family : STIXGeneral
+font.serif : cm
+mathtext.fontset : cm
+# Use STIXGeneral and cm for font.serif and mathtext for best Latex result with matplotlib
+# Other options: stix, CMU Serif, cm, (family: sans-serif)
+# Figure width for equal font size should be approx: 6 inches
+font.size : 11
+axes.titlesize : 11
+axes.labelsize : 11
+xtick.labelsize : 11
+ytick.labelsize : 11
+text.usetex: False
+
+# Spines
+axes.spines.bottom : True
+axes.spines.top : True
+axes.spines.left : True
+axes.spines.right : True
+axes.linewidth : 1.25
+# axes.axisbelow : True
+# axes.facecolor : dcdcdc
+axes.facecolor : white
+
+# Ticks
+xtick.direction: in
+ytick.direction: in
+
+xtick.top : True
+xtick.bottom : True
+ytick.left : True
+ytick.right : True
+xtick.major.size:    5 # 3.5     # major tick size in points
+xtick.minor.size:    2.5 # 2       # minor tick size in points
+xtick.major.width:   1 # 0.8     # major tick width in points
+xtick.minor.width:   0.7 # 0.6     # minor tick width in points
+ytick.major.size:    5 # 3.5     # major tick size in points
+ytick.minor.size:    2.5 # 2       # minor tick size in points
+ytick.major.width:   1 # 0.8     # major tick width in points
+ytick.minor.width:   0.7 # 0.6     # minor tick width in points
+
+pcolor.shading : auto
+
+# Lines
+lines.linewidth : 0.8
+
+# Legend
+legend.facecolor : white
+
+# Grid
+axes.grid : True
+grid.color : grey
+grid.alpha : 0.2
+grid.linestyle: :
+grid.linewidth : 1.25
+
+# Figure
+figure.dpi : 150
+
+# Pgf
+# pgf.texsystem : pdflatex
+# pgf.rcfonts : False
+
