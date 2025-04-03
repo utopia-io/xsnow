@@ -30,7 +30,11 @@ The dimensions of the data model are:
 2. Time:
     * Represents the specific point in time for which the snow profile or observation is valid.
     * Notes: Allow for datetime objects with flexible time resolutions (e.g., hourly, daily, etc).
-3. Realization instances (optional dimension):
+3. Virtual slopes (optional dimension):
+    * Represents different slope angles/azimuth at the same location and time
+    * This dimension is optional and is trivial when there is only one combination of angle/azimuth.
+    * Is one dimension `vslopes` enough to catch different combinations of angles/azimuth, or do we want two separate dimensions?
+4. Realization instances (optional dimension):
     * Represents different realizations of the snow profile at the same location and time, such as outputs from:
         - Different weather inputs (e.g., ensemble weather forecasts).
         - Different model configurations (e.g., variations in physics schemes).
@@ -43,7 +47,7 @@ The dimensions of the data model are:
          - Temperature (may need its own vertical temperature profile spacing)
     * Notes: This hierarchical structure ensures that the layers are indexed within each profile and realization.
 5. Scalar information:
-    * Stores profile-level (not layer-specific) scalar data, such as total snow height, etc.
+    * Stores profile-level (not layer-specific) scalar data, such as total snow height, etc. It also includes the weather forcing.
     * Notes: Scalars are aggregated values or summary metrics for the profile as a whole.
 
 To sum up, at a specific *location* and *time*, you may have one or more *realizations* (optional, depending on the scenario). Each realization represents a complete or partial snow profile, which includes *layer* information (e.g., height, density, etc.) and *scalar* information (e.g., total snow height, etc.). The data structure will be implemented as `xarray.Dataset`.
