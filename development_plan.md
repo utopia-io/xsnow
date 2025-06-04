@@ -22,39 +22,68 @@ This project addresses a major development gap that hinders not only the scalabi
 ## Internal data model
 Unlike data models that treat each snow profile as an independent object, the proposed model is built on a gridded data structure organized along several dimensions. This structure leverages the high-performance library `xarray` to enable efficient vectorized operations, memory management (e.g., lazy loading and batch processing), and scalability. Metadata---including units, variable descriptions, time zones, and coordinate reference systems---can be embedded to ensure data consistency and ease of use.
 
+In the proposed data model, every dimension is strictly one-dimensional (1D). However, each dimension can be associated with one or more coordinate variables—additional 1D arrays that describe metadata or spatial context (e.g., easting, northing, altitude for the location dimension). This approach keeps the number of dimensions fixed while supporting a wide range of different application cases.
+
 The dimensions of the data model are:
 
-1. Geographic location:
-    * Specifies the location of the snow profile, defined by 1D to 3D coordinates (e.g., station ID, x/y/z, latitude/longitude/altitude).
-    * Notes: Ensure flexibility to accommodate point locations (e.g., a weather station) and gridded domains (e.g., a spatially distributed model).
-2. Time:
+1. Geographic `location`:
+    * Specifies the location of the snow profile, further characterized by the coordinates `locationID`, `latitude`, `longitude`, `easting`, `northing`, `altitude` (which are all optional).
+    * This setup ensures flexibility to accommodate point locations (e.g., irregular station networks), semi-distributed configurations of topographical classes, and fully-distributed domains (e.g., triangular/hexagonal terrain-adaptive meshes, and regular grids).
+    * While this representation is highly flexible, it is not optimal for spatial analyses or map-based visualizations out-of-the-box. To enable 2D spatial plotting or gridded analysis (e.g., of snow surface variables like depth or liquid water content), scalar data variables will first need to be reshaped into 2D grids. See Section on Data manipulation and basic postprocessing for further information.
+2. `time`:
     * Represents the specific point in time for which the snow profile or observation is valid.
-    * Notes: Allow for datetime objects with flexible time resolutions (e.g., hourly, daily, etc).
-3. Virtual slopes (optional dimension):
-    * Represents different slope angles/azimuth at the same location and time
-    * This dimension is optional and is trivial when there is only one combination of angle/azimuth.
-    * Is one dimension `vslopes` enough to catch different combinations of angles/azimuth, or do we want two separate dimensions?
-4. Realization instances (optional dimension):
-    * Represents different realizations of the snow profile at the same location and time, such as outputs from:
+    * A NumPy array (datetime64[ns]) allows for convenient handling of datetimes with flexible resolutions (e.g., hourly, daily, etc).
+3. `slope`:
+    * This dimension can (optionally) stratify between different slope and azimuth angles at the same location and time by leveraging the coordinate variables 
+        - `inclination` (from horizontal)
+        - `azimuth` (orientation from north; e.g., 180° = south).
+    * When there is only one angle and azimuth, this case becomes trivial (lengths 1). With several slopes present in the dataset, convenient filtering will be possible (e.g., `ds.sel(slope=(ds.inclination == 30) & (ds.azimuth == 180))`)
+4. `realization` instances:
+    * This dimension can represent different realizations of the snow profile at the same location and time, such as outputs from:
         - Different weather inputs (e.g., ensemble weather forecasts).
         - Different model configurations (e.g., variations in physics schemes).
-        - Observed versus simulated profiles.
-    * Notes: This dimension is optional and should only be included if multiple realizations exist.
-4. Profile structure (i.e, snow layers):
-    * A hierarchical dimension within each realization that represents multiple layers in the snowpack. Each layer contains attributes specific to a single layer, such as:
-         - Height (& depth)
-         - Density, grain size, ...
-         - Temperature (may need its own vertical temperature profile spacing)
-    * Notes: This hierarchical structure ensures that the layers are indexed within each profile and realization.
-5. Scalar information:
-    * Stores profile-level (not layer-specific) scalar data, such as total snow height, etc. It also includes the weather forcing.
-    * Notes: Scalars are aggregated values or summary metrics for the profile as a whole.
+        - Observed versus simulated profiles
+        - Different subgrid surface cover types (e.g., forest, open glades, etc.).
+    * Using this dimension is optional, and the trivial case has only one realization.
+    * The coordinate variable `realization` will be stored as integer array, and the description of each integer will be stored as attribute (by the read functions, or manually post-reading).
+        - For example: `ds["realization"].attrs["mapping"] = {1: "manual", 2: "simulated"}`
+        - A custom labels accessor will allow the user to unambiguously translate realization integers to human-readable labels (e.g., `ds["realization"].labels.get()`).
+4. `layer` (i.e, the snow stratigraphy):
+    * For every location, time, slope, and realization, there is snow stratigraphy data. Each layer contains attributes specific to a single layer, such as:
+         - Height/depth information expressed as `z` (zero at snow surface, negative downward, positive upward)
+         - Density, grain size, temperature, ...
+    * Any layer attribute will per default refer to the `z` array, but can be pointed to any other vertical reference (e.g., `temperature` could refer to `z_temperature`).
+        - This re-directing of the vertical reference to another variable will have to be stored in the variable attributes (e.g., `ds["temperature"].attrs("vertical_reference") = "z_temperature"`) by the read function.
+        - A custom `z` accessor will ensure that the user can always unambiguously extract the correct vertical reference for their variable of interest (e.g., `ds["temperature"].z.get()` will return the corresponding values from `z_temperature`).
+    * Categorical data variables, like grain types, will be encoded numerically for efficiency reasons. Analogously to mentioned before, the code descriptions will be stored as attribute and can conveniently be queried by the user through the labels accessor (e.g., `ds["grain_code"].labels.get()` would return "PP", "DF", etc.) 
+5. `scalar` information:
+    * Stores profile-level (not layer-specific) scalar data. Scalars are aggregated values or summary metrics for the profile as a whole. For example, total snow height, etc. This dimension can include forcing data and any scalar output.
 
-To sum up, at a specific *location* and *time*, you may have one or more *realizations* (optional, depending on the scenario). Each realization represents a complete or partial snow profile, which includes *layer* information (e.g., height, density, etc.) and *scalar* information (e.g., total snow height, etc.). The data structure will be implemented as `xarray.Dataset`.
+To sum up, at a specific *location* and *time*, you may have one or more *realizations*. Each realization represents a complete or partial snow profile, which includes *layer* information (e.g., height, density, etc.) and *scalar* information (forcing and scalar ouput, such as total snow height, etc.). The data structure will be implemented as `xarray.Dataset`.
 
 
-###### Comment on dataset sparsity
-Snow profiles inherently contain different numbers of layers, and layer numbers will vary throughout the season. The dataset will therefore include NaN values for missing layers in profiles with fewer layers. xarray handles NaN values gracefully in vectorized operations to keep impact on processing efficiency minimal. Therefore, while the resulting dataset may appear sparse, the benefits of regular gridding---such as fast read times and streamlined analysis---far outweigh the drawbacks.
+#### Dataset sparsity
+Snow profiles naturally vary in the number of layers they contain, and this number changes over time (e.g., accumulating in winter, decreasing during melt). To maintain a regular gridded structure, all profiles will be padded to a common maximum number of layers using NaN values where no data exists. For some variables (e.g., layer thickness), padding may use 0 instead of NaN to simplify specific analyses.
+
+For example, a dataset with 300 profiles may contain up to 220 layers per profile, but be stored in a fixed array of shape (location, time, slope, realization, layer) with up to 250 layers, and missing entries padded accordingly.
+
+xarray and NumPy handle NaN padding efficiently in vectorized operations, so the impact on performance is minimal—particularly compared to the overhead of managing irregular objects or nested structures. While the resulting dataset may appear sparse, this regularity allows for fast Input/Output, compatibility with NetCDF, simplified filtering, and highly efficient batch processing. The small trade-off in memory overhead is well worth the gain in usability and interoperability.
+
+#### Profile status tracking
+To distinguish between locations or time steps with no snow and those with no available data, the dataset will include an integer variable `profile_status`, aligned with the (location, time, slope, realization) dimensions. This variable uses an attribute-based mapping to indicate interpretation: `{
+    0: "no data",
+    1: "valid profile, no snow",
+    2: "valid profile with snow"
+}`
+
+
+#### Class implementation
+The data model will be implemented as a custom class that wraps `xarray.Dataset` via composition. A private initialization method will be used internally by all file parsers to standardize and annotate the dataset upon creation. This ensures key validations and metadata assignments are applied consistently, while preserving compatibility with lazy loading. More advanced validation routines can be exposed through a public method if needed. This design is modular, extensible, and future-proof—allowing new methods and features to be added without interfering with the underlying data structure.
+
+#### Metadata: Staying future-proof
+International efforts are on the way to establish new standards for a geospatial data format, GeoZarr (see [Open Geospatial Consortium](https://www.ogc.org/announcement/ogc-forms-new-geozarr-standards-working-group-to-establish-a-zarr-encoding-for-geospatial-data/)), which may replace NetCDF in the future. By building on xarray, we are already working towards compatibility. For full compliance, the data model needs to be annotated with CF-style metadata, in particular spatial metadata (i.e., a `crs` attribute) and at least metadata for each coordinate variable.
+
+During implementation, a closer look into the Inishell metadata annotations will provide further guidance as to what metadata to encourage in this project.
 
 ---
 ## Input/Output parsers
