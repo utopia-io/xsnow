@@ -84,10 +84,29 @@ To distinguish between locations or time steps with no snow and those with no av
 #### Class implementation
 The data model will be implemented as a custom class that wraps `xarray.Dataset` via composition. A private initialization method will be used internally by all file parsers to standardize and annotate the dataset upon creation. This ensures key validations and metadata assignments are applied consistently, while preserving compatibility with lazy loading. More advanced validation routines can be exposed through a public method if needed. This design is modular, extensible, and future-proof—allowing new methods and features to be added without interfering with the underlying data structure.
 
+The initialization routine needs to initialize a fixed number of layers, which should be set to one of i) a default value, ii) the maximum number of layers in the dataset to be read, iii) a user-provided value. The user needs to be able to strategically decide on how often to grow the dataset, such as in operational contexts where profiles may grow layers each day.
+
 #### Metadata: Staying future-proof
 International efforts are on the way to establish new standards for a geospatial data format, GeoZarr (see [Open Geospatial Consortium](https://www.ogc.org/announcement/ogc-forms-new-geozarr-standards-working-group-to-establish-a-zarr-encoding-for-geospatial-data/)), which may replace NetCDF in the future. By building on xarray, we are already working towards compatibility. For full compliance, the data model needs to be annotated with CF-style metadata, in particular spatial metadata (i.e., a `crs` attribute) and at least metadata for each coordinate variable.
 
 During implementation, a closer look into the Inishell metadata annotations will provide further guidance as to what metadata to encourage in this project.
+
+
+#### Naming convention of data variables
+While the names of the dimensions, coordinate variables, and a few other variables (like `z`) have already been decided on, there are many data variables that need to be named. This package will maintain a canonical registry of variable names that will list every variable that our package "knows" along with its *aliases*, *CF standard names*, and *SI units*. Each read routine will rename all aliases of data variables that it finds in a file to their canonical names and attach standard names and units as attributes.
+
+Upon start of the package implementation, this registry will grow naturally until a community decision on canonical names and relevant aliases needs to be made (before first official release).
+
+```python
+# Example of name registry.py
+registry = {
+    "density": {
+        "aliases"      : ["density", "rho", "rho_snow"],
+        "standard_name": "mass_density_of_snow",
+        "si_units"     : "kg m-3"
+    }
+}
+```
 
 ---
 ## Input/Output parsers
@@ -432,5 +451,63 @@ After reading a dataset, the user should be able to verify
 ### Snow-cover postprocessing
 
 Lastly, to illustrate the power of the gridded data structure, the package will implement a small selection of simple postprocessing routines, such as analytical stability indices and snowpack metrics (e.g., change of 24 hour snow height, slab density, liquid water content index, etc.).
+
+### Tabular data inspection
+Users need to be able look at the raw data in convenient ways. We will fully rest on `xarray` and `pandas` to create these tabular views for us.
+
+xarray displays high-level summaries of multi-dimensional datasets and their attributes, so that users understand the dimensions of their selected data subset. For example,
+
+```python
+# Subset a full timeseries from one specific location
+ds_sub = ds.sel(location="DAVOS", slope=0, realization=0)
+print(ds_sub)
+# <xarray.Dataset>
+# Dimensions:      (location: 1, time: 10, slope: 1, realization: 1, layer: 50)
+# Coordinates:
+#   * location     (location) object 'DAVOS'
+#   * time         (time) datetime64[ns] 2025-01-01 2025-01-02 ... 2025-01-10
+#   * slope        (slope) int64 0
+#   * realization  (realization) int64 0
+#   * layer        (layer) int64 0 1 2 3 4 ... 49
+
+# Data variables:
+#     HS           (location, time, slope, realization) float32 ...
+#     density      (location, time, slope, realization, layer) float32 ...
+#     temperature  (location, time, slope, realization, layer) float32 ...
+
+# Attributes:
+#     ...
+```
+
+pandas can nicely visualize spreadsheet-like tables for layers and their properties or timeseries of scalars. For example,
+
+```python
+# Inspect a layers dataframe
+ds_sub = ds.sel(location="DAVOS", time="2025-01-01", slope=0, realization=0)
+df = ds_sub.squeeze().to_dataframe()
+print(df)
+#               z     temperature    ...
+# Layer                                                   
+# 0           -50.0       -0.20    
+# 1           -47.6       -0.95    
+# 2           -43.2       -2.80    
+# …             …          …       
+# 49            0.0      -10.05    
+```
+
+### Visualization
+Although not a focus of this package, some visualization tools need to be provided to users to ensure they can inspect their data graphically.
+
+#### Profile viewer
+To view individual stratigraphy profiles and their timeseries after subsetting a larger dataset to a single profile, two alternatives appear viable:
+
+1. [NiViz](https://niviz.org/) could be harnessed to create interactive plots as being done in the AWSOME framework [here](https://gitlab.com/avalanche-warning/visualization/niviz).
+
+2. [snowpat](https://pypi.org/project/snowpat/)'s plotting functionality could be borrowed. Either snowpat could be enhanced to plot this packages data format (one single profile as `xarray.Dataset`), or this package could facilitate converting one single profile to snowpat's data format.
+
+#### 2D map views
+As mentioned earlier, the 1D representation of geographic location does not allow plotting of 2D maps out of the box. Since the 2D information is provided through coordinate variables, scalar data variables can be easily reshaped for regular spatial configurations. In the case of irregular polygonal domains (e.g., variable-resolution meshes), user-provided geometry files (e.g., GeoJSON, Shapefile) are required. This package will implement the reshaping routines, so that users can plot their maps using geopandas, xarray, or other libraries in a straightforward way.
+
+
 
 
