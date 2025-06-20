@@ -1,9 +1,45 @@
 # An Open-Source Collaborative Python Package for Parsing Snow Cover Simulations
+
+## Contents
+
+ 1. [Background](#background)
+     1. Objective
+     2. Novelty
+     3. Stakeholders and project collaborators
+ 2. [Internal data model](#internal-data-model)
+    1. Dimensions
+    2. Data sparsity
+    3. Profile status tracking
+    4. Class implementations
+    5. Metadata: Staying future-proof
+    6. Naming convention of data variables
+ 3. [Input/Output parsers](#inputoutput-parsers)
+    1. Read function signatures
+        1. SNOWPACK formats
+        2. CROCUS formats
+        3. This package's file format
+        4. Manual observations
+        5. High-level wrapper
+        6. Validating while parsing
+    2. Write functions
+4. [Data manipulation and basic postprocessing](#data-manipulation-and-basic-postprocessing)
+    1. Subsetting and filtering
+    2. Concatenating and merging
+    3. Validating
+    4. Snow-cover postprocessing
+    5. Tabular data inspection
+    6. Visualization
+        1. Profile viewer
+        2. 2D map views
+5. [Additional package requirements](#additional-package-requirements)
+    1. Documentation and tutorials
+    2. Package integrity: tests
+
 ---
 ## Background
-One-dimensional snow cover models, such as SNOWPACK and CROCUS, simulate the stratigraphy of the seasonal snow cover. These models offer an opportunity for avalanche warning services to complement traditional, often sparse, information sources and provide an independent second opinion. Recent years have seen exciting developments in this field, with several community-driven initiatives gaining momentum. Notably, the international working group [AvaCollabra](www.avacollabra.org) and the open-source software framework [AWSOME](https://gitlab.com/avalanche-warning) demonstrate concerted efforts to collaboratively advance the development and applications of these models.
+One-dimensional snow cover models, such as SNOWPACK and CROCUS, simulate the stratigraphy of the seasonal snow cover. These models offer an opportunity for avalanche warning services to complement traditional, often sparse, information sources and provide an independent second opinion. Recent years have seen exciting developments in this field, with several community-driven initiatives gaining momentum. Notably, the international working group [AvaCollabra](www.avacollabra.org) and the open-source software framework [AWSOME](https://gitlab.com/avalanche-warning) demonstrate concerted efforts to collaboratively advance the development and applications of these models. Inspired by recent research developments, avalanche warning services around the world have invested in the new technology and are drafting ambitious visions for their operational modeling suites, working towards semi-automation and gridded products. 
 
-Inspired by recent research developments, avalanche warning services around the world have invested in the new technology and are drafting ambitious visions for their operational modeling suites, working towards semi-automation and gridded products. Collaboration on common processing pipelines has started with AWSOME, which offers solutions for preprocessing weather inputs, running snowpack simulations, postprocessing the raw simulations, and visualizing the results. However, there is currently no widely adopted software package that standardizes the link between raw snow cover simulation outputs and postprocessing algorithms. Currently, every stakeholder has developed their own set of parsers, almost exclusively using inefficient text-based data files and non-vectorized data models (with the exception of Meteo France). This fundamentally limits the operational, large-scale application of these simulations, particularly in large forecasting regions or for moving towards high-resolution or ensemble simulations. In addition, sharing new postprocessing algorithms among different stakeholders is currently quite challenging, which makes it difficult and slow to turn research developments into operational applications.
+Collaboration on common processing pipelines has started with AWSOME, which offers solutions for preprocessing weather inputs, running snowpack simulations, postprocessing the raw simulations, and visualizing the results. However, there is currently no widely adopted software package that standardizes the link between raw snow cover simulation outputs and postprocessing algorithms. Currently, every stakeholder has developed their own set of parsers, almost exclusively using inefficient text-based data files and non-vectorized data models (with the exception of Meteo France). This fundamentally limits the operational, large-scale application of these simulations, particularly in large forecasting regions or for moving towards high-resolution or ensemble simulations. In addition, sharing new postprocessing algorithms among different stakeholders is currently quite challenging, which makes it difficult and slow to turn research developments into operational applications.
 
 
 ### Objective
@@ -18,10 +54,16 @@ The general scope of the package focuses on simulated snow profiles, with the op
 ### Novelty
 This project addresses a major development gap that hinders not only the scalability of operational modeling efforts but also the exchange of postprocessing algorithms among different researchers and avalanche warning agencies. Through collaborative development, this project ensures that the needs of all types of stakeholders are met which is critical for wide acceptance of the package. This software implementation will establish the technical groundwork for efficiently analyzing snow cover simulations across large domains. Moreover, it will provide a clear interface for SNOWPACK maintainers to develop output plugins, such as NetCDF writers, to directly support gridded data structures. This forward-looking capability will further enhance efficiency in future applications.
 
+### Stakeholders and project collaborators
+This development project is driven by a working group in AvaCollabra and supported by major stakeholders at the interface of snowpack modeling and avalanche forecasting, such as the SLF, Meteo France, Avalanche Canada, Colorado Avalanche Information Center, Avalanche Warning Service Tyrol, NVE, SFU avalanche research program, and more.
+
+[[Back to table of contents](#contents)]
+
 ---
 ## Internal data model
 Unlike data models that treat each snow profile as an independent object, the proposed model is built on a gridded data structure organized along several dimensions. This structure leverages the high-performance library `xarray` to enable efficient vectorized operations, memory management (e.g., lazy loading and batch processing), and scalability. Metadata---including units, variable descriptions, time zones, and coordinate reference systems---can be embedded to ensure data consistency and ease of use.
 
+### Dimensions
 In the proposed data model, every dimension is strictly one-dimensional (1D). However, each dimension can be associated with one or more coordinate variables—additional 1D arrays that describe metadata or spatial context (e.g., easting, northing, altitude for the location dimension). This approach keeps the number of dimensions fixed while supporting a wide range of different application cases.
 
 The dimensions of the data model are:
@@ -66,14 +108,14 @@ To conclude, at a specific *location* and *time*, you may have one or more *real
 
 
 
-#### Dataset sparsity
+### Dataset sparsity
 Snow profiles naturally vary in the number of layers they contain, and this number changes over time (e.g., accumulating in winter, decreasing during melt). To maintain a regular gridded structure, all profiles will be padded to a common maximum number of layers using NaN values where no data exists. For some variables (e.g., layer thickness), padding may use 0 instead of NaN to simplify specific analyses.
 
 For example, a dataset with 300 profiles may contain up to 220 layers per profile, but be stored in a fixed array of shape (location, time, slope, realization, layer) with up to 250 layers, and missing entries padded accordingly.
 
 xarray and NumPy handle NaN padding efficiently in vectorized operations, so the impact on performance is minimal—particularly compared to the overhead of managing irregular objects or nested structures. While the resulting dataset may appear sparse, this regularity allows for fast Input/Output, compatibility with NetCDF, simplified filtering, and highly efficient batch processing. The small trade-off in memory overhead is well worth the gain in usability and interoperability.
 
-#### Profile status tracking
+### Profile status tracking
 To distinguish between locations or time steps with no snow and those with no available data, the dataset will include an integer variable `profile_status`, aligned with the (location, time, slope, realization) dimensions. This variable uses an attribute-based mapping to indicate interpretation: `{
     0: "no data",
     1: "valid profile, no snow",
@@ -81,18 +123,18 @@ To distinguish between locations or time steps with no snow and those with no av
 }`
 
 
-#### Class implementation
+### Class implementation
 The data model will be implemented as a custom class that wraps `xarray.Dataset` via composition. A private initialization method will be used internally by all file parsers to standardize and annotate the dataset upon creation. This ensures key validations and metadata assignments are applied consistently, while preserving compatibility with lazy loading. More advanced validation routines can be exposed through a public method if needed. This design is modular, extensible, and future-proof—allowing new methods and features to be added without interfering with the underlying data structure.
 
 The initialization routine needs to initialize a fixed number of layers, which should be set to one of i) a default value, ii) the maximum number of layers in the dataset to be read, iii) a user-provided value. The user needs to be able to strategically decide on how often to grow the dataset, such as in operational contexts where profiles may grow layers each day.
 
-#### Metadata: Staying future-proof
+### Metadata: Staying future-proof
 International efforts are on the way to establish new standards for a geospatial data format, GeoZarr (see [Open Geospatial Consortium](https://www.ogc.org/announcement/ogc-forms-new-geozarr-standards-working-group-to-establish-a-zarr-encoding-for-geospatial-data/)), which may replace NetCDF in the future. By building on xarray, we are already working towards compatibility. For full compliance, the data model needs to be annotated with CF-style metadata, in particular spatial metadata (i.e., a `crs` attribute) and at least metadata for each coordinate variable.
 
 During implementation, a closer look into the Inishell metadata annotations will provide further guidance as to what metadata to encourage in this project.
 
 
-#### Naming convention of data variables
+### Naming convention of data variables
 While the names of the dimensions, coordinate variables, and a few other variables (like `z`) have already been decided on, there are many data variables that need to be named. This package will maintain a canonical registry of variable names that will list every variable that our package "knows" along with its *aliases*, *CF standard names*, and *SI units*. Each read routine will rename all aliases of data variables that it finds in a file to their canonical names and attach standard names and units as attributes.
 
 Upon start of the package implementation, this registry will grow naturally until a community decision on canonical names and relevant aliases needs to be made (before first official release).
@@ -108,6 +150,8 @@ registry = {
 }
 ```
 
+[[Back to table of contents](#contents)]
+
 ---
 ## Input/Output parsers
 The package will provide read and write routines for various file formats. Hence, the internal data model can be populated by and saved as:
@@ -117,7 +161,6 @@ The package will provide read and write routines for various file formats. Hence
 * CAAML SnowProfile format and its JSON representation: Formats used for manual snow profile observations or snow penetrometer measurements. Implementation through brandnew [Meteo FR package](https://github.com/UMR-CNRM/snowprofile/).
 * Custom NetCDF: Optimized for the package's internal data structure.
 
-### API
 The API will follow conventions used by `pandas` and `xarray` by designing *read function* and *write methods*. `read_*()` functions will return a simulation dataset (i.e., `xarray.Dataset`), whereas write methods `.to_*()` applicable to the dataset will allow writing to disk.
 
 On an abstract level, file conversion could therefore look like this:
@@ -130,7 +173,7 @@ ds = read_pro("example.pro")
 ds.to_netcdf("output.nc")
 ```
 
-#### Read function signatures
+### Read function signatures
 The main focus will lie on read functions for SNOWPACK and CROCUS formats, while providing a basic functionality to read CAAML and JSON formats. A read and write routine for a custom NetCDF file that resembles this package's data structure will also be included. 
 
 While this package strives to separate basic tasks into different routines (e.g., reading versus subsetting versus validating), the read functions will contain some subsetting capabilities to optimize efficiency. The parsers for text-based SNOWPACK formats will allow for simple time subsetting. The parsers of binary dataset files will allow for subsetting all main dimensions. For convenience, there will be a high-level `read` routine that can automatically choose the appropriate parser and will also allow for subsetting all main dimensions.
@@ -142,7 +185,7 @@ import datetime
 import xarray
 from typing import Optional, Union, Sequence
 ```
-##### SNOWPACK formats
+#### SNOWPACK formats
 ```python
 def read_pro(
     filepath: str,
@@ -192,7 +235,7 @@ def read_smet(
     pass
 ```
 
-##### CROCUS formats
+#### CROCUS formats
 Similarly to SNOWPACK's PRO and SMET files, the forcing and output data of CROCUS simulations may also be stored in two separate files. For more information, consult Leo Viallon-Galinier.
 ```python
 def read_crocus(filepath: Union[str, Sequence[str]],
@@ -228,7 +271,7 @@ def read_crocus(filepath: Union[str, Sequence[str]],
     pass
 ```
 
-##### This package's file format
+#### This package's file format
 ```python
 def read_netcdf(filepath: Union[str, Sequence[str]],
                 *,
@@ -292,7 +335,7 @@ def read_netcdf(filepath: Union[str, Sequence[str]],
     return(ds)
 ```
 
-##### Manual observations
+#### Manual observations
 ```python
 def read_caaml(filepath: str) -> xarray.Dataset:
     # Implementation through PyPi package snowprofile
@@ -304,7 +347,7 @@ def read_json(filepath: str) -> xarray.Dataset:
     pass
 ```
 
-##### High-level wrapper
+#### High-level wrapper
 There will also be a wrapper that can read multiple files and formats into a single dataset. This wrapper will allow for convenient subsetting of the main dimensions. 
 
 ```python
@@ -368,18 +411,20 @@ def read(
     pass
 ```
 
-##### Validating while parsing
+#### Validating while parsing
 The parsers should only throw an error when they cannot read the file. Other validations (such as usage of SI units, physical consistency, etc.) should be validated by a post-processing method.
 
 In case of a corrupt file, the error message should point to the file, location in the file, timestamp that prevents the reading. Possibly, a boolean argument could be added to the parsers that allows the user to `ignore_corrupt_entries` and read the remaining data.
 
-#### Write function signatures
+### Write functions
 For most `read_*()` functions, there will be an equivalent `.to_*()` method: 
  
  * `.to_crocus()`
  * `.to_netcdf()`
  * `.to_pro()`, `.to_smet()` 
     - If more than one profile in dataset, this will create multiple files. Hence, allow to provide directory name instead of filename.
+
+[[Back to table of contents](#contents)]
 
 ---
 ## Data manipulation and basic postprocessing
@@ -442,7 +487,7 @@ ds_merged = xr.merge([ds_old, ds_new], compat="override", join="inner")
 
 ```
 
-### Validation
+### Validating
 After reading a dataset, the user should be able to verify
 
  * whether all units are in SI units (see Meteo France's snowprofile package),
@@ -508,6 +553,21 @@ To view individual stratigraphy profiles and their timeseries after subsetting a
 #### 2D map views
 As mentioned earlier, the 1D representation of geographic location does not allow plotting of 2D maps out of the box. Since the 2D information is provided through coordinate variables, scalar data variables can be easily reshaped for regular spatial configurations. In the case of irregular polygonal domains (e.g., variable-resolution meshes), user-provided geometry files (e.g., GeoJSON, Shapefile) are required. This package will implement the reshaping routines, so that users can plot their maps using geopandas, xarray, or other libraries in a straightforward way.
 
+[[Back to table of contents](#contents)]
+
+---
+## Additional package requirements
+### Documentation and tutorials
+The users of this package will range from students to IT developers of warning agencies. All public-facing routines need to be well-documented and equipped with examples using sample data shipped with the package. In addition, several short tutorials will be necessary to demonstrate common workflows and problem solutions.
+
+We will maintain a `docs/` folder at the repo root, with a `tutorials/` subdirectory containing Jupyter notebooks or MyST-Markdown files. Authors can easily drop in small, copy-and-paste code snippets as they develop, so tutorials grow organically alongside the code.
+
+When the content is ready for publication, we’ll build the site using Sphinx/Jupyter-Book. The resulting static HTML can be hosted on Read the Docs or on our own domain via GitLab Pages, giving us full flexibility in how and where we deploy.
 
 
+### Package integrity: tests
+We will maintain a `tests/` folder at the repo root, with subdirectories for unit and integration tests and a `tests/data/` directory holding small, versioned sample files. Tests will be written in `pytest`, using fixtures to load those samples and exercise each parser, accessor, and core method. In addition, we will enable doctests so that the code examples embedded in our docstrings are automatically verified as part of the test run—making it just as easy to copy-and-paste working examples into tests as into tutorials.
 
+On every commit and pull request, a CI pipeline will invoke `pytest` (including doctests) to ensure full coverage and catch regressions early. This setup guarantees package integrity, provides fast feedback to developers, and builds confidence that both the core logic and the documented examples remain correct as the project evolves.
+
+[[Back to table of contents](#contents)]
