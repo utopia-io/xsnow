@@ -37,7 +37,7 @@
 
 ---
 ## Background
-One-dimensional snow cover models, such as SNOWPACK and CROCUS, simulate the stratigraphy of the seasonal snow cover. These models offer an opportunity for avalanche warning services to complement traditional, often sparse, information sources and provide an independent second opinion. Recent years have seen exciting developments in this field, with several community-driven initiatives gaining momentum. Notably, the international working group [AvaCollabra](www.avacollabra.org) and the open-source software framework [AWSOME](https://gitlab.com/avalanche-warning) demonstrate concerted efforts to collaboratively advance the development and applications of these models. Inspired by recent research developments, avalanche warning services around the world have invested in the new technology and are drafting ambitious visions for their operational modeling suites, working towards semi-automation and gridded products. 
+One-dimensional snow cover models, such as SNOWPACK and CROCUS, simulate the stratigraphy of the seasonal snow cover. These models offer an opportunity for avalanche warning services to complement traditional, often sparse, information sources and provide an independent second opinion. Recent years have seen exciting developments in this field, with several community-driven initiatives gaining momentum. Notably, the international working group [AvaCollabra](https://avacollabra.org) and the open-source software framework [AWSOME](https://gitlab.com/avalanche-warning) demonstrate concerted efforts to collaboratively advance the development and applications of these models. Inspired by recent research developments, avalanche warning services around the world have invested in the new technology and are drafting ambitious visions for their operational modeling suites, working towards semi-automation and gridded products. 
 
 Collaboration on common processing pipelines has started with AWSOME, which offers solutions for preprocessing weather inputs, running snowpack simulations, postprocessing the raw simulations, and visualizing the results. However, there is currently no widely adopted software package that standardizes the link between raw snow cover simulation outputs and postprocessing algorithms. Currently, every stakeholder has developed their own set of parsers, almost exclusively using inefficient text-based data files and non-vectorized data models (with the exception of Meteo France). This fundamentally limits the operational, large-scale application of these simulations, particularly in large forecasting regions or for moving towards high-resolution or ensemble simulations. In addition, sharing new postprocessing algorithms among different stakeholders is currently quite challenging, which makes it difficult and slow to turn research developments into operational applications.
 
@@ -64,17 +64,23 @@ This development project is driven by a working group in AvaCollabra and support
 Unlike data models that treat each snow profile as an independent object, the proposed model is built on a gridded data structure organized along several dimensions. This structure leverages the high-performance library `xarray` to enable efficient vectorized operations, memory management (e.g., lazy loading and batch processing), and scalability. Metadata---including units, variable descriptions, time zones, and coordinate reference systems---can be embedded to ensure data consistency and ease of use.
 
 ### Dimensions
-In the proposed data model, every dimension is strictly one-dimensional (1D). However, each dimension can be associated with one or more coordinate variables—additional 1D arrays that describe metadata or spatial context (e.g., easting, northing, altitude for the location dimension). This approach keeps the number of dimensions fixed while supporting a wide range of different application cases.
+In the proposed data model, every dimension is strictly one-dimensional (1D). However, each dimension can be associated with one or more coordinate variables—additional 1D arrays that describe metadata or spatial context (for example, the `location` dimension can have coordinates latitude and longitude). This approach keeps the number of dimensions fixed while supporting a wide range of different application cases.
 
 The dimensions of the data model are:
 
 1. Geographic `location`:
     * Specifies the location of the snow profile, further characterized by the coordinates `locationID`, `latitude`, `longitude`, `easting`, `northing`, `altitude` (which are all optional).
+    * `location` will be stored as integer array, while labels can optionally be stored as attributes (see dimension `realization` further below for more details).
     * This setup ensures flexibility to accommodate point locations (e.g., irregular station networks), semi-distributed configurations of topographical classes, and fully-distributed domains (e.g., triangular/hexagonal terrain-adaptive meshes, and regular grids).
     * While this representation is highly flexible, it is not optimal for spatial analyses or map-based visualizations out-of-the-box. To enable 2D spatial plotting or gridded analysis (e.g., of snow surface variables like depth or liquid water content), scalar data variables will first need to be reshaped into 2D grids. See Section on Data manipulation and basic postprocessing for further information.
 2. `time`:
     * Represents the specific point in time for which the snow profile or observation is valid.
     * A NumPy array (datetime64[ns]) allows for convenient handling of datetimes with flexible resolutions (e.g., hourly, daily, etc).
+    * The time coordinate remains **timezone-naive** to keep on-disk data simple and serializable. However, to prevent ambiguity, we record the intended timezone in the time metadata on dataset creation or parsing: for example, `ds["time"].attrs["timezone"] = "UTC"`
+    * We will implement a custom `.tz` accessor that makes it easy to turn naive timestamps into a tz-aware DatetimeIndex, making use of the timezone stored as attribute. A user workflow could then look like this, for example:
+        - Create timezone-aware array using tz accessor: `time_tz_utc = ds["time"].tz.localize()`, cf. [pandas.Series.tz_localize](https://pandas.pydata.org/docs/reference/api/pandas.Series.tz_localize.html)
+        - Convert this array to a different timezone: `time_tz_vienna = time_tz_utc.dt.tz_convert("Europe/Vienna")` (this leverages existing `xarray`/`pandas` functionality).
+        - `time_tz_vienna` could subsequently be used to subset the dataset, plot timeseries with labels in other timezones, etc. 
 3. `slope`:
     * This dimension can (optionally) stratify between different slope and azimuth angles at the same location and time by leveraging the coordinate variables 
         - `inclination` (from horizontal)
@@ -91,13 +97,15 @@ The dimensions of the data model are:
         - For example: `ds["realization"].attrs["mapping"] = {1: "manual", 2: "simulated"}`
         - A custom labels accessor will allow the user to unambiguously translate realization integers to human-readable labels (e.g., `ds["realization"].labels.get()`).
 4. `layer` (i.e, the snow stratigraphy):
-    * For every location, time, slope, and realization, there is snow stratigraphy data. Each layer contains attributes specific to a single layer, such as:
+    * For every location, time, slope, and realization, there is snow stratigraphy data. Each layer contains properties specific to a single layer, which are all stored as data variables, such as:
          - Height/depth information expressed as `z` (zero at snow surface, negative downward, positive upward)
+         - Layer thickness (potentially also layer height or depth upon user request through a convenience method)
          - Density, grain size, temperature, ...
-    * Any layer attribute will per default refer to the `z` array, but can be pointed to any other vertical reference (e.g., `temperature` could refer to `z_temperature`).
+    * Any layer property will per default refer to the `z` array, but can be pointed to any other vertical reference (e.g., `temperature` could refer to `z_temperature`).
         - This re-directing of the vertical reference to another variable will have to be stored in the variable attributes (e.g., `ds["temperature"].attrs("vertical_reference") = "z_temperature"`) by the read function.
         - A custom `z` accessor will ensure that the user can always unambiguously extract the correct vertical reference for their variable of interest (e.g., `ds["temperature"].z.get()` will return the corresponding values from `z_temperature`).
     * Categorical data variables, like grain types, will be encoded numerically for efficiency reasons. Analogously to mentioned before, the code descriptions will be stored as attribute and can conveniently be queried by the user through the labels accessor (e.g., `ds["grain_code"].labels.get()` would return "PP", "DF", etc.) 
+        - Grain type mappings will be hardcoded, so that the same `grain_code` will always refer to the same grain type across different datasets. We still need to review existing grain codes (SLF, Meteo France) to determine the mapping for this package.
 5. Scalar information: (not its own dimension, but mentioned for comprehensiveness)
     * Stores profile-level (not layer-specific) scalar data. Scalars are aggregated values or summary metrics for the profile as a whole. For example, total snow height, etc. Scalar data variables can include forcing data and any scalar output.
 
@@ -108,10 +116,22 @@ To conclude, at a specific *location* and *time*, you may have one or more *real
 
 
 
-### Dataset sparsity
-Snow profiles naturally vary in the number of layers they contain, and this number changes over time (e.g., accumulating in winter, decreasing during melt). To maintain a regular gridded structure, all profiles will be padded to a common maximum number of layers using NaN values where no data exists. For some variables (e.g., layer thickness), padding may use 0 instead of NaN to simplify specific analyses.
+### Class implementation
+The data model will be implemented as a custom class that wraps `xarray.Dataset` via composition. A private initialization method will be used internally by all file parsers to standardize and annotate the dataset upon creation. This ensures key validations and metadata assignments are applied consistently, while preserving compatibility with lazy loading. More advanced validation routines can be exposed through a public method if needed. This design is modular, extensible, and future-proof—allowing new methods and features to be added without interfering with the underlying data structure.
 
-For example, a dataset with 300 profiles may contain up to 220 layers per profile, but be stored in a fixed array of shape (location, time, slope, realization, layer) with up to 250 layers, and missing entries padded accordingly.
+
+### Dataset sparsity
+An xarray dataset (and by extension NetCDF) uses a fully gridded model: every combination of coordinate values along each dimension must have an entry, even if no real data exists. For example, if only one out of 100 profiles has a second realization, the other 99 profiles will carry `NaN` for that realization.
+
+In our domain this is most evident along the `layer` axis. Snow profiles naturally grow and shrink over the season, so different profiles have different layer counts. To preserve a regular grid, we pad every profile to a fixed number of layers with `NaN` (or, for some variables like layer thickness, `0`).
+
+The dataset initialization must choose this fixed layer size. We support three strategies:
+
+ 1. Default—use a sensible hard-coded value (e.g. 200 layers).
+ 2. Auto—scan the incoming files and use their maximum layer count.
+ 3. User-supplied—allow callers to specify a custom value.
+
+In operational contexts (where profiles grow daily), users can decide how often to “grow” the dataset: e.g. start with a maximum of 300 layers even if today’s profiles only reach 220, leaving room for 80 more layers before a resize is needed.
 
 xarray and NumPy handle NaN padding efficiently in vectorized operations, so the impact on performance is minimal—particularly compared to the overhead of managing irregular objects or nested structures. While the resulting dataset may appear sparse, this regularity allows for fast Input/Output, compatibility with NetCDF, simplified filtering, and highly efficient batch processing. The small trade-off in memory overhead is well worth the gain in usability and interoperability.
 
@@ -123,15 +143,6 @@ To distinguish between locations or time steps with no snow and those with no av
 }`
 
 
-### Class implementation
-The data model will be implemented as a custom class that wraps `xarray.Dataset` via composition. A private initialization method will be used internally by all file parsers to standardize and annotate the dataset upon creation. This ensures key validations and metadata assignments are applied consistently, while preserving compatibility with lazy loading. More advanced validation routines can be exposed through a public method if needed. This design is modular, extensible, and future-proof—allowing new methods and features to be added without interfering with the underlying data structure.
-
-The initialization routine needs to initialize a fixed number of layers, which should be set to one of i) a default value, ii) the maximum number of layers in the dataset to be read, iii) a user-provided value. The user needs to be able to strategically decide on how often to grow the dataset, such as in operational contexts where profiles may grow layers each day.
-
-### Metadata: Staying future-proof
-International efforts are on the way to establish new standards for a geospatial data format, GeoZarr (see [Open Geospatial Consortium](https://www.ogc.org/announcement/ogc-forms-new-geozarr-standards-working-group-to-establish-a-zarr-encoding-for-geospatial-data/)), which may replace NetCDF in the future. By building on xarray, we are already working towards compatibility. For full compliance, the data model needs to be annotated with CF-style metadata, in particular spatial metadata (i.e., a `crs` attribute) and at least metadata for each coordinate variable.
-
-During implementation, a closer look into the Inishell metadata annotations will provide further guidance as to what metadata to encourage in this project.
 
 
 ### Naming convention of data variables
@@ -149,6 +160,12 @@ registry = {
     }
 }
 ```
+
+### Metadata: Staying future-proof
+International efforts are on the way to establish new standards for a geospatial data format, GeoZarr (see [Open Geospatial Consortium](https://www.ogc.org/announcement/ogc-forms-new-geozarr-standards-working-group-to-establish-a-zarr-encoding-for-geospatial-data/)), which may replace NetCDF in the future. By building on xarray, we are already working towards compatibility. For full compliance, the data model needs to be annotated with CF-style metadata, in particular spatial metadata (i.e., a `crs` attribute) and at least metadata for each coordinate variable.
+
+It is not fully determined yet, which additional metadata will need to be supported/injected into our datasets. A closer look into the [Inishell](https://inishell.slf.ch/) project may provide further guidance.
+
 
 [[Back to table of contents](#contents)]
 
@@ -218,7 +235,7 @@ def read_pro(
     pass
 
 ```
-If a surface hoar (SH) layer is present at the surface, SNOWPACK will not include the layer as the topmost layer, but as scalar meta-information. In `read_pro()`, we discard this peculiarity and enforce SH layers at the surface as standalone topmost layer. Since this SH layer won't contain all properties, missing SH properties will default to None in this case. Implementation example: argument `consider_surfacehoar` in `snowpacktools`'s `read_pro` function.
+If a surface hoar (SH) layer is present at the surface, SNOWPACK will not include the layer as the topmost layer, but as scalar meta-information. In `read_pro()`, we discard this peculiarity and enforce SH layers at the surface as standalone topmost layer. Since this SH layer won't contain all properties, missing SH properties will default to `NaN` in this case. Implementation example: argument `consider_surfacehoar` in `snowpacktools`'s `read_pro` function.
 
 ```python
 def read_smet(
@@ -446,7 +463,7 @@ subset = ds.sel(
 )
 
 # Subset for surface layer in each profile using index subsetting:
-surface_index = ds["z"].notnull().argmax("layer")
+surface_index = ds["z"].abs().argmin("layer")
 ds.isel(layer=surface_index)
 ```
 
@@ -509,9 +526,11 @@ print(ds_sub)
 # <xarray.Dataset>
 # Dimensions:      (location: 1, time: 10, slope: 1, realization: 1, layer: 50)
 # Coordinates:
-#   * location     (location) object 'DAVOS'
+#   * location     (location) int64 0
 #   * time         (time) datetime64[ns] 2025-01-01 2025-01-02 ... 2025-01-10
 #   * slope        (slope) int64 0
+#     inclination  (slope) float32 30.0
+#     azimuth      (slope) float32 180.0
 #   * realization  (realization) int64 0
 #   * layer        (layer) int64 0 1 2 3 4 ... 49
 
@@ -521,7 +540,7 @@ print(ds_sub)
 #     temperature  (location, time, slope, realization, layer) float32 ...
 
 # Attributes:
-#     ...
+#     ... any global or variable‐level attrs
 ```
 
 pandas can nicely visualize spreadsheet-like tables for layers and their properties or timeseries of scalars. For example,
