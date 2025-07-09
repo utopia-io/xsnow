@@ -21,11 +21,13 @@
  4. [Open questions, prompts, uncertainties](#open-questions-prompts-uncertainties)
 
 ## Context
+
 ### Objectives
 
- * Extend the base data class to support postprocessed data from large gridded model datasets for use in operational products
- * Develop a generalized data model that shares dimensions with snow profile data but includes key features tailored to postprocessed outputs
- * Provide a flexible, consistent structure for computing, storing, and accessing postprocessed data
+ * Create a common framework for developing post-processing methods
+ * Provide guidelines for building extensions to the `xsnow` Python package
+ * Show how to extend the core xarray data model with custom dimensions and variables for post-processed data
+ * Enable a flexible, consistent structure for computing, storing, and accessing post-processed data
 
 
 ### Requirements
@@ -42,12 +44,14 @@
  2. Adding new data streams and functionality beyond the existing xsnowDataset structure, such as
     * hazard chart data
 
+
  3. Altering the existing base dimensions before applying scenarios 1 or 2, such as
     * aggregating existing locations into polygons before
     * storing regular scalars and/or aggregate layers
 
-Application scenarios 1 & 2 seem most common. Will we need scenario 3? Do we need to store data for scenario 3, or will those views be generated on-the-fly from the non-aggregated data?
+Application scenarios 1 & 2 seem most common. They involve in post-processing individual profiles or layers and the resulting output can be appended to an xsnowDataset.
 
+Application scenario 3 is more complex, as core dimensions may change. Rather than appending output, the suggested approach is to initialize a new xsnowDataset with updated dimensions (e.g., locations may refer to polygons instead of grid points).
 
 [[Back to table of contents](#contents)]
 
@@ -114,6 +118,9 @@ ds = add_HN(ds, window=72)
 [[Back to table of contents](#contents)]
 
 ## Application scenario 2: New data streams and functionality
+
+@Florian this section can more explicitly explain the concept in terms of dimensions/variables, and probably move the overly technical implementation stuff after the easy to follow example
+
 ### Extensions as decorator classes
   * Each postprocessing functionality and resulting data stream is implemented as separate extension.
   * Each extension defines their own **decorator class** that wraps the base xsnowDataset class and
@@ -317,6 +324,18 @@ ds_sub.plot_scatter(stabilityIndex="sk38_rta", problemType="persistent")
 
 
 [[Back to table of contents](#contents)]
+
+#### Clustering
+Some initial ideas:
+ * Add a processing step to assign profiles to groups
+ * Profiles may belong to multiple groups depending on distance measures, clustering methods, or the number of clusters
+ * Use a `cluster` dimension to store grouping information for each profile
+ * Data variables describe each clustering solution (e.g., distance measure, algorithm, number of clusters) and the profile’s result (clusterID, membership probabilities for fuzzy methods)
+ * For simple cases, a single clustering solution could use a scalar `clusterID`
+
+## Application scenario 3: Altering the existing base dimensions before applying scenarios 1 or 2, such as
+
+TODO: provide example of how to initialze new dataset with updated dimensions, could be very simple like averaging HS on a grid into a polygon
 
 ## Open questions, prompts, uncertainties
 * Data variables of newly added dimensions need to adhere to a naming convention to not create duplicates of variables names in the dataset.
