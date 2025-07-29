@@ -26,7 +26,7 @@
 
  * Create a common framework for developing post-processing methods
  * Provide guidelines for building extensions to the `xsnow` Python package
- * Show how to extend the core xarray data model with custom dimensions and variables for post-processed data
+ * Show how to extend the core xarray data model `xsnowDataset` with custom dimensions and variables for post-processed data
  * Enable a flexible, consistent structure for computing, storing, and accessing post-processed data
 
 
@@ -37,11 +37,11 @@
 
 
 ### Application scenarios
- 1. Adding new data variables that perfectly fit into the existing xsnowDataset structure, such as
+ 1. Adding new data variables that perfectly fit into the existing `xsnowDataset` structure, such as
     * Scalars: HN24, HN72, HST, wind runs, etc
     * Layer properties: p_unstable, etc.
 
- 2. Adding new data streams and functionality beyond the existing xsnowDataset structure, such as
+ 2. Adding new data streams and functionality beyond the existing `xsnowDataset` structure, such as
     * hazard chart data
 
 
@@ -49,9 +49,9 @@
     * aggregating existing locations into polygons before
     * storing regular scalars and/or aggregate layers
 
-Application scenarios 1 & 2 seem most common. They involve in post-processing individual profiles or layers and the resulting output can be appended to an xsnowDataset.
+Application scenarios 1 & 2 seem most common. They involve in post-processing individual profiles or layers and the resulting output can be appended to an `xsnowDataset`.
 
-Application scenario 3 is more complex, as core dimensions may change. Rather than appending output, the suggested approach is to initialize a new xsnowDataset with updated dimensions (e.g., locations may refer to polygons instead of grid points).
+Application scenario 3 is more complex, as core dimensions may change. Rather than appending output, the suggested approach is to initialize a new `xsnowDataset` with updated dimensions (e.g., locations may refer to polygons instead of grid points).
 
 [[Back to table of contents](#contents)]
 
@@ -62,15 +62,26 @@ This seems like a rather straightforward scenario with two obvious solutions:
 ### Adding methods directly into the xsnowDataset class
  * Very common and simple-to-compute measures can be directly added as methods to the existing base class.
  * Examples: HN24, wind runs, etc
- * Usage:
+ * Demo usage:
 ```python
 ds = xsnow.read("file.nc")
 ds = ds.compute_HN24()
 ```
 
 ### Providing custom functions in separate modules or packages
- * Less common measures, ML models, etc can be computed through functions provided outside the xsnow package
- * Example implementation of `add_HN()` in a separate module:
+ * Less common measures, ML models, etc can be computed through functions provided outside the `xsnow` package
+ * Demo usage
+
+```python
+import xsnow
+from my_custom_extensions import add_HN
+
+ds = xsnow.read("file.nc")
+ds = add_HN(ds, window=24)
+ds = add_HN(ds, window=72)
+```
+
+ * Demo implementation of `add_HN()` in a separate module:
     - Plain function in custom module
     - Immutability: return a new object, do not alter the existing object in-place
     - Metadata preservation: Units flow automatically
@@ -105,25 +116,15 @@ def add_HN(ds: xsnowDataset_variant, window: int = 24) -> xsnowDataset_variant:
     # 4) wrap back in the same class
     return ds.__class__(ds2_xr)
 ```
- * Usage
-```python
-import xsnow
-from my_custom_extensions import add_HN
-
-ds = xsnow.read("file.nc")
-ds = add_HN(ds, window=24)
-ds = add_HN(ds, window=72)
-```
+ 
 
 [[Back to table of contents](#contents)]
 
 ## Application scenario 2: New data streams and functionality
 
-@Florian this section can more explicitly explain the concept in terms of dimensions/variables, and probably move the overly technical implementation stuff after the easy to follow example
-
 ### Extensions as decorator classes
   * Each postprocessing functionality and resulting data stream is implemented as separate extension.
-  * Each extension defines their own **decorator class** that wraps the base xsnowDataset class and
+  * Each extension defines their own **decorator class** that wraps the base `xsnowDataset` class and
     1. copies the base dataset
     2. extends that copy with an additional dimension and associated data variables
     3. exposes the same interface, so that postprocessing extensions can be chained in any order, and the existing functionality remains plus new functionality contained in each extension is added.
@@ -143,6 +144,32 @@ ds = add_HN(ds, window=72)
   * There is a learning curve to understanding decorator classes and how to implement them
     
 #### Demo implementation
+##### Usage
+```python
+import xsnow
+import xsnow_HCD_extension as xsnow_hcd
+ds = xsnow.read("file.nc")
+ds_ext  = xsnow_hcd.HazardChartData(ds)
+
+# Subset to a single location/time/slope/realization first:
+ds_sub = ds_ext.sel(location=1, slope=0, realization=0,time="2025-01-01")
+
+# Convert to DataFrame (layer dim is automatically dropped because hazard vars don't use it):
+df = ds_sub[["hazard_value","hazard_depth","problemType","stabilityIndex"]].squeeze().to_dataframe()
+print(df)
+#                       problemType stabilityIndex  value   depth   graincode  instabilityDrivenBy 
+# hazardChartElement                                                   
+# 0                     persistent      sk38_rta     0.80    -50.0      123       "2024-01-17"
+# 1                     persistent      punstable    0.87    -47.6      123       "2024-01-17"
+# …                     …          …       
+# 23                    storm           punstable    0.78    -18.5      224       "new_snow"
+## potential additional columns (omitted above): graincode_sec, depthDrivenBy
+```
+```python
+# Plot by element name:
+ds_sub.plot_scatter(stabilityIndex="sk38_rta", problemType="persistent")
+```
+
 
 ##### Base code
 ```python
@@ -271,31 +298,6 @@ class HazardChartData(DatasetDecorator):
         plt.show()
 ```
 
-##### Usage
-```python
-import xsnow
-import xsnow_HCD_extension as xsnow_hcd
-ds = xsnow.read("file.nc")
-ds_ext  = xsnow_hcd.HazardChartData(ds)
-
-# Subset to a single location/time/slope/realization first:
-ds_sub = ds_ext.sel(location=1, slope=0, realization=0,time="2025-01-01")
-
-# Convert to DataFrame (layer dim is automatically dropped because hazard vars don't use it):
-df = ds_sub[["hazard_value","hazard_depth","problemType","stabilityIndex"]].squeeze().to_dataframe()
-print(df)
-#                       problemType stabilityIndex  value   depth   graincode  instabilityDrivenBy 
-# hazardChartElement                                                   
-# 0                     persistent      sk38_rta     0.80    -50.0      123       "2024-01-17"
-# 1                     persistent      punstable    0.87    -47.6      123       "2024-01-17"
-# …                     …          …       
-# 23                    storm           punstable    0.78    -18.5      224       "new_snow"
-## potential additional columns (omitted above): graincode_sec, depthDrivenBy
-```
-```python
-# Plot by element name:
-ds_sub.plot_scatter(stabilityIndex="sk38_rta", problemType="persistent")
-```
 
 ### Desired extensions
 #### Hazard chart data
