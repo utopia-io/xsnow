@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xsnow"
+version = "0.0.1"
+description = "A collaborative Python package for parsing and post-processing snow cover simulations"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Florian Herla", email = "fherla@sfu.ca" },
+  { name = "Ron Simenhois", email = "ron.simenhois@state.co.us" },
+]
+dependencies = [
+  "xarray>=0.20.0",
+  "numpy>=1.22.0",
+  "pandas>=1.4.0",
+]
+keywords = ["snow", "avalanche", "xarray", "post-processing"]
+classifiers = [
+  "License :: OSI Approved :: GNU Affero General Public License v3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage"      = "https://gitlab.com/avacollabra/postprocessing/xsnow"
+"Documentation" = "https://gitlab.com/avacollabra/postprocessing/xsnow"
+"Repository"    = "https://gitlab.com/avacollabra/postprocessing/xsnow"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}

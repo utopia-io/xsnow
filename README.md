@@ -1,23 +1,25 @@
-# AvaCollabra subgroup on py-postprocessing
+# AvaCollabra subgroup on post-processing snow cover simulations
 
-This project aims to collaborate on a python base package to work with snow profile data. To explore this potential, we narrow our current focus to basic data classes that are necessary to parse (I/O) standard file formats and perform basic data manipulation.
+This project aims to collaborate on a python base package `xsnow` to parse and post-process snow cover simulations.
 
 The general scope of the package focuses on simulated snow profiles with the option to handle observed profiles to initiate simulations. We want to design the package to cater to both operational and research needs. It should therefore balance an intuitive implementation to maximize accessibility with efficient processing to allow for operational application in mid-sized agencies and mature research projects.
 
+Read the [development plan](development_plan.md) and [extension strategy](postprocessing_extensions.md) for more detailed information.
+
 ## Current status
 
-At ISSW in Tromso (Sep 2024), a small group of members discussed and decided on the internal data model for the envisioned package. A resulting draft can be found in [development_plan.md](development_plan.md) and is currently being reviewed by the members. Please give your feedback either in (i) gitlab issues, (ii) line comments of the recent draft commit, or (iii) modify the document and issue a merge request, whatever is easier for you.
+The implementation has started! Ron Simenhois (CAIC), Bryce Schroers (Avalanche Canada), Florian Herla, and Simon Horton are working towards a first prototype.  
 
-### Initial code dump
-
-Please consider following thoughts if you want to upload/share code:
-
-* Please organize the repository in subdirectories so we can maintain a good overview.
-* Please include a README for the code you share that explains how it could be useful for the project.
-    - Include a gitlab handle or email address so you can be reached.
-
+We still welcome feedback on our general strategy, please reach out via email or (better) start a gitlab issue.
 
 ### Action steps carried out so far
+
+##### Design package development plan
+
+- [x] Florian Herla drafted package [development plan](development_plan.md) based on strategies brainstormed in Tromso
+- [x] Members reviewed development plan and provided extensive feedback and additional ideas
+    * Main contributors: Mathias Bavay, Leo Viallon, Fabien Maussion, Simon Horton
+- [x] Florian Herla and Simon Horton draft strategy for [extension system](postprocessing_extensions.md) 
 
 ##### In-person workshop at ISSW, Tromso (Sep 2024)
 
