@@ -1,0 +1,9 @@
+# tutorials: Core Sphinx + Jupyter Book + MyST
+jupyter-book>=0.13.0
+myst-parser>=0.16
+myst-nb>=0.15
+
+# api docs: Sphinx‐only
+sphinx>=4.0
+sphinx-rtd-theme
+sphinx-autodoc-typehints
