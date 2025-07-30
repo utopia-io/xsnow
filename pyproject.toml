@@ -28,6 +28,12 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 
+[project.optional-dependencies]
+testing = [
+  "pytest>=7.0",
+  "pytest-cov",
+]
+
 [project.urls]
 "Homepage"      = "https://gitlab.com/avacollabra/postprocessing/xsnow"
 "Documentation" = "https://gitlab.com/avacollabra/postprocessing/xsnow"
