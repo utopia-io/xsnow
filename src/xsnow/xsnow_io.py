@@ -101,6 +101,9 @@ def read(source: Union[str, List[str]], parallel: bool = True, _code_map: Option
     if not datasets:
         return None
 
+    # Sort datasets by station name to ensure deterministic order before concatenating
+    datasets.sort(key=lambda ds: ds.coords['location'].item())
+    
     # Concatenate all individual datasets into a single one
     return xr.concat(datasets, dim='location')
 
