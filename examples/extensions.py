@@ -1,4 +1,4 @@
-# examples.py
+# extensions.py
 """
 Usage examples for the xsnow package, demonstrating the two primary
 extension patterns for adding new functionality.
