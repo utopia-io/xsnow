@@ -7,16 +7,19 @@ name = "xsnow"
 version = "0.0.1"
 description = "A collaborative Python package for parsing and post-processing snow cover simulations"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [
-  { name = "Florian Herla", email = "fherla@sfu.ca" },
   { name = "Ron Simenhois", email = "ron.simenhois@state.co.us" },
+  { name = "Florian Herla", email = "fherla@sfu.ca" },
 ]
 dependencies = [
-  "xarray>=0.20.0",
-  "numpy>=1.22.0",
-  "pandas>=1.4.0",
+    "cupy>=13.5.1",
+    "netcdf4>=1.7.2",
+    "numpy>=2.3.2",
+    "pandas>=2.3.1",
+    "xarray>=2025.7.1",
+    "scipy>=1.16.1",
 ]
 keywords = ["snow", "avalanche", "xarray", "post-processing"]
 classifiers = [
@@ -32,6 +35,7 @@ classifiers = [
 testing = [
   "pytest>=7.0",
   "pytest-cov",
+  "cupy-cuda12x; platform_system == 'Linux'", # Example for GPU support on Linux
 ]
 
 [project.urls]
@@ -41,6 +45,11 @@ testing = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.10.5",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
