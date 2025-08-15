@@ -61,14 +61,10 @@ import xarray as xr
 import pandas as pd
 
 # Assuming the project is structured such that xsnow can be imported
-# You might need to adjust the python path or install the package in editable mode
-# e.g., pip install -e .
 from xsnow.xsnow_io import read, read_pro
 
 # --- Test Data Fixtures ---
 
-# A dummy code map to be passed directly into the functions,
-# avoiding the need for monkeypatching global state.
 DUMMY_CODE_MAP = {
     "0501": "height",
     "0502": "density",
@@ -125,6 +121,28 @@ SlopeAzi= 180.0
         file_path.write_text(content)
         files.append(file_path)
     return files
+
+@pytest.fixture
+def pro_files_variable_layers(tmp_path):
+    """Creates two .pro files with different numbers of layers."""
+    content_5_layers = """
+[STATION_PARAMETERS]
+StationName= FIVE_LAYERS
+[DATA]
+0500,01.01.2025 12:00:00
+0501,5,0.1,0.2,0.3,0.4,0.5
+"""
+    (tmp_path / "five_layers.pro").write_text(content_5_layers)
+    
+    content_10_layers = """
+[STATION_PARAMETERS]
+StationName= TEN_LAYERS
+[DATA]
+0500,01.01.2025 12:00:00
+0501,10,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0
+"""
+    (tmp_path / "ten_layers.pro").write_text(content_10_layers)
+    return [tmp_path / "five_layers.pro", tmp_path / "ten_layers.pro"]
 
 # --- Tests for read_pro() ---
 
@@ -196,6 +214,26 @@ def test_read_directory(multiple_pro_files):
     assert isinstance(ds, xr.Dataset)
     assert ds.sizes['location'] == 3
     assert 'TEST_STATION_1' in ds.coords['location'].values
+
+def test_read_max_layers_padding(pro_files_variable_layers):
+    """Tests the max_layers padding and truncation logic."""
+    files = [str(f) for f in pro_files_variable_layers]
+    
+    # Test 'auto' mode: should pad to the largest profile (10 layers)
+    ds_auto = read(files, max_layers='auto', _code_map=DUMMY_CODE_MAP)
+    assert ds_auto.sizes['layer'] == 10
+    
+    # Test user-specified padding: should pad to 15
+    ds_padded = read(files, max_layers=15, _code_map=DUMMY_CODE_MAP)
+    assert ds_padded.sizes['layer'] == 15
+    
+    # Test user-specified truncation: should truncate to 7
+    ds_truncated = read(files, max_layers=7, _code_map=DUMMY_CODE_MAP)
+    assert ds_truncated.sizes['layer'] == 7
+    # Check that the 10-layer profile was actually truncated
+    ten_layer_profile = ds_truncated.sel(location='TEN_LAYERS')
+    assert ten_layer_profile['height'].notnull().sum().item() == 7
+
 
 def test_read_empty_directory(tmp_path):
     """Tests that read() handles an empty directory gracefully."""
