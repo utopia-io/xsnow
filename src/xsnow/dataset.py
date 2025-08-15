@@ -51,6 +51,7 @@ import numpy as np
 # Use an absolute import assuming the package is installed (e.g., in editable mode)
 from xsnow.xsnow_io import read
 from xsnow.registry import registry
+from xsnow.plugin import _analysis_plugins
 
 
 class xsnowDataset:
@@ -70,9 +71,10 @@ class xsnowDataset:
 
     def __init__(
         self,
-        source: Union[str, List[str], xr.Dataset],
+        source: Union[str, List[str], xr.Dataset, Path],
         datetime_start: Optional[str] = None,
-        datetime_end: Optional[str] = None
+        datetime_end: Optional[str] = None,
+        max_layers: Union[str, int] = 'auto'
     ):
         """
         Initializes the xsnowDataset from a file path, list of paths, directory,
@@ -83,22 +85,26 @@ class xsnowDataset:
         xsnowDataset instance.
 
         Args:
-            source (Union[str, List[str], xr.Dataset]): The path to a data file
-                (e.g., .pro, .smet, .nc), a directory containing data files, a
+            source (Union[str, List[str], Path, xr.Dataset]): The path to a data file
+                (e.g., .pro, .smet, .nc, .zarr), a directory containing data files, a
                 list of file paths, or an existing xarray.Dataset object.
             datetime_start (Optional[str]): If provided, the parser will only include
                 profiles with timestamps on or after this date/time.
             datetime_end (Optional[str]): If provided, the parser will only include
                 profiles with timestamps on or before this date/time.
+            max_layers (Union[str, int]): Strategy for handling layer padding.
+                - 'auto' (default): Scans all files to find the max layer count.
+                - int: A specific integer to use for the layer dimension size.
         """
         if isinstance(source, xr.Dataset):
             self.data = source
-        elif isinstance(source, (str, list)):
+        elif isinstance(source, (str, list, Path)):
             # Use the new high-level read function for parallel I/O, passing filters
             self.data: Optional[xr.Dataset] = read(
                 source,
                 datetime_start=datetime_start,
-                datetime_end=datetime_end
+                datetime_end=datetime_end,
+                max_layers=max_layers
             )
         else:
             raise TypeError(f"Unsupported source type: {type(source)}")
@@ -129,12 +135,31 @@ class xsnowDataset:
     def __getattr__(self, name: str) -> Any:
         """
         Forwards attribute access to the underlying xarray.Dataset.
+        
 
         This method is the hook that allows extensions and users to interact
         with the object as if it were a native xarray.Dataset (e.g., calling
         .sel(), .mean(), accessing .sizes). If a method call returns a new
         xarray.Dataset, it is automatically re-wrapped in the xsnowDataset class.
+        
+        This method first checks if the attribute name corresponds to a function
+        in the analysis plugin registry. If so, it calls that function, passing
+        the `xsnowDataset` instance (`self`) as the first argument.
+
+        If the name is not a registered plugin, it falls back to the original
+        behavior of forwarding the attribute access to the underlying xarray.Dataset.
         """
+        
+        # First, check if the requested name is a registered analysis plugin.
+        if name in _analysis_plugins:
+            plugin_func = _analysis_plugins[name]
+
+            # Return a new function that automatically passes `self` (the
+            # xsnowDataset instance) as the first argument to the plugin.
+            def plugin_wrapper(*args, **kwargs):
+                return plugin_func(self, *args, **kwargs)
+            return plugin_wrapper
+
         if self.data is None:
             raise AttributeError("Dataset is not loaded.")
         
@@ -154,7 +179,7 @@ class xsnowDataset:
             # This is a property (like .sizes, .coords, etc.)
             return attr
 
-    def update(self, source: Union[str, List[str]]):
+    def update(self, source: Union[str, List[str], Path]):
         """
         Updates the dataset with new data from a source.
 
@@ -164,7 +189,7 @@ class xsnowDataset:
         reads new data from the source that is more recent.
 
         Args:
-            source (Union[str, List[str]]): Path to a file or directory, or a
+            source (Union[str, List[str], Path]): Path to a file or directory, or a
                 list of files containing the new data.
 
         Returns:
@@ -197,7 +222,7 @@ class xsnowDataset:
         print("Update complete.")
         return self.__class__(combined)
 
-    def merge_smet(self, smet_source: Union[str, List[str]]):
+    def merge_smet(self, smet_source: Union[str, List[str], Path]):
         """
         Reads one or more SMET files and merges their data into this dataset.
 
@@ -206,7 +231,7 @@ class xsnowDataset:
         the 'location' and 'time' coordinates.
 
         Args:
-            smet_source (Union[str, List[str]]): Path to a SMET file, a list of
+            smet_source (Union[str, List[str], Path]): Path to a SMET file, a list of
                 SMET files, or a directory containing SMET files.
 
         Returns:
@@ -225,7 +250,7 @@ class xsnowDataset:
         merged_ds = xr.merge([self.data, smet_data])
         return self.__class__(merged_ds)
 
-    def to_netcdf(self, output_path: str):
+    def to_netcdf(self, output_path: Union[str, Path]):
         """
         Saves the dataset to a NetCDF file.
 
@@ -233,7 +258,7 @@ class xsnowDataset:
         it for use in other applications that support NetCDF.
 
         Args:
-            output_path (str): The destination file path for the .nc file.
+            output_path (Union[str, Path]): The destination file path for the .nc file.
         """
         if self.data is None:
             print("No data to save.")
@@ -249,7 +274,28 @@ class xsnowDataset:
         except Exception as e:
             print(f"Failed to save NetCDF file: {e}")
 
-    def to_pro(self, output_dir: str, max_profiles: int = 100, **kwargs):
+    def to_zarr(self, store_path: Union[str, Path], **kwargs):
+        """
+        Saves the dataset to a Zarr store.
+
+        This is the recommended format for cloud-based and parallel computing workflows.
+
+        Args:
+            store_path (Union[str, Path]): The path to the Zarr store directory.
+            **kwargs: Additional keyword arguments passed to xarray.Dataset.to_zarr().
+        """
+        if self.data is None:
+            print("No data to save.")
+            return
+
+        try:
+            # Zarr handles directory creation
+            self.data.to_zarr(store_path, **kwargs)
+            print(f"Dataset successfully saved to Zarr store: {store_path}")
+        except Exception as e:
+            print(f"Failed to save Zarr store: {e}")
+
+    def to_pro(self, output_dir: Union[str, Path], max_profiles: int = 100, **kwargs):
         """
         Saves the dataset to one or more .pro files.
 
@@ -262,7 +308,7 @@ class xsnowDataset:
         `max_profiles`.
 
         Args:
-            output_dir (str): The path to the directory where .pro files will be saved.
+            output_dir (Union[str, Path]): The path to the directory where .pro files will be saved.
             max_profiles (int): The maximum number of .pro files to generate.
                 Defaults to 100.
             **kwargs: Placeholder for future filtering options.
@@ -333,7 +379,7 @@ class xsnowDataset:
                                 f.write(f"{param_code},{num_layers},{data_str}\n")
         print("Export complete.")
 
-    def to_smet(self, output_dir: str, max_files: int = 100, **kwargs):
+    def to_smet(self, output_dir: Union[str, Path], max_files: int = 100, **kwargs):
         """
         Saves the timeseries data for each location to a .smet file.
 
@@ -344,7 +390,7 @@ class xsnowDataset:
         will raise a ValueError if the number of locations exceeds `max_files`.
 
         Args:
-            output_dir (str): The path to the directory where .smet files will be saved.
+            output_dir (Union[str, Path]): The path to the directory where .smet files will be saved.
             max_files (int): The maximum number of .smet files to generate.
                 Defaults to 100.
             **kwargs: Placeholder for future filtering options.
@@ -399,6 +445,17 @@ class xsnowDataset:
                 df.to_csv(f, sep=' ', index=False, header=False, lineterminator='\n')
         print("Export complete.")
 
+    def to_crocus(self, output_dir: Union[str, Path], **kwargs):
+        """Saves the dataset to the CROCUS file format. Not yet implemented."""
+        raise NotImplementedError("Saving to CROCUS format is not yet implemented.")
+
+    def to_caaml(self, output_dir: Union[str, Path], **kwargs):
+        """Saves the dataset to the CAAML file format. Not yet implemented."""
+        raise NotImplementedError("Saving to CAAML format is not yet implemented.")
+
+    def to_json(self, output_dir: Union[str, Path], **kwargs):
+        """Saves the dataset to a JSON file format. Not yet implemented."""
+        raise NotImplementedError("Saving to JSON format is not yet implemented.")
 
     def validate_units(self):
         """
@@ -503,7 +560,7 @@ class xsnowDataset:
         print("Moving data to GPU...")
         # Create a new dataset by converting each DataArray's data to a cupy array
         gpu_ds = self.data.copy(deep=False)
-        # FIX: Iterate over data_vars only, not all variables (which includes coordinates)
+        # Iterate over data_vars only, not all variables (which includes coordinates)
         for var in gpu_ds.data_vars:
             # Only convert numeric arrays, skip others (like datetime)
             if np.issubdtype(gpu_ds[var].dtype, np.number):
