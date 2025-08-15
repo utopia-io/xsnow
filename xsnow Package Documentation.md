@@ -239,92 +239,89 @@ print(final_ds)
 
 ## Extending `xsnow` with Custom Functions
 
-The `xsnowDataset` class is designed to be easily extended. Here are two primary patterns for adding your own post-processing functions.
+The `xsnowDataset` class is designed to be easily extended with your own analysis functions. There are two primary patterns for this, each suited to different needs.
 
-### Example 1: Simple Extension (Adding a New Variable)
+### Method 1: The Plugin System (`@xsnow.register_analysis`)
 
-This pattern is ideal for calculations that produce a new data variable that fits into the existing data structure. The function takes an `xsnowDataset` object, performs a calculation on its underlying `xarray.Dataset`, and returns a *new* `xsnowDataset` instance containing the result.
+This method is designed to make your custom function feel like a **built-in part of the `xsnowDataset` object**. It's the recommended approach for creating a library of reusable tools.
 
-```python
-def add_slab_density(ds: xsnowDataset, slab_thickness: float = 0.3) -> xsnowDataset:
-    """
-    Calculates the average density of the top slab of the snowpack.
-    """
-    if ds.data is None:
-        raise ValueError("Input dataset is empty.")
-        
-    total_height = ds.data['height'].max(dim='layer')
-    slab_layers = ds.data['density'].where(ds.data['height'] >= total_height - slab_thickness)
-    slab_density = slab_layers.mean(dim='layer')
+* **How it Works:** You write a standard Python function that takes an `xsnowDataset` as its first argument. By adding the `@xsnow.register_analysis` decorator above it, you "sign up" your function with the `xsnow` package. The `xsnowDataset` object automatically discovers this function, allowing you to call it as if it were a built-in method.
+
+* **Example:**
+    ```python
+    # In a file like 'my_analysis_plugins.py'
+    import xsnow
+    import xarray as xr
     
-    # Add metadata to the new variable
-    slab_density.attrs = {
-        'long_name': f'Average density of the top {slab_thickness}m slab',
-        'units': 'kg m-3'
-    }
+    @xsnow.register_analysis
+    def calculate_top_slab_density(ds: xsnow.xsnowDataset, depth_cm: float = 20.0) -> xr.DataArray:
+        """Calculates the mean density of the top slab of the snowpack."""
+        # ... (calculation logic here) ...
+        total_height = ds.data['height'].max(dim='layer', skipna=True)
+        slab_bottom_height = total_height - (depth_cm / 100.0)
+        top_slab_mask = ds.data['height'] >= slab_bottom_height
+        top_slab_densities = ds.data['density'].where(top_slab_mask)
+        return top_slab_densities.mean(dim='layer', skipna=True)
     
-    new_xarray_ds = ds.data.assign(slab_density=slab_density)
+    # --- In your main script or notebook ---
+    import xsnow
+    # This import is crucial because it runs the decorator code
+    import my_analysis_plugins
     
-    # The key step: re-wrap the modified xarray.Dataset in our class
-    return xsnowDataset(new_xarray_ds)
+    ds = xsnow.xsnowDataset('path/to/data')
+    # Call your function like a built-in method!
+    mean_density = ds.calculate_top_slab_density(depth_cm=30)
+    print(mean_density)
+    ```
 
-# --- Usage ---
-# ds = xsnowDataset(...)
-# extended_ds = add_slab_density(ds)
-# print(extended_ds.data['slab_density'])
-```
+### Method 2: The Standalone Function
 
-### Example 2: Complex Extension (Adding a New Data Stream)
+This approach treats the analysis as an **external operation** that you perform *on* the dataset. It's simpler and more direct, making it ideal for analyses that are specific to a single script or project.
 
-For more complex features that add new dimensions and functionality, the recommended approach is a **decorator class**. The decorator wraps an `xsnowDataset` instance, adding its new data and methods while preserving all the original functionality.
+* **How it Works:** You write a standard Python function that accepts an `xsnowDataset` object as an argument. The function performs its calculations on the internal `xarray.Dataset` (`ds.data`) and then, at the very end, it creates and returns a **new** `xsnowDataset` instance containing the results.
 
-```python
-class DatasetDecorator:
-    """Generic decorator base class to handle attribute forwarding and re-wrapping."""
-    def __init__(self, base: xsnowDataset):
-        self.data = base.data
+* **Example:**
+    ```python
+    def add_slab_density_variable(ds: xsnow.xsnowDataset, slab_thickness: float = 0.3) -> xsnow.xsnowDataset:
+        """
+        Calculates the average density of the top slab and adds it as a new
+        variable to the dataset.
+        """
+        if ds.data is None:
+            raise ValueError("Input dataset is empty.")
+    
+        total_height = ds.data['height'].max(dim='layer')
+        slab_layers = ds.data['density'].where(ds.data['height'] >= total_height - slab_thickness)
+        slab_density = slab_layers.mean(dim='layer')
+    
+        # Add metadata to the new variable
+        slab_density.attrs = {
+            'long_name': f'Average density of the top {slab_thickness}m slab',
+            'units': 'kg m-3'
+        }
+    
+        # Add the new variable to the xarray.Dataset
+        new_xarray_ds = ds.data.assign(slab_density=slab_density)
+    
+        # The key step: re-wrap the modified xarray.Dataset in our class
+        return xsnow.xsnowDataset(new_xarray_ds)
+    
+    # --- Usage ---
+    # ds = xsnow.xsnowDataset(...)
+    # extended_ds = add_slab_density_variable(ds)
+    # print(extended_ds.data['slab_density'])
+    ```
 
-    def __getattr__(self, name):
-        attr = getattr(self.data, name)
-        if callable(attr):
-            def method_wrapper(*args, **kwargs):
-                result = attr(*args, **kwargs)
-                if isinstance(result, xr.Dataset):
-                    new_base = xsnowDataset(result)
-                    return self.__class__(new_base)
-                return result
-            return method_wrapper
-        return attr
+### Which Method Should You Use?
 
-class HazardChartData(DatasetDecorator):
-    """
-    A decorator that adds a new 'hazardChartElement' dimension and data.
-    """
-    def __init__(self, base: xsnowDataset):
-        super().__init__(base)
-        if 'hazard_value' not in self.data.data_vars:
-            self.data = self._compute_hazard_elements()
+Both patterns are powerful. Here’s a quick guide to help you choose:
 
-    def _compute_hazard_elements(self):
-        num_elements = 5
-        base_dims = [dim for dim in ['location', 'time'] if dim in self.data.dims]
-        shape = [self.data.sizes[dim] for dim in base_dims] + [num_elements]
-        dims = base_dims + ['hazardChartElement']
+| Use the... | When you want... |
+| :--- | :--- |
+| **Plugin System (`@register_analysis`)** | ...to create a **reusable library** of functions that feel like built-in methods. Prioritize **convenience and a clean, chainable API** for the end-user (e.g., `ds.compute_hs().calculate_top_slab_density()`). |
+| **Standalone Function** | ...to perform a **specific analysis** for a single script or project. Prioritize **explicitness and a clear, functional data flow** (`in -> process -> out`). |
 
-        hazard_values = xr.DataArray(
-            np.random.rand(*shape),
-            dims=dims
-        ).assign_coords(hazardChartElement=np.arange(num_elements))
-        
-        return self.data.merge(hazard_values.rename('hazard_value'))
-
-# --- Usage ---
-# ds = xsnowDataset(...)
-# decorated_ds = HazardChartData(ds)
-# print(decorated_ds.data)
-```
-
-### Advanced Analysis Workflow Example
+## Advanced Analysis Workflow Example
 
 This example demonstrates how to chain together analysis functions to derive a more complex metric: the average density of the snow slab resting above a potential weak layer.
 
