@@ -15,7 +15,8 @@
 - [x] Add coordinate variables: `latitude, longitude, altitude, inclination, azimuth`.
 - [x] Implement profile_status variable with defined integer mapping.
 - [x] Handle sparse `layer` dimension with NaN padding (default, auto, or user-specified max layers).
-- [x] Attach CF-compliant metadata to dataset (including CRS).
+- [x] Attach CF-compliant metadata to dataset (including CRS).  
+    - Still need to double-check that it’s fully complete.
 
 ## 3. Parsing & I/O
 - [x] Implement `read_pro()`:
@@ -53,9 +54,9 @@
 
 ## 6. Documentation & Tutorials
 - [x] Maintain continuously updated xsnow Package Documentation page.
-- [x] Write docstrings with runnable examples.
+- [?] Write docstrings with runnable examples.
 - [ ] Build docs/ with Sphinx/Jupyter-Book + tutorials.
-- [ ] Include example datasets for documentation.
+- [x] Include example datasets for documentation.
 
 ## 7. Testing & CI
 - [x] Set up tests/ with:
