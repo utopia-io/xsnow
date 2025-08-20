@@ -2,6 +2,47 @@
 
 This document provides an overview of the core components of the `xsnow` package, a powerful tool for reading, analyzing, and post-processing SNOWPACK model output. It details the data I/O module (`xsnow_io.py`) and the main data object (`xsnowDataset`), along with practical examples of how to use them.
 
+## Installation
+
+The `xsnow` package is designed to be installed easily using `pip`. It supports both standard CPU-based analysis and optional GPU acceleration for enhanced performance.
+
+### Standard Installation (CPU Only)
+
+For most users, the standard installation is sufficient for all analysis tasks. This will install the core package and its essential dependencies like `xarray` and `pandas`.
+
+Open your terminal and run:
+```bash
+pip install xsnow
+```
+
+### Installation with GPU Support
+
+For users with a compatible NVIDIA GPU, `xsnow` can leverage the `CuPy` library for significant performance improvements in computationally intensive tasks. This is handled as an optional dependency.
+
+**Prerequisites:**
+- An NVIDIA GPU with a modern CUDA driver installed.
+- You do not need to install the full CUDA toolkit; the driver is sufficient.
+
+To install `xsnow` with GPU support, use the following command:
+```bash
+pip install xsnow[gpu]
+```
+This command installs the core package plus a pre-compiled, ready-to-use version of `CuPy` that is compatible with modern NVIDIA drivers. The analysis functions within `xsnow` will automatically detect and use the GPU if it is available.
+
+### Developer Installation
+
+If you wish to contribute to the development of `xsnow`, it is recommended to install the package in "editable" mode from a cloned repository. This allows you to make changes to the source code and have them immediately take effect without needing to reinstall.
+
+```bash
+# 1. Clone the repository from GitHub
+git clone [https://github.com/your-username/xsnow.git](https://github.com/your-username/xsnow.git)
+cd xsnow
+
+# 2. Install in editable mode with all optional dependencies
+pip install -e .[gpu,dev]
+```
+This command installs the package in editable mode (`-e`) and includes both the `gpu` extras and the `dev` extras, which contain testing tools like `pytest`.
+
 ## Core Components
 
 The `xsnow` package is built around two primary modules that handle data ingestion and representation.
