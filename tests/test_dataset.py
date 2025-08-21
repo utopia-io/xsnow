@@ -199,7 +199,7 @@ def test_to_xarray(mock_xarray_dataset):
     Tests the to_xarray method
     """
     ds = xsnowDataset(mock_xarray_dataset)
-    xrds = ds.to_xarray
+    xrds = ds.to_xarray()
 
     assert isinstance(xrds, xr.core.dataset.Dataset)
 
