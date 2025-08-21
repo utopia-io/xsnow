@@ -194,6 +194,15 @@ def test_merge_smet(mock_xarray_dataset, mock_smet_file):
     # Check if a value was merged correctly
     assert merged_ds.data['VW'].sel(location='station_A', time='2025-01-01').item() == 5.5
 
+def test_to_xarray(mock_xarray_dataset):
+    """
+    Tests the to_xarray method
+    """
+    ds = xsnowDataset(mock_xarray_dataset)
+    xrds = ds.to_xarray
+
+    assert isinstance(xrds, xr.core.dataset.Dataset)
+
 def test_to_netcdf(mock_xarray_dataset, tmp_path):
     """
     Tests the to_netcdf method to ensure it saves a file correctly.

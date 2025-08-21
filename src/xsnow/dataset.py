@@ -279,6 +279,12 @@ class xsnowDataset:
         merged_ds = xr.merge([self.data, smet_data_obj.data])
         return self.__class__(merged_ds)
 
+    def to_xarray(self) -> xr.Dataset:
+        """
+        Unwrap the dataset from the xsnowDataset class
+        """
+        return self.data
+
     def to_netcdf(self, output_path: Union[str, Path], **kwargs):
         """
         Saves the dataset to a NetCDF file.
