@@ -180,6 +180,19 @@ def test_getattr_forwarding_and_rewrapping(mock_xarray_dataset):
     # Test accessing a property (e.g., .sizes)
     assert subset.sizes['time'] == 3
 
+def test_dir(mock_xarray_dataset):
+    """Tests __dir__()"""
+    ds = xsnowDataset(mock_xarray_dataset)
+    ls = dir(ds)
+
+    assert 'update' in ls
+
+def test_contains(mock_xarray_dataset):
+    """Tests __contains__()"""
+    ds = xsnowDataset(mock_xarray_dataset)
+
+    assert 'location' in ds
+
 def test_merge_smet(mock_xarray_dataset, mock_smet_file):
     """Tests merging of SMET data into an existing dataset."""
     ds = xsnowDataset(mock_xarray_dataset)
@@ -196,7 +209,7 @@ def test_merge_smet(mock_xarray_dataset, mock_smet_file):
 
 def test_to_xarray(mock_xarray_dataset):
     """
-    Tests the to_xarray method
+    Tests the to_xarray() method
     """
     ds = xsnowDataset(mock_xarray_dataset)
     xrds = ds.to_xarray()

@@ -34,7 +34,7 @@ It achieves this through several key features:
     `xsnowDataset` wrapper.
 """
 
-from typing import Optional, Union, Any, List, TYPE_CHECKING
+from typing import Sequence, Union, Any, List, TYPE_CHECKING
 from pathlib import Path
 
 import pandas as pd
@@ -131,6 +131,34 @@ class xsnowDataset:
         else:
             return attr
 
+    def __dir__(self) -> Sequence[str]:
+        """
+        Return a list of attribute names available for tab completion.
+
+        This extends the default attributes of xsnowDataset by also
+        including the names of all variables in the underlying
+        xarray.Dataset. Public attributes of the wrapped dataset
+        are intentionally excluded to keep tab completion uncluttered.
+        To explore xarrays methods users can fall back to the tab completion
+        available at the self.data attribute.
+
+        Returns
+        -------
+        list of str
+            Sorted list of attribute names and data variable names.
+        """
+        base_attrs = set(super().__dir__())
+        var_names = set()
+        if self.data is not None:
+            try:
+                var_names = set(self.data.data_vars) | set(self.data.coords)
+            except Exception:
+                var_names = set()
+        # we skip xr.Dataset’s public attributes to avoid clutter
+        # xr_attrs = {a for a in dir(self.data) if not a.startswith("_")}
+
+        return sorted(base_attrs | var_names)
+
     def __getitem__(self, key: str) -> xr.DataArray:
         """
         Forwards item access to the underlying xarray.Dataset.
@@ -172,6 +200,30 @@ class xsnowDataset:
         if self.data is None:
             raise KeyError("Dataset is not loaded.")
         self.data[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        """
+        Check whether a variable exists in the dataset.
+
+        Parameters
+        ----------
+        key : str
+            Name of the variable to test.
+
+        Returns
+        -------
+        bool
+            True if the variable exists in the underlying dataset,
+            False otherwise.
+
+        Raises
+        ------
+        KeyError
+            If no dataset has been loaded into the ``xsnowDataset``.
+        """
+        if self.data is None:
+            raise KeyError("Dataset is not loaded.")
+        return key in self.data
 
     def copy(self, deep: bool = False) -> 'xsnowDataset':
         """
