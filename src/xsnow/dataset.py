@@ -90,14 +90,21 @@ class xsnowDataset:
             start_time = pd.to_datetime(self.data.time.min().values).strftime('%Y-%m-%d') if times > 0 else 'N/A'
             end_time = pd.to_datetime(self.data.time.max().values).strftime('%Y-%m-%d') if times > 0 else 'N/A'
             
+            xr_repr = repr(self.data).splitlines()
+            xr_repr[0] = f"employing the {xr_repr[0]}"
+            indented_xr_repr = "\n".join("    " + line for line in xr_repr)
+
             return (
                 f"<xsnowDataset>\n"
-                f"  Locations: {locations}\n"
-                f"  Profiles: {times}\n"
-                f"  Time Range: {start_time} to {end_time}"
+                f"  Locations:  {locations}\n"
+                f"  Timestamps: {times} ({start_time}--{end_time})\n"
+                f"  Profiles:   NotImplementedYet\n"  # @Ron, we could sum up the profile status
+                                                      # tracker here to display sum of valid profiles
+                                                      # with snow on the ground
+                f"\n{indented_xr_repr}"
             )
         except Exception:
-            return f"<xsnowDataset with data>"
+            return f"<xsnowDataset with data (exception occurred on summary)>"
 
     def __getattr__(self, name: str) -> Any:
         """

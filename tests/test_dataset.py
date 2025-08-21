@@ -187,6 +187,13 @@ def test_dir(mock_xarray_dataset):
 
     assert 'update' in ls
 
+def test_repr(mock_xarray_dataset):
+    """Tests __repr__()"""
+    ds = xsnowDataset(mock_xarray_dataset)
+    st = repr(ds)
+
+    assert 'Location' in st
+
 def test_contains(mock_xarray_dataset):
     """Tests __contains__()"""
     ds = xsnowDataset(mock_xarray_dataset)
