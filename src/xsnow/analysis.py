@@ -10,11 +10,15 @@ perform a calculation, and return a new `xsnowDataset` instance with the
 results added as new data variables.
 """
 
+import contextlib
 from typing import TYPE_CHECKING
 import numpy as np
 import re
 import pandas as pd
 import xarray as xr
+
+# Import the new utility function
+from .utils import get_backend
 
 # Use a type-checking block to avoid a circular import at runtime,
 # while still allowing type hints for the xsnowDataset class.
@@ -25,37 +29,38 @@ if TYPE_CHECKING:
 
 def find_layer_by_criteria(ds: 'xsnowDataset', criteria: str) -> 'xsnowDataset':
     """
-    Finds layers that match a string of boolean criteria.
+    Finds and masks layers that do not match a string of boolean criteria.
 
-    This function parses a criteria string (e.g., 'density > 300 & grain_size < 0.5')
-    and applies it as a filter to the dataset, returning only the layers that
-    meet the specified conditions.
+    This function parses a criteria string and applies it as a filter to the
+    dataset. Data in layers that do not meet the specified conditions is
+    replaced with NaN, effectively isolating the layers of interest. The
+    shape and dimensions of the dataset are preserved.
+
+    For robustness, this operation is performed on a CPU-based copy of the data.
 
     Args:
-        ds (xsnowDataset): The input dataset to filter.
-        criteria (str): A string containing the filtering conditions.
-            - Supported operators: >, <, >=, <=, ==, !=
-            - Supported logical operators: & (and), | (or)
+        ds: The input dataset to filter.
+        criteria: A string containing the filtering conditions. Conditions can be
+            combined using '&' (and) and '|' (or).
+            Example: "density > 300 & grain_size < 0.5"
 
     Returns:
-        xsnowDataset: A new xsnowDataset instance containing only the layers
-        that match the criteria. Other layers will be filled with NaN.
+        A new xsnowDataset instance where data in layers that do not match the
+        criteria is replaced with NaN.
+
+    Raises:
+        ValueError: If the criteria string is invalid, or if a variable
+            in the criteria is not found in the dataset.
     """
     if ds.data is None:
         raise ValueError("Cannot filter an empty dataset.")
 
-    # --- Hardware-Aware Computation Setup ---
-    is_gpu = hasattr(ds.data.variables[list(ds.data.data_vars)[0]].data, 'device')
-    
-    # For this complex filtering, it's more robust to work on the CPU with pandas
-    ds_cpu = ds.to_cpu() if is_gpu else ds
+    # This complex filtering is more robust on the CPU with pandas
+    ds_cpu = ds.to_cpu()
 
-    # Split the criteria by logical operators (& or |)
     conditions = re.split(r'\s*([&|])\s*', criteria)
-    
     final_mask = None
     
-    # Process the list of conditions and operators
     i = 0
     while i < len(conditions):
         condition_str = conditions[i]
@@ -94,28 +99,31 @@ def find_layer_by_criteria(ds: 'xsnowDataset', criteria: str) -> 'xsnowDataset':
     filtered_data = ds_cpu.data.where(final_mask)
     
     from .dataset import xsnowDataset
-    filtered_ds_obj = xsnowDataset(filtered_data)
-    
-    # If the original was on GPU, move the result back
-    return filtered_ds_obj.to_gpu() if is_gpu else filtered_ds_obj
+    return xsnowDataset(filtered_data)
 
 
 def compute_critical_cut_length(ds: 'xsnowDataset') -> 'xsnowDataset':
     """
     Computes the critical cut length (rc_flat) for each layer.
 
-    This function is adapted from the original snowpack_reader.py and calculates
-    the critical crack length required for self-propagating fracture. It is
-    hardware-aware and will use CuPy for GPU-accelerated computation if the
-    dataset's arrays are CuPy arrays.
+    This function calculates the critical crack length required for
+    self-propagating fracture in a snow slab on flat terrain, a key parameter
+    in avalanche forecasting. The calculation is hardware-aware and will use
+    CuPy for GPU acceleration if the dataset's arrays are on the GPU.
+
+    The surface layer of the snowpack will have a result of NaN, as it has no
+    slab above it.
 
     Args:
-        ds (xsnowDataset): The input dataset. Must contain 'density',
-            'grain_size', 'shear_strength', and 'height' variables.
+        ds: The input dataset. Must contain the following data variables:
+            'density', 'grain_size', 'shear_strength', and 'height'.
 
     Returns:
-        xsnowDataset: A new xsnowDataset instance with the 'rc_flat'
-        variable added.
+        A new xsnowDataset instance with the 'rc_flat' variable (in meters) added.
+
+    Raises:
+        ValueError: If the dataset is empty or if any of the required
+            data variables are missing.
     """
     if ds.data is None:
         raise ValueError("Cannot compute on an empty dataset.")
@@ -125,22 +133,13 @@ def compute_critical_cut_length(ds: 'xsnowDataset') -> 'xsnowDataset':
         if var not in ds.data:
             raise ValueError(f"Missing required variable for rc_flat calculation: '{var}'")
 
-    # --- Hardware-Aware Computation Setup ---
-    xp = np
-    is_gpu = False
-    if hasattr(ds.data['density'].data, 'device'):
-        try:
-            import cupy as cp
-            xp = cp
-            is_gpu = True
-            print("INFO: Performing critical cut length computation on GPU.")
-        except ImportError:
-            print("WARNING: Data is on GPU but CuPy is not found. Computation may fail.")
+    # --- Use the utility function to get the correct backend ---
+    xp = get_backend(ds)
+    is_gpu = (xp != np)
 
     # --- Physical Constants ---
     RHO_ICE, GS_0, G, A, B = 917.0, 0.00125, 9.81, 4.6e-9, -2.0
 
-    # --- Data Preparation ---
     height, density, grain_size, shear_strength = (
         ds.data['height'], ds.data['density'],
         ds.data['grain_size'], ds.data['shear_strength']
@@ -155,64 +154,46 @@ def compute_critical_cut_length(ds: 'xsnowDataset') -> 'xsnowDataset':
     total_thick_above = ds.data['height'].max(dim='layer', skipna=True) - height
     rho_sl_raw = load / (total_thick_above * G)
     
-    # Handle filling NaN values in a hardware-aware way
     if is_gpu:
-        # xarray's bfill/ffill are not GPU-compatible, so we must move to CPU and back
         rho_sl_numpy = rho_sl_raw.as_numpy()
         rho_sl_cpu_da = xr.DataArray(rho_sl_numpy, dims=rho_sl_raw.dims, coords=rho_sl_raw.coords)
         rho_sl_filled_cpu = rho_sl_cpu_da.bfill(dim='layer').ffill(dim='layer')
-        rho_sl_gpu = xp.asarray(rho_sl_filled_cpu.values)
-        rho_sl = xr.DataArray(rho_sl_gpu, dims=rho_sl_raw.dims, coords=rho_sl_raw.coords)
+        rho_sl = xr.DataArray(xp.asarray(rho_sl_filled_cpu.values), dims=rho_sl_raw.dims, coords=rho_sl_raw.coords)
     else:
         rho_sl = rho_sl_raw.bfill(dim='layer').ffill(dim='layer')
-
-    tau_p = shear_strength * 1000.0
-    gs = grain_size * 0.001
-    e_prime = 5.07e9 * (rho_sl / RHO_ICE)**5.13 / (1 - 0.2**2)
-    dsl_over_sigman = 1.0 / (G * rho_sl)
-    term1_under = A * (density / RHO_ICE * gs / GS_0)**B
-    term2_under = 2 * tau_p * e_prime * dsl_over_sigman
-
-    # The .where() method on a CuPy-backed DataArray can be buggy.
-    # This more explicit logic operates on the raw array data to avoid the issue.
     
-    # Term 1
-    term1_data = term1_under.data.copy()
-    term1_data[term1_data <= 0] = xp.nan
-    with np.errstate(invalid='ignore'):
-        term1_sqrt = xp.sqrt(term1_data)
-    term1 = xr.DataArray(term1_sqrt, dims=term1_under.dims, coords=term1_under.coords)
+    # FIX: Explicitly ensure all raw arrays are on the correct backend (xp)
+    # before performing calculations. This prevents type errors if xarray
+    # unexpectedly returns a numpy array from a GPU-backed dataset.
+    tau_p_data = xp.asarray(shear_strength.data) * 1000.0
+    gs_data = xp.asarray(grain_size.data) * 0.001
+    rho_sl_data = xp.asarray(rho_sl.data)
+    density_data = xp.asarray(density.data)
 
-    # Term 2
-    term2_data = term2_under.data.copy()
-    term2_data[term2_data <= 0] = xp.nan
-    with np.errstate(invalid='ignore'):
-        term2_sqrt = xp.sqrt(term2_data)
-    term2 = xr.DataArray(term2_sqrt, dims=term2_under.dims, coords=term2_under.coords)
+    e_prime_data = 5.07e9 * (rho_sl_data / RHO_ICE)**5.13 / (1 - 0.2**2)
+    dsl_over_sigman_data = 1.0 / (G * rho_sl_data)
+    term1_under_data = A * (density_data / RHO_ICE * gs_data / GS_0)**B
+    term2_under_data = 2 * tau_p_data * e_prime_data * dsl_over_sigman_data
+
+    context = contextlib.nullcontext() if is_gpu else xp.errstate(invalid='ignore')
+
+    with context:
+        term1 = xp.sqrt(xp.where(term1_under_data > 0, term1_under_data, xp.nan))
+        term2 = xp.sqrt(xp.where(term2_under_data > 0, term2_under_data, xp.nan))
     
     rc_flat_combined = term1 * term2
+    rc_flat_combined[..., -1] = xp.nan
     
-    # Use xp.nan_to_num on the raw data array instead of .fillna()
-    # to avoid the CuPy incompatibility.
-    rc_flat_filled_data = xp.nan_to_num(rc_flat_combined.data, nan=9999.0)
-    rc_flat_da = xr.DataArray(rc_flat_filled_data, dims=rc_flat_combined.dims, coords=rc_flat_combined.coords)
-
-    # Set rc_flat for the surface layer to 9999.0 as it is not physically meaningful
-    max_heights = height.max(dim='layer', skipna=True)
-    is_not_surface = height < max_heights
-    
-    # Use the hardware-aware `xp.where` on the raw data arrays to avoid
-    # the bug in xarray's `.where()` with CuPy.
-    final_data = xp.where(is_not_surface.data, rc_flat_da.data, 9999.0)
-    rc_flat_final = xr.DataArray(final_data, dims=rc_flat_da.dims, coords=rc_flat_da.coords)
+    rc_flat_final = xr.DataArray(
+        rc_flat_combined, 
+        dims=height.dims, 
+        coords=height.coords
+    )
     
     rc_flat_final.attrs = {
         'long_name': 'Critical Cut Length (Flat Terrain)',
         'units': 'm'
     }
 
-    # Add the final calculated data back to the main dataset
-    new_xarray_ds = ds.data.assign(rc_flat=rc_flat_final)
-    
     from .dataset import xsnowDataset
-    return xsnowDataset(new_xarray_ds)
+    return xsnowDataset(ds.data.assign(rc_flat=rc_flat_final))

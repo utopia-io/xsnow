@@ -2,7 +2,7 @@
 """
 Defines the plugin system for registering custom analysis functions.
 
-This module provides the `register_analysis` decorator, which allows
+This module provides the `register_xsnowDataset_method` decorator, which allows
 user-defined functions to be attached to the `xsnowDataset` class at runtime.
 This makes the package extensible, allowing users to create and share their
 own post-processing and analysis routines that integrate seamlessly with the
@@ -17,7 +17,7 @@ import warnings
 _analysis_plugins: Dict[str, Callable] = {}
 
 
-def register_analysis(func: Callable) -> Callable:
+def register_xsnowDataset_method(func: Callable) -> Callable:
     """
     A decorator to register a function as a custom xsnowDataset method.
 
@@ -29,7 +29,7 @@ def register_analysis(func: Callable) -> Callable:
     Example:
         import xsnow
 
-        @xsnow.register_analysis
+        @xsnow.register_xsnowDataset_method
         def get_surface_temperature(ds):
             \"\"\"Returns the temperature of the top snow layer.\"\"\"
             # Find the index of the highest layer for each profile

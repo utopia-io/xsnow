@@ -51,7 +51,7 @@ pro_file.write_text(pro_data)
 
 # --- Step 3: Import the file containing your decorated function ---
 # This is the critical step. This line executes the code in example_plugin_analysis.py,
-# which runs the @xsnow.register_analysis decorator and populates the plugin registry.
+# which runs the @xsnow.register_xsnowDataset_method decorator and populates the plugin registry.
 import example_plugin_analysis
 
 # --- Step 4: Load the dataset ---

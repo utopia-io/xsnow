@@ -1,2 +1,5 @@
 /src/xsnow.egg-info/
 /tests/data/
+/data/
+/src/xsnow/__pycache__/
+/src/xsnow/main.py

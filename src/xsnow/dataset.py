@@ -32,6 +32,14 @@ It achieves this through several key features:
     `xsnowDataset` instance. This ensures that the user can chain operations
     (e.g., `ds.sel(...).mean(...)`) and always retain the convenience of the
     `xsnowDataset` wrapper.
+
+Vertical Coordinate System
+---------------------------
+The package uses a physically intuitive vertical coordinate system.
+- `z`: The primary vertical coordinate, representing depth below the snow
+  surface in meters. The surface is z=0, and values are negative downwards.
+- `height`: A data variable representing the original height above the
+  ground in meters.
 """
 
 from typing import Optional, Union, Any, List, TYPE_CHECKING
@@ -74,8 +82,8 @@ class xsnowDataset:
         """
         if not isinstance(source, xr.Dataset):
             raise TypeError(
-                f"xsnowDataset must be initialized with an xarray.Dataset. "
-                f"To read from files, use the `xsnow.read()` function."
+                "xsnowDataset must be initialized with an xarray.Dataset. "
+                "To read from files, use the `xsnow.read()` function."
             )
         self.data: xr.Dataset = source
 
@@ -104,11 +112,15 @@ class xsnowDataset:
         Forwards attribute access to a registered analysis plugin or the
         underlying xarray.Dataset.
 
-        This method is the hook that allows users to interact with the object
-        as if it were a native xarray.Dataset (e.g., calling .sel(), .mean(),
-        accessing .sizes). It also discovers and executes registered analysis
-        plugins. If a method call returns a new xarray.Dataset, it is
-        automatically re-wrapped in the xsnowDataset class.
+        This is the core mechanism that enables the xsnowDataset to behave like
+        an xarray.Dataset while also providing custom functionality. The lookup
+        priority is:
+        1. Registered analysis plugins (e.g., from `xsnow.register_xsnowDataset_method`).
+        2. Attributes and methods of the underlying `xarray.Dataset` (`self.data`).
+
+        If a forwarded method call returns a new `xarray.Dataset`, it is
+        automatically re-wrapped in an `xsnowDataset` instance to allow for
+        method chaining.
         """
         if name in _analysis_plugins:
             plugin_func = _analysis_plugins[name]
@@ -124,13 +136,11 @@ class xsnowDataset:
         if callable(attr):
             def method_wrapper(*args, **kwargs):
                 result = attr(*args, **kwargs)
-                if isinstance(result, xr.Dataset):
-                    return self.__class__(result)
-                return result
+                return self.__class__(result) if isinstance(result, xr.Dataset) else result
             return method_wrapper
         else:
             return attr
-
+        
     def __getitem__(self, key: str) -> xr.DataArray:
         """
         Forwards item access to the underlying xarray.Dataset.
@@ -167,7 +177,7 @@ class xsnowDataset:
         --------
         >>> ds = xsnow.read('path/to/data')
         >>> # Create and assign a new variable
-        >>> ds['new_var'] = xr.DataArray([1, 2, 3], dims=['layer'])
+        >>> ds['new_var'] = xr.DataArray([1, 2, 3], dims=['z'])
         """
         if self.data is None:
             raise KeyError("Dataset is not loaded.")
@@ -202,51 +212,6 @@ class xsnowDataset:
         copied_xr_dataset = self.data.copy(deep=deep)
         return self.__class__(copied_xr_dataset)
 
-    def update(self, source: Union[str, List[str], Path]) -> 'xsnowDataset':
-        """
-        Updates the dataset with new data from a source.
-
-        This method is designed for workflows where you load a cached dataset
-        (e.g., from NetCDF) and want to append new data from recent .pro or
-        .smet files. It finds the last timestamp in the current data and only
-        reads new data from the source that is more recent.
-
-        Args:
-            source: Path to a file, a directory, or a list of files
-                containing the new data.
-
-        Returns:
-            A new xsnowDataset instance with the combined data.
-        
-        Examples
-        --------
-        >>> # Load a cached dataset
-        >>> ds_cache = xsnow.read('historical_data.nc')
-        >>> # Update with the latest files from a directory
-        >>> ds_updated = ds_cache.update('path/to/new_data/')
-        """
-        from xsnow.xsnow_io import read
-        from xsnow.selectors import TimeSelector
-
-        if self.data is None or self.data.time.size == 0:
-            new_data_obj = read(source)
-            return new_data_obj if new_data_obj else self
-
-        last_timestamp = self.data.time.max().values
-        last_timestamp_str = pd.to_datetime(last_timestamp).isoformat()
-        
-        time_filter = TimeSelector(sel=slice(last_timestamp_str, None))
-        new_data_obj = read(source, time=time_filter)
-
-        if new_data_obj is None or new_data_obj.data.time.size == 0:
-            return self
-
-        combined = xr.concat([self.data, new_data_obj.data], dim="time")
-        _, index = np.unique(combined['time'], return_index=True)
-        combined = combined.isel(time=index)
-
-        return self.__class__(combined)
-
     def merge_smet(self, smet_source: Union[str, List[str], Path]) -> 'xsnowDataset':
         """
         Reads one or more SMET files and merges their data into this dataset.
@@ -278,31 +243,43 @@ class xsnowDataset:
 
         merged_ds = xr.merge([self.data, smet_data_obj.data])
         return self.__class__(merged_ds)
-
-    def to_netcdf(self, output_path: Union[str, Path], **kwargs):
+    
+    def to_xarray(self) -> xr.Dataset:
         """
-        Saves the dataset to a NetCDF file.
+        Returns the underlying xarray.Dataset.
 
-        This method provides a convenient way to cache processed data or export
-        it for use in other applications that support NetCDF.
+        This method unwraps the xsnowDataset and provides direct access to the
+        core xarray.Dataset object. This is useful for interoperability with
+        other libraries or functions that are built to work with standard
+        xarray objects.
 
-        Args:
-            output_path: The destination file path for the .nc file.
-            **kwargs: Additional keyword arguments passed to `xarray.Dataset.to_netcdf()`.
+        Returns:
+            The stored xarray.Dataset object.
+        
+        Examples
+        --------
+        >>> ds = xsnow.read('path/to/data')
+        >>> # Get the raw xarray object for use with another library
+        >>> xr_ds = ds.to_xarray()
         """
-        if self.data is None: return
-        self.data.to_netcdf(output_path, **kwargs)
+        return self.data
 
     def compute_hs(self) -> 'xsnowDataset':
         """
         Computes the total snow height (HS) from layer heights.
-        
-        This method calculates the maximum height for each profile and adds it
-        to the dataset as a new variable 'HS'.
-        
+
+        This method calculates the maximum value of the 'height' variable along
+        the 'layer' dimension for each profile. The result is added to the
+        dataset as a new data variable named 'HS' (Total Snow Height).
+
+        The resulting 'HS' variable will not have a 'layer' dimension.
+
         Returns:
             A new xsnowDataset instance with the 'HS' variable added.
             
+        Raises:
+            ValueError: If the dataset is empty or the 'height' variable is missing.
+
         Examples
         --------
         >>> ds = xsnow.read('path/to/data')
@@ -349,7 +326,6 @@ class xsnowDataset:
             import logging
             logging.getLogger(__name__).info("Cupy not found or GPU not available. Returning original dataset.")
             return self
-
     def to_cpu(self) -> 'xsnowDataset':
         """
         Moves the dataset's data back to the CPU (NumPy).
@@ -368,6 +344,7 @@ class xsnowDataset:
         >>> ds_cpu_again = ds_gpu.to_cpu()
         >>> ds_cpu_again.to_netcdf('results.nc')
         """
-        if self.data is None: return self
-        # xarray's as_numpy() is hardware-aware and will convert from cupy to numpy
-        return self.__class__(self.data.as_numpy())
+        if self.data is None:
+            return self
+        else:
+            return self.__class__(self.data.as_numpy())

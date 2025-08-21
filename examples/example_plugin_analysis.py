@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from xsnow.dataset import xsnowDataset
 
-@xsnow.register_analysis
+@xsnow.register_xsnowDataset_method
 def calculate_top_slab_density(ds: 'xsnowDataset', depth_cm: float = 20.0) -> xr.DataArray:
     """
     Calculates the mean density of the top slab of the snowpack.

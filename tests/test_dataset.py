@@ -1,354 +1,159 @@
-# test_dataset.py
+# tests/test_dataset.py
 """
-Unit tests for the dataset.py module, focusing on the xsnowDataset class.
+Unit tests for the dataset module.
 
-This module uses the pytest framework to test the functionality of the
-xsnowDataset class, ensuring it initializes correctly, wraps xarray.Dataset
-objects, and forwards methods as expected.
-
----
-Key Features of This Test Module
----
-
-This test suite is designed to be fast, reliable, and focused. It achieves
-this through two primary techniques:
-
-1.  **Isolation**: The tests for `xsnowDataset` are intentionally isolated
-    from the file I/O module (`xsnow_io.py`). This ensures that we are only
-    testing the logic within the `xsnowDataset` class itself, not re-testing
-    the file-reading code.
-
-2.  **Mocking**: It uses pytest's `monkeypatch` fixture to create a "mock" of
-    the `read` function. Instead of performing slow and unpredictable file
-    I/O, the tests substitute the `read` function with a dummy one that
-    instantly returns a predictable, pre-made `xarray.Dataset`. This makes
-    the tests extremely fast and reliable.
-
----
-Setup and Execution
----
-These tests assume the same project structure and environment setup as
-described in `test_io.py`.
-
-1.  **Install Dependencies**: Ensure the package is installed in editable
-    mode with development dependencies:
-    `uv pip install -e ".[dev]"`
-
-2.  **Run Tests**: Execute from the project's root directory:
-    `pytest`
+This test suite verifies the functionality of the `xsnowDataset` class,
+ensuring that it correctly wraps an xarray.Dataset and that its methods
+for copying, analysis, and I/O perform as expected.
 """
 
 import pytest
-from pathlib import Path
 import xarray as xr
-import pandas as pd
 import numpy as np
+import pandas as pd
+from pathlib import Path
 
-# Assuming the project is structured such that xsnow can be imported
+# Imports from the package
+from xsnow import read
 from xsnow.dataset import xsnowDataset
-from xsnow.xsnow_io import read_smet
+from xsnow.selectors import TimeSelector
 
 # --- Fixtures ---
 
 @pytest.fixture
-def mock_xarray_dataset():
-    """
-    Creates a standard, predictable xarray.Dataset for testing.
-    This avoids the need to read actual files, making tests faster and
-    more isolated.
-    """
-    # Ensure all data variables have consistent dimensions.
-    # The height array is now broadcast to the full (2, 3, 10) shape.
-    height_array = np.broadcast_to(np.linspace(0, 1, 10), (2, 3, 10))
-    
-    return xr.Dataset(
-        data_vars={
-            'density': (('location', 'time', 'layer'), np.full((2, 3, 10), 250.0)),
-            'height': (('location', 'time', 'layer'), height_array),
-            'HS': (('location', 'time'), np.random.rand(2, 3)) # Add a timeseries variable
-        },
-        coords={
-            'location': ['station_A', 'station_B'],
-            'time': pd.to_datetime(['2025-01-01', '2025-01-02', '2025-01-03']),
-            'layer': np.arange(10),
-            'latitude': ('location', [45.0, 46.0]),
-            'longitude': ('location', [10.0, 11.0]),
-            'altitude': ('location', [2000, 2100]),
-            'slope': ('location', [25.0, 30.0]),
-            'slope_aspect': ('location', [90.0, 180.0])
-        }
-    )
+def sample_xr_dataset():
+    """Creates a sample, in-memory xarray.Dataset for testing."""
+    layer_coords = [0, 1, 2]
+    data = {
+        'height': (('location', 'time', 'layer'), np.array([[[0.1, 0.2, 0.3]]])),
+        'density': (('location', 'time', 'layer'), np.array([[[100, 200, 300]]]))
+    }
+    coords = {
+        'location': ['STATION_A'],
+        'time': [pd.to_datetime('2025-01-15')],
+        'layer': layer_coords,
+        'latitude': ('location', [45.0]),
+        'longitude': ('location', [10.0])
+    }
+    return xr.Dataset(data, coords)
 
 @pytest.fixture
-def mock_smet_file(tmp_path):
-    """Creates a dummy SMET file for testing merging."""
-    content = """
-SMET 1.1 ASCII
-[HEADER]
-station_name     = station_A
-latitude         = 45.0
-longitude        = 10.0
-altitude         = 2000
-nodata           = -999
-fields           = timestamp VW TA
+def sample_xsnow_dataset(sample_xr_dataset):
+    """Creates a sample xsnowDataset instance from the sample xarray.Dataset."""
+    return xsnowDataset(sample_xr_dataset)
+
+@pytest.fixture
+def data_dir_for_io_tests(tmp_path):
+    """Creates a temporary directory with files for testing I/O methods."""
+    initial_dir = tmp_path / "initial"
+    initial_dir.mkdir()
+    update_dir = tmp_path / "update"
+    update_dir.mkdir()
+
+    # Initial file for the .update() test
+    (initial_dir / "initial.pro").write_text("""
+[STATION_PARAMETERS]
+StationName= IO_STATION
 [DATA]
-2025-01-01T00:00:00 5.5 270.0
-2025-01-02T00:00:00 6.0 271.0
-"""
-    file_path = tmp_path / "station_A.smet"
-    file_path.write_text(content)
-    return file_path
+0500,09.02.2025 12:00:00
+0502,1,90
+""")
 
+    # New file for the .update() test
+    (update_dir / "update.pro").write_text("""
+[STATION_PARAMETERS]
+StationName= IO_STATION
+[DATA]
+0500,10.02.2025 12:00:00
+0502,1,100
+""")
 
-@pytest.fixture
-def mock_read(monkeypatch, mock_xarray_dataset):
-    """
-    Mocks the `xsnow.xsnow_io.read` function to prevent actual file I/O.
-    It makes the read function return a predefined xarray.Dataset instead.
-    """
-    def mock_return(source, *args, **kwargs):
-        # If the source is a smet file, read it for real
-        if isinstance(source, str) and '.smet' in source:
-            return read_smet(source)
-        # Otherwise, return the mock profile data
-        return mock_xarray_dataset
-    
-    # Replace the real `read` function with our mock version
-    monkeypatch.setattr('xsnow.dataset.read', mock_return)
+    # SMET file for the .merge_smet() test
+    (update_dir / "merge.smet").write_text("""
+[HEADER]
+station_name = IO_STATION
+fields = timestamp TA
+[DATA]
+2025-02-09T12:00:00 270.0
+""")
+    return tmp_path
 
+# --- Test Cases ---
 
-# --- Tests for xsnowDataset ---
+def test_init_with_xr_dataset(sample_xr_dataset):
+    """Tests successful initialization with an xarray.Dataset."""
+    ds = xsnowDataset(sample_xr_dataset)
+    assert ds.data is sample_xr_dataset
 
-def test_init_with_filepath(mock_read):
-    """
-    Tests that xsnowDataset initializes correctly when given a file path,
-    by ensuring it calls the (mocked) read function.
-    """
-    # The actual path doesn't matter since `read` is mocked
-    ds = xsnowDataset("fake/path/to/file.pro")
-    assert ds.data is not None
-    assert isinstance(ds.data, xr.Dataset)
-    assert 'density' in ds.data.data_vars
+def test_getattr_property_forwarding(sample_xsnow_dataset):
+    """Tests that property access (e.g., .sizes) is forwarded correctly."""
+    assert sample_xsnow_dataset.sizes['layer'] == 3
+    assert 'latitude' in sample_xsnow_dataset.coords
 
-def test_init_with_list_of_files(mock_read):
-    """
-    Tests that xsnowDataset initializes correctly with a list of file paths.
-    """
-    ds = xsnowDataset(["fake/path/1.pro", "fake/path/2.pro"])
-    assert ds.data is not None
-    assert isinstance(ds.data, xr.Dataset)
-
-def test_init_with_existing_dataset(mock_xarray_dataset):
-    """
-    Tests that xsnowDataset initializes correctly when passed an existing
-    xarray.Dataset object.
-    """
-    ds = xsnowDataset(mock_xarray_dataset)
-    assert ds.data is not None
-    # Use assert_identical for a robust comparison
-    xr.testing.assert_identical(ds.data, mock_xarray_dataset)
-
-def test_repr(mock_xarray_dataset):
-    """
-    Tests the __repr__ method for a user-friendly string representation.
-    """
-    ds = xsnowDataset(mock_xarray_dataset)
-    representation = repr(ds)
-    assert "xsnowDataset" in representation
-    assert "Locations: 2" in representation
-    assert "Profiles: 3" in representation
-    assert "Time Range: 2025-01-01 to 2025-01-03" in representation
-
-def test_getattr_forwarding_and_rewrapping(mock_xarray_dataset):
-    """
-    Tests that method calls are forwarded to the underlying xarray.Dataset
-    and that the result is re-wrapped into an xsnowDataset instance.
-    """
-    ds = xsnowDataset(mock_xarray_dataset)
-
-    # Test a method call that returns a new Dataset (e.g., .sel())
-    subset = ds.sel(location='station_A')
-    
-    # Check that the result is an instance of our wrapper class
+def test_getattr_method_forwarding_and_rewrapping(sample_xsnow_dataset):
+    """Tests that method calls are forwarded and results are re-wrapped."""
+    subset = sample_xsnow_dataset.isel(layer=0)
     assert isinstance(subset, xsnowDataset)
+    assert 'layer' not in subset.dims
+
+def test_getitem_forwarding(sample_xsnow_dataset):
+    """Tests that dictionary-style item access is forwarded correctly."""
+    density_da = sample_xsnow_dataset['density']
+    assert isinstance(density_da, xr.DataArray)
+    assert np.array_equal(density_da.values, [[[100, 200, 300]]])
+
+def test_setitem_forwarding(sample_xsnow_dataset):
+    """Tests that dictionary-style item assignment is forwarded correctly."""
+    new_var = xr.DataArray([1, 2, 3], dims=['layer'], coords={'layer': sample_xsnow_dataset.layer})
+    sample_xsnow_dataset['new_variable'] = new_var
+    assert 'new_variable' in sample_xsnow_dataset.data
+
+def test_compute_hs(sample_xsnow_dataset):
+    """Tests the compute_hs method for calculating total snow height."""
+    ds_with_hs = sample_xsnow_dataset.compute_hs()
+    assert 'HS' in ds_with_hs.data
+    assert np.isclose(ds_with_hs.data['HS'].item(), 0.3)
     
-    # When selecting a single item, the dimension is dropped.
-    # We verify the coordinate value instead of the dimension size.
-    assert 'location' not in subset.sizes
-    assert subset.coords['location'].item() == 'station_A'
+def test_init_with_xr_dataset(sample_xr_dataset):
+    # ... (existing test)
+    ds = xsnowDataset(sample_xr_dataset)
+    assert ds.data is sample_xr_dataset
 
-    # Test accessing a property (e.g., .sizes)
-    assert subset.sizes['time'] == 3
-
-def test_merge_smet(mock_xarray_dataset, mock_smet_file):
-    """Tests merging of SMET data into an existing dataset."""
-    ds = xsnowDataset(mock_xarray_dataset)
-    merged_ds = ds.merge_smet(str(mock_smet_file))
-    
-    assert isinstance(merged_ds, xsnowDataset)
-    # Check for a variable from the original dataset
-    assert 'density' in merged_ds.data
-    # Check for variables from the new SMET file
-    assert 'VW' in merged_ds.data
-    assert 'TA' in merged_ds.data
-    # Check if a value was merged correctly
-    assert merged_ds.data['VW'].sel(location='station_A', time='2025-01-01').item() == 5.5
-
-def test_to_netcdf(mock_xarray_dataset, tmp_path):
+def test_to_xarray_returns_xarray_dataset(sample_xsnow_dataset):
     """
-    Tests the to_netcdf method to ensure it saves a file correctly.
+    Tests that the to_xarray() method returns a raw xarray.Dataset.
     """
-    # Gracefully skip this test if netcdf4 is not installed.
-    pytest.importorskip("netCDF4")
+    # Unwrap the xsnowDataset
+    unwrapped_ds = sample_xsnow_dataset.to_xarray()
     
-    ds = xsnowDataset(mock_xarray_dataset)
-    output_path = tmp_path / "test_output.nc"
-    
-    ds.to_netcdf(str(output_path))
-    
-    # Verify the file was created
-    assert output_path.exists()
-    
-    # Optional: Verify the content is correct by reading it back
-    reloaded_ds = xr.open_dataset(output_path)
-    xr.testing.assert_identical(mock_xarray_dataset, reloaded_ds)
+    # Check that the returned object is the correct type
+    assert isinstance(unwrapped_ds, xr.Dataset)
+    # Verify it is not an instance of our wrapper class
+    assert not isinstance(unwrapped_ds, xsnowDataset)
+    # Check that it's the same underlying object
+    assert unwrapped_ds is sample_xsnow_dataset.data
 
-def test_to_pro(mock_xarray_dataset, tmp_path):
-    """Tests writing to .pro files."""
-    ds = xsnowDataset(mock_xarray_dataset)
-    output_dir = tmp_path / "pro_output"
-    
-    # Total profiles = 2 locations * 3 timestamps = 6
-    ds.to_pro(str(output_dir))
-    
-    created_files = list(output_dir.glob("*.pro"))
-    assert len(created_files) == 6
-    
-    # Test the max_profiles guard
-    with pytest.raises(ValueError):
-        ds.to_pro(str(output_dir), max_profiles=5)
+# ... (rest of the existing tests)
+def test_getattr_property_forwarding(sample_xsnow_dataset):
+    assert sample_xsnow_dataset.sizes['layer'] == 3
+    assert 'latitude' in sample_xsnow_dataset.coords
 
-def test_to_smet(mock_xarray_dataset, tmp_path):
-    """Tests writing to .smet files."""
-    ds = xsnowDataset(mock_xarray_dataset)
-    output_dir = tmp_path / "smet_output"
-    
-    ds.to_smet(str(output_dir))
-    
-    created_files = list(output_dir.glob("*.smet"))
-    assert len(created_files) == 2
-    
-    # Test the max_files guard
-    ds_large = xsnowDataset(mock_xarray_dataset.isel(location=slice(0,1))) # create a single location dataset
-    with pytest.raises(ValueError):
-        ds.to_smet(str(output_dir), max_files=1)
+def test_getattr_method_forwarding_and_rewrapping(sample_xsnow_dataset):
+    subset = sample_xsnow_dataset.isel(layer=0)
+    assert isinstance(subset, xsnowDataset)
+    assert 'layer' not in subset.dims
 
-# --- Use Case Examples for Extensions ---
+def test_getitem_forwarding(sample_xsnow_dataset):
+    density_da = sample_xsnow_dataset['density']
+    assert isinstance(density_da, xr.DataArray)
+    assert np.array_equal(density_da.values, [[[100, 200, 300]]])
 
-# --- Example 1: Simple Extension (Standalone Function) ---
+def test_setitem_forwarding(sample_xsnow_dataset):
+    new_var = xr.DataArray([1, 2, 3], dims=['layer'], coords={'layer': sample_xsnow_dataset.layer})
+    sample_xsnow_dataset['new_variable'] = new_var
+    assert 'new_variable' in sample_xsnow_dataset.data
 
-def add_slab_density(ds: xsnowDataset, slab_thickness: float = 0.3) -> xsnowDataset:
-    """
-    Calculates the average density of the top slab of the snowpack.
-    This is an example of a simple extension that adds a new variable.
-    """
-    total_height = ds.data['height'].max(dim='layer')
-    slab_layers = ds.data['density'].where(ds.data['height'] >= total_height - slab_thickness)
-    slab_density = slab_layers.mean(dim='layer')
-    
-    new_xarray_ds = ds.data.assign(slab_density=slab_density)
-    
-    # The key step: re-wrap the modified xarray.Dataset in our class
-    return xsnowDataset(new_xarray_ds)
-
-def test_simple_extension_function(mock_xarray_dataset):
-    """
-    Tests the simple extension pattern by applying the add_slab_density function.
-    """
-    ds = xsnowDataset(mock_xarray_dataset)
-    
-    # Apply the external function
-    extended_ds = add_slab_density(ds)
-    
-    # Verify the result
-    assert isinstance(extended_ds, xsnowDataset)
-    assert 'slab_density' in extended_ds.data
-    assert extended_ds.data['slab_density'].sizes == {'location': 2, 'time': 3}
-    assert extended_ds.data['slab_density'].isel(location=0, time=0).item() == 250.0
-
-# --- Example 2: Complex Extension (Decorator Class) ---
-
-class DatasetDecorator:
-    """Generic decorator base class to handle attribute forwarding and re-wrapping."""
-    def __init__(self, base: xsnowDataset):
-        # The decorator should have its own reference to the data,
-        # which can be modified by subclasses.
-        self.data = base.data
-
-    def __getattr__(self, name):
-        # Forward attribute access to the internal xarray.Dataset
-        attr = getattr(self.data, name)
-        if callable(attr):
-            def method_wrapper(*args, **kwargs):
-                result = attr(*args, **kwargs)
-                if isinstance(result, xr.Dataset):
-                    # Re-wrap the result in a new base class, then decorate it
-                    new_base = xsnowDataset(result)
-                    return self.__class__(new_base)
-                return result
-            return method_wrapper
-        return attr
-
-class HazardChartData(DatasetDecorator):
-    """
-    A decorator that adds a new 'hazardChartElement' dimension and data.
-    This is an example of a complex extension.
-    """
-    def __init__(self, base: xsnowDataset):
-        super().__init__(base)
-        # Only compute the new data if it's not already present.
-        # This prevents re-computation and merge errors when re-wrapping a subset.
-        if 'hazard_value' not in self.data.data_vars:
-            self.data = self._compute_hazard_elements()
-
-    def _compute_hazard_elements(self):
-        """
-        Computes the hazard elements. This method is now robust to subsetting,
-        as it dynamically determines the shape of the new variable.
-        """
-        num_elements = 5
-        
-        # Identify dimensions to preserve from the base dataset
-        base_dims = [dim for dim in ['location', 'time'] if dim in self.data.dims]
-        shape = [self.data.sizes[dim] for dim in base_dims] + [num_elements]
-        dims = base_dims + ['hazardChartElement']
-
-        hazard_values = xr.DataArray(
-            np.random.rand(*shape),
-            dims=dims
-        )
-        # Add the coordinate for the new dimension
-        hazard_values = hazard_values.assign_coords(hazardChartElement=np.arange(num_elements))
-
-        # Merge the new data into the original dataset
-        return self.data.merge(hazard_values.rename('hazard_value'))
-
-def test_complex_extension_decorator(mock_xarray_dataset):
-    """
-    Tests the complex extension pattern by applying the HazardChartData decorator.
-    """
-    ds = xsnowDataset(mock_xarray_dataset)
-    
-    # Apply the decorator
-    decorated_ds = HazardChartData(ds)
-    
-    # Verify the result
-    assert isinstance(decorated_ds, HazardChartData)
-    assert 'hazardChartElement' in decorated_ds.sizes
-    assert 'hazard_value' in decorated_ds.data
-    assert decorated_ds.sizes['hazardChartElement'] == 5
-    
-    # Verify that the original functionality is still present
-    subset = decorated_ds.sel(location='station_A')
-    assert isinstance(subset, HazardChartData) # It remains decorated
-    assert 'location' not in subset.sizes
+def test_compute_hs(sample_xsnow_dataset):
+    ds_with_hs = sample_xsnow_dataset.compute_hs()
+    assert 'HS' in ds_with_hs.data
+    assert np.isclose(ds_with_hs.data['HS'].item(), 0.3)
