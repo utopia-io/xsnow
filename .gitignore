@@ -3,3 +3,4 @@
 /data/
 /src/xsnow/__pycache__/
 /src/xsnow/main.py
+tests/__pycache__/
