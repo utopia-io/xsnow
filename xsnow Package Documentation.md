@@ -1,6 +1,3 @@
-Of course. Here is the complete Markdown code for the documentation file.
-
-````markdown
 # xsnow Package Documentation
 
 `xsnow` is a Python package for reading, analyzing, and post-processing output from the SNOWPACK model. Designed for researchers, avalanche forecasters, and students, it provides a powerful and intuitive toolkit to transform raw model output into a clean, multi-dimensional, and analysis-ready format. By leveraging the robust `xarray` library, `xsnow` simplifies complex data handling and enables both CPU and GPU-accelerated computations, making it easier to work with snow profile and time-series data.
