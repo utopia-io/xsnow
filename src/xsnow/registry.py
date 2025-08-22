@@ -196,5 +196,20 @@ registry = {
         "aliases": [],
         "standard_name": "accumulated_temperature_gradient",
         "si_units": "K day m-1"
-    }
+    },
+    'z': {
+        "param_code": None,
+        "aliases": ['Depth Below Snow Surface'],
+        'standard_name': 'depth',
+        "long_name": "Depth Below Snow Surface",
+        'si_units': 'm',
+    },
+    'rc_flat': {
+        "param_code": None,
+        "aliases": ['Critical Cut Length (Flat Terrain)', 'rc_flat'],
+        'standard_name': 'critical_cut_length_for_flat_terrain',
+        'long_name': 'Critical Cut Length (Flat Terrain)',
+        'si_units': 'm',
+    },
+
 }

@@ -18,7 +18,7 @@
 ## 2. Internal Data Model
 - [x] Adopt 5D model: (`location, time, slope, realization, layer`).
 - [x] Add coordinate variables: `latitude, longitude, altitude, inclination, azimuth`.
-- [ ] Future: Re-implement `height` to `z` as the main vertical grid.
+- [x] Re-implement `height` to `z` as the main vertical grid.
     - Status: In progress. Proving difficult due to the multi-dimensional nature of `z`.
 - [x] Change `location` to an integer index with names stored as attributes.
 - [x] Implement `slope` as an integer index with coordinates `azimuth` and `inclination`.

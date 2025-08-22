@@ -1,6 +1,3 @@
-Of course. Here is the complete Markdown code for the documentation file.
-
-````markdown
 # xsnow Package Documentation
 
 `xsnow` is a Python package for reading, analyzing, and post-processing output from the SNOWPACK model. Designed for researchers, avalanche forecasters, and students, it provides a powerful and intuitive toolkit to transform raw model output into a clean, multi-dimensional, and analysis-ready format. By leveraging the robust `xarray` library, `xsnow` simplifies complex data handling and enables both CPU and GPU-accelerated computations, making it easier to work with snow profile and time-series data.
@@ -44,7 +41,7 @@ This command installs the core package plus a pre-compiled, ready-to-use version
 If you wish to contribute to the development of `xsnow`, it is recommended to install the package in "editable" mode from a cloned repository. This allows you to make changes to the source code and have them immediately take effect without needing to reinstall.
 
 ```bash
-# 1. Clone the repository from GitHub
+# 1. Clone the repository from GitLab
 git clone https://gitlab.com/avacollabra/postprocessing/xsnow
 cd xsnow
 
@@ -102,6 +99,7 @@ The `xsnow` package structures all snow profile data into a consistent, five-dim
   * **`slope`**: Represents different slope configurations (e.g., a 30-degree, south-facing slope).
   * **`realization`**: Used for ensemble simulations, where each realization is a different model run.
   * **`layer`**: The primary vertical dimension, representing an integer index from the ground up. The physical height of each layer is stored in the `height` data variable.
+  * **`z`**: A non-dimension coordinate that is **automatically calculated** by `xsnow.read()`, representing the physical depth below the snow surface in meters (`z = height - HS`). The surface is at or near `z=0`.
 
 ### Integer Location Indexing
 
@@ -130,7 +128,7 @@ print(name_map[0])
 
 ### Hardware-Aware Computation (CPU/GPU)
 
-The `xsnow` package is designed to leverage available hardware for optimal performance. The `xsnowDataset` class provides methods to move data between the CPU and GPU, and the functions in `analysis.py` are hardware-aware.
+The `xsnow` package is designed to leverage available hardware for optimal performance. The `xsnowDataset` class provides methods to move data between the CPU and GPU, and the analysis functions are hardware-aware.
 
   * **`.to_gpu()`**: Moves the dataset to the GPU for accelerated processing with `CuPy`.
   * **`.to_cpu()`**: Moves the data back to the CPU for tasks like saving files.
@@ -145,19 +143,48 @@ ds_cpu = xsnow.read('path/to/data')
 ds_gpu = ds_cpu.to_gpu()
 
 # 3. Analysis functions automatically use the GPU
-# from xsnow.analysis import compute_critical_cut_length
-# ds_results_gpu = compute_critical_cut_length(ds_gpu) 
+ds_results_gpu = ds_gpu.compute_critical_cut_length() 
 
 # 4. Move results back to CPU for saving
-# ds_results_cpu = ds_results_gpu.to_cpu()
-# ds_results_cpu.to_netcdf('results.nc')
+ds_results_cpu = ds_results_gpu.to_cpu()
+ds_results_cpu.to_netcdf('results.nc')
+```
+
+### Handling Weather Data at Multiple Heights
+
+The `xsnow` package has a two-part system for working with meteorological variables measured at different heights (e.g., wind speed at 2m and 10m).
+
+1.  **Parsing:** The `read()` function recognizes a special `_height` convention in the `[HEADER]` of SMET files. If it finds `fields = ... VW ...` and `VW_height = 10`, it will automatically create a unique variable named `VW_10m`.
+
+2.  **Stacking:** For analyses where you need to treat these measurements as a single variable with a vertical dimension, you can use the `.stack_weather_variables()` extension method.
+
+**Example:**
+
+```python
+# ds contains variables 'TA' (at surface) and 'TA_2m'
+# We want to combine them into a single variable 'TA' with a new
+# 'height_above_surface' dimension.
+
+tidy_ta = ds.stack_weather_variables(base_name='TA')
+print(tidy_ta)
+```
+
+**Output:**
+
+```
+<xarray.DataArray (location: 1, time: N, height_above_surface: 2)>
+...
+Coordinates:
+  * location              (location) int64 0
+  * time                  (time) datetime64[ns] ...
+  * height_above_surface  (height_above_surface) int64 0 2
 ```
 
 ### Plotting and Visualization
 
-Because `xsnowDataset` is a wrapper around `xarray.Dataset`, you can use `xarray`'s powerful and convenient built-in plotting capabilities, which are based on `matplotlib`.
+Because `xsnowDataset` is a wrapper around `xarray.Dataset`, you can use `xarray`'s powerful and convenient built-in plotting capabilities, which are based on `matplotlib`. The automatically calculated `z` coordinate is ideal for creating intuitive profile plots.
 
-**Example: Plotting a single snow profile's density against its physical height**
+**Example: Plotting a single snow profile's density against its physical depth**
 
 ```python
 import matplotlib.pyplot as plt
@@ -168,12 +195,12 @@ ds = xsnow.read('path/to/station_A.pro')
 # Select a single profile for a specific time
 profile = ds.data.isel(location=0, time=0)
 
-# Use xarray's .plot() method with the 'height' variable on the y-axis
-profile['density'].plot(y='height')
+# Use xarray's .plot() method with the 'z' coordinate on the y-axis
+profile['density'].plot(y='z')
 
 plt.title("Density Profile for Station A")
 plt.xlabel("Density (kg m-3)")
-plt.ylabel("Height Above Ground (m)")
+plt.ylabel("Depth Below Surface (m)")
 plt.grid(True)
 plt.show()
 ```
@@ -277,69 +304,94 @@ This method is designed to make your custom function feel like a **built-in** pa
     print(mean_density)
     ```
 
-## Advanced Analysis Workflow Example
+## Advanced Analysis Workflow Example 1: Calculating Stability and Filtering Layers
 
-This example demonstrates how to chain together analysis functions to derive a more complex metric: the average density of the snow slab resting above a potential weak layer.
-
-First, we define an extension function using the "Standalone Function" pattern. This function will use tools from the `analysis` module.
+This example demonstrates how to chain together registered methods to derive meaningful insights from the data. Because the analysis functions are registered as extensions, they can be called directly on any `xsnowDataset` object.
 
 ```python
 import xsnow
-# from xsnow.analysis import find_layer_by_criteria # Assuming this will be available
 
-def calculate_mean_density_above_weak_layer(ds: xsnow.xsnowDataset, criteria: str) -> xsnow.xsnowDataset:
-    """
-    Calculates the mean density of the snowpack slab above the highest
-    layer that meets the specified weak layer criteria.
-    """
-    # 1. Find all layers that match the criteria (conceptual)
-    # weak_layers = find_layer_by_criteria(ds, criteria)
-    
-    # 2. Find the depth of the highest weak layer (conceptual)
-    # highest_weak_layer_z = weak_layers.data['z'].max(dim='z')
-    
-    # 3. Create a mask for all layers *above* the highest weak layer (conceptual)
-    # slab_mask = ds.data.z > highest_weak_layer_z
-    
-    # 4. Calculate the mean density of those layers (conceptual)
-    # mean_density_above_wl = ds.data['density'].where(slab_mask).mean(dim='z')
-    
-    # For the example, create a dummy result
-    mean_density_above_wl = ds.data['density'].mean(dim='z')
-    
-    mean_density_above_wl.attrs = {
-        'long_name': f'Mean density above highest weak layer ({criteria})',
-        'units': 'kg m-3'
-    }
-
-    # 5. Add the new variable to the dataset and re-wrap
-    new_xarray_ds = ds.data.assign(mean_density_above_wl=mean_density_above_wl)
-    return xsnow.xsnowDataset(new_xarray_ds)
-```
-
-Now, we can use this function in a complete analysis workflow that demonstrates the new API.
-
-```python
-import xsnow
-# from xsnow.analysis import compute_rc_flat, find_layer_by_criteria
-
-# 1. Load the initial data using the top-level read function
+# 1. Load the initial data
 ds = xsnow.read('path/to/your/data')
 
 # 2. (Optional) Move to GPU for faster computation
 ds_gpu = ds.to_gpu()
 
-# 3. Compute a built-in analysis variable (conceptual)
-# ds_with_rc = compute_rc_flat(ds_gpu)
-ds_with_rc = ds_gpu # Placeholder
+# 3. Compute total snow height using the built-in method
+ds_with_hs = ds_gpu.compute_hs()
 
-# 4. Define weak layer criteria
-criteria = "density < 200"
+# 4. Compute critical cut length using the registered extension method
+ds_with_rc = ds_with_hs.compute_critical_cut_length()
 
-# 5. Use our standalone extension function to calculate the slab density
-ds_final = calculate_mean_density_above_weak_layer(ds_with_rc, criteria)
+# 5. Define weak layer criteria and find matching layers
+criteria = "density < 200 & grain_size > 0.4"
+ds_filtered = ds_with_rc.find_layer_by_criteria(criteria)
 
 # 6. Move the final result back to the CPU to print or plot
-ds_final_cpu = ds_final.to_cpu()
-print(ds_final_cpu.data['mean_density_above_wl'])
+ds_final_cpu = ds_filtered.to_cpu()
+
+# 7. Print a slice of the final dataset to inspect the results
+print("Results for the first location and first timestamp:")
+print(ds_final_cpu.data.isel(location=0, time=0))
+```
+
+## Advanced Analysis Workflow Example 2: Wet Slab Stability
+This example demonstrates a more complex workflow for assessing a wet slab avalanche problem. It uses the registered .get_wet_slab_LOC() method to find a potential weak layer and then calculates the distance to the percolating wetting front.
+
+```python
+import xsnow
+import numpy as np
+import xarray as xr
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import sys
+from pathlib import Path
+
+# --- 1. Load Data ---
+# This workflow requires a .pro file with 'height', 'grain_type',
+# 'grain_size', and 'lwc' variables.
+pro_file_path = "path/to/your/data.pro"
+ds = xsnow.read(pro_file_path)
+
+# --- 2. Find the Layer of Concern (LOC) ---
+# Use the custom registered method to find the LOC for each timestamp.
+# The method returns a DataArray of the LOC's height over time.
+loc_height = ds.get_wet_slab_LOC()
+
+# --- 3. Find the Wetting Front ---
+# The wetting front is the deepest layer with melt forms and significant water.
+is_melt_form = (ds.data['grain_type'] >= 770) & (ds.data['grain_type'] <= 779)
+is_wet = ds.data['lwc'] > 0.03
+wet_front_candidates = ds.data['height'].where(is_melt_form & is_wet)
+wet_front_height = wet_front_candidates.min(dim='layer')
+
+# --- 4. Calculate Distance and Print Summary ---
+distance = wet_front_height - loc_height
+# Select the last timestamp for a summary report
+last_time_step = ds.time.isel(time=-1)
+final_distance = distance.sel(time=last_time_step, method="nearest").item()
+
+print(f"--- Wet Slab Analysis for {pd.to_datetime(last_time_step.values).date()} ---")
+if not np.isnan(final_distance):
+    print(f"Distance to Wet Front: {final_distance:.2f} m")
+    if final_distance < 0:
+        print("WARNING: The wetting front has passed the layer of concern.")
+else:
+    print("A Layer of Concern or Wet Front was not found.")
+
+# --- 5. Plot the Time Series ---
+fig, ax = plt.subplots(figsize=(10, 6))
+hs = ds.compute_hs().data.HS
+
+ax.plot(ds.time.squeeze(), hs.squeeze(), color='blue', linestyle='--', label='Snow Surface (HS)')
+ax.plot(ds.time.squeeze(), loc_height.squeeze(), color='black', marker='.', markersize=4, label='Layer of Concern (LOC)')
+ax.plot(ds.time.squeeze(), wet_front_height.squeeze(), color='red', linestyle=':', marker='x', markersize=4, label='Wet Front')
+
+ax.set_title('Wet Slab Analysis Time Series')
+ax.set_ylabel('Height Above Ground (m)')
+ax.set_xlabel('Date')
+ax.grid(True, linestyle='--', alpha=0.6)
+ax.legend()
+fig.autofmt_xdate()
+plt.show()
 ```

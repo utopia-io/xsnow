@@ -42,12 +42,11 @@ The package uses a physically intuitive vertical coordinate system.
   ground in meters.
 """
 
-from typing import Optional, Union, Any, List, TYPE_CHECKING
-from pathlib import Path
-
+from typing import Union, List, Any, TYPE_CHECKING
 import pandas as pd
 import xarray as xr
 import numpy as np
+from pathlib import Path
 
 # Use TYPE_CHECKING to avoid circular imports at runtime for type hints
 if TYPE_CHECKING:
@@ -55,6 +54,7 @@ if TYPE_CHECKING:
     from xsnow.selectors import TimeSelector
 
 from xsnow.registry import registry
+# Import the registry from the plugin module
 from xsnow.plugin import _analysis_plugins
 
 
@@ -122,12 +122,18 @@ class xsnowDataset:
         automatically re-wrapped in an `xsnowDataset` instance to allow for
         method chaining.
         """
+        # Check the plugin registry first for the method name
         if name in _analysis_plugins:
             plugin_func = _analysis_plugins[name]
             def plugin_wrapper(*args, **kwargs):
-                return plugin_func(self, *args, **kwargs)
+                # Pass the instance (self) as the first argument
+                result = plugin_func(self, *args, **kwargs)
+                
+                # FIX: Add re-wrapping logic for plugin results
+                return self.__class__(result) if isinstance(result, xr.Dataset) else result
             return plugin_wrapper
         
+        # If not in the registry, then try the underlying xarray.Dataset
         if self.data is None:
             raise AttributeError(f"Dataset is not loaded. Cannot access '{name}'.")
         
@@ -140,7 +146,7 @@ class xsnowDataset:
             return method_wrapper
         else:
             return attr
-        
+                        
     def __getitem__(self, key: str) -> xr.DataArray:
         """
         Forwards item access to the underlying xarray.Dataset.
@@ -294,6 +300,39 @@ class xsnowDataset:
         
         return self.__class__(self.data.assign({'HS': hs}))
 
+    def compute_z_depth(self) -> 'xsnowDataset':
+        """
+        Calculates the depth below the surface (z) for each snowpack layer
+        and adds it as a non-dimension coordinate.
+
+        This method first computes the total snow height (HS) and then
+        calculates z as (height - HS), adding it as a 'z' data
+        coordinate to the dataset. Metadata is pulled from the central registry.
+
+        Returns:
+            A new xsnowDataset instance with the 'z' coordinate added.
+        """
+        if self.data is None:
+            raise ValueError("Cannot compute on an empty dataset.")
+        
+        ds_with_hs = self.compute_hs() if 'HS' not in self.data else self
+        
+        z_depth = ds_with_hs.data['height'] - ds_with_hs.data['HS']
+        
+        # FIX: Pull metadata from the registry for consistency
+        if 'z' in registry:
+            reg_entry = registry['z']
+            z_depth.attrs = {
+                'long_name': reg_entry.get('long_name', 'Depth Below Snow Surface'),
+                'units': reg_entry.get('si_units', 'm'),
+                'standard_name': reg_entry.get('standard_name', 'depth'),
+                'positive': 'up'
+           }
+        
+        new_xr_ds = ds_with_hs.data.assign_coords(z=z_depth)
+        
+        return self.__class__(new_xr_ds)
+    
     def to_gpu(self) -> 'xsnowDataset':
         """
         Moves the dataset's data to the GPU using CuPy if available.
@@ -344,7 +383,4 @@ class xsnowDataset:
         >>> ds_cpu_again = ds_gpu.to_cpu()
         >>> ds_cpu_again.to_netcdf('results.nc')
         """
-        if self.data is None:
-            return self
-        else:
-            return self.__class__(self.data.as_numpy())
+        return self if self.data is None else self.__class__(self.data.as_numpy())

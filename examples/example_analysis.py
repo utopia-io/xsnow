@@ -27,7 +27,7 @@ import xarray as xr
 
 # Import the main dataset class and the analysis functions
 from xsnow.dataset import xsnowDataset
-from xsnow.analysis import compute_critical_cut_length, find_layer_by_criteria
+from xsnow.extensions import compute_critical_cut_length, find_layer_by_criteria
 import xsnow
 
 

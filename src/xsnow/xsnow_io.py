@@ -263,8 +263,11 @@ def read(
     if slope: final_xr_dataset = slope.apply(final_xr_dataset)
     if realization: final_xr_dataset = realization.apply(final_xr_dataset)
 
-    return xsnowDataset(final_xr_dataset)
+    # Create the final xsnowDataset object
+    final_dataset = xsnowDataset(final_xr_dataset)
 
+    # Calculate and add the 'z' coordinate before returning
+    return final_dataset.compute_z_depth()
 def _read_pro_raw(
     filepath: Union[str, Path],
     datetime_start: Optional[str] = None,
@@ -481,13 +484,26 @@ def read_smet(
         logger.error(f"SMET file {filepath} is missing 'fields' or '[DATA]' section.")
         return None
 
-    column_names = header['fields'].split()
+    variable_heights = {
+        key.replace('_height', ''): value.strip()
+        for key, value in header.items() if '_height' in key
+    }
+
+    original_names = header['fields'].split()
+    new_column_names = []
+    for name in original_names:
+            if name in variable_heights:
+                # Append height to name, e.g., 'VW' becomes 'VW_10m'
+                new_column_names.append(f"{name}_{variable_heights[name]}m")
+            else:
+                new_column_names.append(name)
+    
     df = pd.read_csv(
         file_path,
         skiprows=data_start_line,
         sep=r'\s+',
         header=None,
-        names=column_names,
+        names=new_column_names,
         na_values=header.get('nodata', -999)
     )
 
@@ -539,7 +555,7 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
     """
     if existing_ds.data is None or existing_ds.data.time.size == 0:
         new_data_obj = read(source)
-        return new_data_obj if new_data_obj else existing_ds
+        return new_data_obj or existing_ds
 
     last_timestamp = existing_ds.data.time.max().values
     last_timestamp_str = pd.to_datetime(last_timestamp).isoformat()
