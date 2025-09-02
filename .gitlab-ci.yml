@@ -3,6 +3,11 @@ stages:
   - standard-install
   - gpu-install
 
+variables:
+  PIP_CACHE_DIR: ".cache/pip"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
 default:
   image: python:3.12-slim
   before_script:
@@ -14,10 +19,6 @@ default:
     paths:
       - .cache/pip
     policy: pull-push
-  variables:
-    PIP_CACHE_DIR: ".cache/pip"
-    PYTHONDONTWRITEBYTECODE: "1"
-    PYTHONUNBUFFERED: "1"
 
 lint:
   stage: lint
