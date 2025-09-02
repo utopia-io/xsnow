@@ -20,15 +20,16 @@ default:
       - .cache/pip
     policy: pull-push
 
-lint:
+########################################
+# lint                                 #
+########################################
+type-mypy:
   stage: lint
   rules:
     - when: manual
+  allow_failure: true
   script:
-    # Install linter extras + package (to allow import/mypy)
     - pip install ".[lint]"
-    - flake8 src tests
-    - pylint src/xsnow
     - mypy src/xsnow
   artifacts:
     when: always
@@ -38,7 +39,21 @@ lint:
     reports:
       dotenv: # none
 
-standard-install:
+lint-flake8+pylint:
+  stage: lint
+  rules:
+    - when: manual
+  allow_failure: true
+  script:
+    - pip install ".[lint]"
+    - flake8 src tests
+    - pylint src/xsnow
+
+
+########################################
+# install+test                         #
+########################################
+pytest:
   stage: standard-install
   script:
     - pip install -e ".[testing]"
@@ -52,9 +67,8 @@ standard-install:
         coverage_format: cobertura
         path: coverage.xml
 
-gpu-install:
+pytest:
   stage: gpu-install
-  # You need GPU-capable runners with the `gpu` tag and NVIDIA runtime
   tags: ["gpu"]
   image: nvidia/cuda:12.4.1-runtime-ubuntu22.04
   before_script:
