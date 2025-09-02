@@ -198,58 +198,6 @@ def compute_critical_cut_length(ds: 'xsnowDataset') -> 'xsnowDataset':
 
     return ds.data.assign(rc_flat=rc_flat_final)
 
-@register_xsnowDataset_method
-def get_wet_slab_LOC(ds: 'xsnowDataset') -> xr.DataArray:
-    """
-    Finds the height of the wet slab Layer of Concern (LOC) for each timestamp.
-
-    The LOC is defined as the layer in the bottom half of the snowpack with a
-    weak grain type (Facets or Depth Hoar) that has the largest grain size
-    increase from the layer immediately above it.
-
-    Args:
-        ds (xsnowDataset): The dataset to analyze.
-
-    Returns:
-        xr.DataArray: A DataArray of the LOC height for each timestamp.
-        Values will be NaN for timestamps where no LOC is found.
-    """
-    # Ensure HS is available for the calculation
-    ds = ds.compute_hs() if 'HS' not in ds.data else ds
-    hs = ds.data['HS']
-
-    # Criteria 1 & 2: Mask for candidate layers
-    is_in_bottom_half = ds.data['height'] <= (hs / 2)
-    is_weak_grain_type = (ds.data['grain_type'] >= 400) & (ds.data['grain_type'] <= 599)
-    is_candidate = is_in_bottom_half & is_weak_grain_type
-
-    # Criteria 3: Calculate the grain size increase from the layer above
-    grain_size_gradient = ds.data['grain_size'] - ds.data['grain_size'].shift(layer=1)
-    
-    # Consider only positive gradients for our candidate layers
-    candidate_gradients = grain_size_gradient.where(is_candidate & (grain_size_gradient > 0))
-    
-    # Find the layer index that has the maximum gradient for each timestamp
-    loc_layer_indices = candidate_gradients.idxmax(dim='layer')
-
-    # FIX: Gracefully handle timestamps where no LOC was found (index is NaN)
-    # 1. Drop the NaN values to get only the valid layer indices
-    valid_indices = loc_layer_indices.dropna(dim=loc_layer_indices.dims[0])
-    
-    # If no valid LOCs were found in the entire timeseries, return all NaNs
-    if valid_indices.size == 0:
-        return xr.full_like(hs, np.nan)
-
-    # 2. Perform the selection using only the valid indices
-    valid_loc_heights = ds.data.height.sel(layer=valid_indices)
-
-    # 3. Reindex the result to match the original time dimension, filling
-    #    missing timestamps (where no LOC was found) with NaN.
-    return valid_loc_heights.reindex_like(loc_layer_indices)
-
-# ================================================================= #
-#                   DATA RESHAPING EXTENSIONS                       #
-# ================================================================= #
 
 @register_xsnowDataset_method
 def get_wet_slab_LOC(ds: 'xsnowDataset') -> xr.DataArray:
@@ -298,6 +246,4 @@ def get_wet_slab_LOC(ds: 'xsnowDataset') -> xr.DataArray:
     
     # 4. Use the boolean mask to nullify the placeholder values, leaving only the
     #    correctly identified heights and filling the rest with NaN.
-    loc_heights = selected_heights.where(was_loc_found)
-    
-    return loc_heights
+    return selected_heights.where(was_loc_found)

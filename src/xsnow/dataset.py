@@ -247,7 +247,7 @@ class xsnowDataset:
         if smet_data_obj is None:
             return self
 
-        merged_ds = xr.merge([self.data, smet_data_obj.data])
+        merged_ds = xr.merge([self.data, smet_data_obj.data], compat='no_conflicts')
         return self.__class__(merged_ds)
     
     def to_xarray(self) -> xr.Dataset:
