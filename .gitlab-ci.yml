@@ -39,7 +39,7 @@ type-mypy:
     reports:
       dotenv: # none
 
-lint-flake8+pylint:
+lint-flake8:
   stage: lint
   rules:
     - when: manual
@@ -47,13 +47,21 @@ lint-flake8+pylint:
   script:
     - pip install ".[lint]"
     - flake8 src tests
+
+lint-pylint:
+  stage: lint
+  rules:
+    - when: manual
+  allow_failure: true
+  script:
+    - pip install ".[lint]"
     - pylint src/xsnow
 
 
 ########################################
 # install+test                         #
 ########################################
-pytest:
+pytest-cpu:
   stage: standard-install
   script:
     - pip install -e ".[testing]"
@@ -67,7 +75,7 @@ pytest:
         coverage_format: cobertura
         path: coverage.xml
 
-pytest:
+pytest-gpu:
   stage: gpu-install
   tags: ["gpu"]
   image: nvidia/cuda:12.4.1-runtime-ubuntu22.04
