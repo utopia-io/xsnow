@@ -14,7 +14,6 @@ authors = [
   { name = "Florian Herla", email = "fherla@sfu.ca" },
 ]
 dependencies = [
-    "cupy>=13.5.1",
     "netcdf4>=1.7.2",
     "numpy>=2.3.2",
     "pandas>=2.3.1",
@@ -25,10 +24,8 @@ dependencies = [
 keywords = ["snow", "avalanche", "xarray", "post-processing"]
 classifiers = [
   "License :: OSI Approved :: GNU Affero General Public License v3",
-  "Programming Language :: Python :: 3.8",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Operating System :: OS Independent",
 ]
 
@@ -36,7 +33,19 @@ classifiers = [
 testing = [
   "pytest>=7.0",
   "pytest-cov",
-  "cupy-cuda12x; platform_system == 'Linux'", # Example for GPU support on Linux
+]
+gpu = [
+  "cupy-cuda12x; platform_system == 'Linux'",  # nvidia wheels
+]
+lint = [
+  "mypy>=1.6",
+  "flake8>=6",
+  "pylint>=3",
+]
+dev = [
+  "matplotlib>=3.8",
+  "ipython",
+  "jupyter",
 ]
 
 [project.urls]
@@ -46,11 +55,6 @@ testing = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[dependency-groups]
-dev = [
-    "matplotlib>=3.10.5",
-]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
