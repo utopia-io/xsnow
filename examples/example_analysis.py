@@ -6,7 +6,8 @@ xsnow package.
 This script shows a complete workflow:
 1.  Loads snow profile data from a directory.
 2.  Optionally moves the data to a GPU for accelerated processing.
-3.  Applies the `compute_rc_flat` function to calculate ram resistance.
+3.  Applies the `compute_critical_cut_length` function to calculate a key
+    stability metric for each layer.
 4.  Applies the `find_layer_by_criteria` function to identify weak layers.
 5.  Uses an extension function to calculate the mean density of the slab
     above the highest weak layer.
@@ -26,7 +27,8 @@ import xarray as xr
 
 # Import the main dataset class and the analysis functions
 from xsnow.dataset import xsnowDataset
-from xsnow.analysis import compute_critical_cut_length, find_layer_by_criteria
+from xsnow.extensions import compute_critical_cut_length, find_layer_by_criteria
+import xsnow
 
 
 def calculate_mean_density_above_weak_layer(ds: xsnowDataset, criteria: str) -> xsnowDataset:
@@ -48,13 +50,12 @@ def calculate_mean_density_above_weak_layer(ds: xsnowDataset, criteria: str) -> 
         raise ValueError("Input dataset is empty.")
 
     # --- Hardware-Aware Computation Setup ---
+    import contextlib
     xp = np
     if hasattr(ds.data.variables[list(ds.data.data_vars)[0]].data, 'device'):
-        try:
+        with contextlib.suppress(ImportError):
             import cupy as cp
             xp = cp
-        except ImportError:
-            pass # Fallback to numpy if cupy isn't available
 
     # 1. Find all layers that match the criteria
     weak_layers = find_layer_by_criteria(ds, criteria)
@@ -63,7 +64,7 @@ def calculate_mean_density_above_weak_layer(ds: xsnowDataset, criteria: str) -> 
     highest_weak_layer_depth = weak_layers.data['height'].max(dim='layer')
 
     # 3. Create a mask for all layers that are *above* the highest weak layer
-    # FIX: Perform the comparison on the raw arrays using the hardware-aware backend (xp)
+    # Perform the comparison on the raw arrays using the hardware-aware backend (xp)
     # This avoids a TypeError when broadcasting a GPU array against another.
     height_data = xp.asarray(ds.data['height'].data)
     # Add a new axis to the depth array so it can be broadcast correctly against the 3D height array
@@ -106,7 +107,7 @@ def main():
 
     # --- 1. Specify the path to your data files ---
     # IMPORTANT: Change this path to the directory containing your .pro files.
-    data_directory = "path/to/your/data"
+    data_directory = r"C:\Users\Avalanche\Documents\projects\SNOWPACK\dev\xsnow\data"#"path/to/your/data"
     
     data_dir = Path(data_directory)
     if not data_dir.is_dir():
@@ -115,7 +116,7 @@ def main():
         sys.exit(1)
 
     print(f"--- 1. Reading data from '{data_directory}' ---")
-    ds_cpu = xsnowDataset(str(data_dir))
+    ds_cpu = xsnow.read(str(data_dir))
 
     if ds_cpu.data is None:
         print("No data was loaded. Exiting.")
@@ -149,6 +150,7 @@ def main():
     print(f"Criteria: {criteria}")
     
     # The filtering function is also hardware-aware
+    # We pass in ds_with_rc to keep the rc_flat variable in our dataset
     weak_layers_ds = find_layer_by_criteria(ds_with_rc, criteria)
     
     # Move data back to CPU for printing
@@ -156,7 +158,8 @@ def main():
 
     # --- 5. Calculate Mean Density Above Weak Layer ---
     print("\n--- 5. Calculating mean density above the weak layer ---")
-    ds_final = calculate_mean_density_above_weak_layer(ds_gpu, criteria) # Use GPU version
+    # Use the GPU version of the dataset for the calculation
+    ds_final = calculate_mean_density_above_weak_layer(ds_gpu, criteria)
     
     # Move back to CPU for printing
     ds_final_cpu = ds_final.to_cpu()

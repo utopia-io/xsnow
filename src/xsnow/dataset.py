@@ -32,6 +32,14 @@ It achieves this through several key features:
     `xsnowDataset` instance. This ensures that the user can chain operations
     (e.g., `ds.sel(...).mean(...)`) and always retain the convenience of the
     `xsnowDataset` wrapper.
+
+Vertical Coordinate System
+---------------------------
+The package uses a physically intuitive vertical coordinate system.
+- `z`: The primary vertical coordinate, representing depth below the snow
+  surface in meters. The surface is z=0, and values are negative downwards.
+- `height`: A data variable representing the original height above the
+  ground in meters.
 """
 
 from typing import Sequence, Union, Any, List, TYPE_CHECKING
@@ -40,6 +48,7 @@ from pathlib import Path
 import pandas as pd
 import xarray as xr
 import numpy as np
+from pathlib import Path
 
 # Use TYPE_CHECKING to avoid circular imports at runtime for type hints
 if TYPE_CHECKING:
@@ -47,6 +56,7 @@ if TYPE_CHECKING:
     from xsnow.selectors import TimeSelector
 
 from xsnow.registry import registry
+# Import the registry from the plugin module
 from xsnow.plugin import _analysis_plugins
 
 
@@ -74,8 +84,8 @@ class xsnowDataset:
         """
         if not isinstance(source, xr.Dataset):
             raise TypeError(
-                f"xsnowDataset must be initialized with an xarray.Dataset. "
-                f"To read from files, use the `xsnow.read()` function."
+                "xsnowDataset must be initialized with an xarray.Dataset. "
+                "To read from files, use the `xsnow.read()` function."
             )
         self.data: xr.Dataset = source
 
@@ -111,18 +121,28 @@ class xsnowDataset:
         Forwards attribute access to a registered analysis plugin or the
         underlying xarray.Dataset.
 
-        This method is the hook that allows users to interact with the object
-        as if it were a native xarray.Dataset (e.g., calling .sel(), .mean(),
-        accessing .sizes). It also discovers and executes registered analysis
-        plugins. If a method call returns a new xarray.Dataset, it is
-        automatically re-wrapped in the xsnowDataset class.
+        This is the core mechanism that enables the xsnowDataset to behave like
+        an xarray.Dataset while also providing custom functionality. The lookup
+        priority is:
+        1. Registered analysis plugins (e.g., from `xsnow.register_xsnowDataset_method`).
+        2. Attributes and methods of the underlying `xarray.Dataset` (`self.data`).
+
+        If a forwarded method call returns a new `xarray.Dataset`, it is
+        automatically re-wrapped in an `xsnowDataset` instance to allow for
+        method chaining.
         """
+        # Check the plugin registry first for the method name
         if name in _analysis_plugins:
             plugin_func = _analysis_plugins[name]
             def plugin_wrapper(*args, **kwargs):
-                return plugin_func(self, *args, **kwargs)
+                # Pass the instance (self) as the first argument
+                result = plugin_func(self, *args, **kwargs)
+                
+                # FIX: Add re-wrapping logic for plugin results
+                return self.__class__(result) if isinstance(result, xr.Dataset) else result
             return plugin_wrapper
         
+        # If not in the registry, then try the underlying xarray.Dataset
         if self.data is None:
             raise AttributeError(f"Dataset is not loaded. Cannot access '{name}'.")
         
@@ -131,9 +151,7 @@ class xsnowDataset:
         if callable(attr):
             def method_wrapper(*args, **kwargs):
                 result = attr(*args, **kwargs)
-                if isinstance(result, xr.Dataset):
-                    return self.__class__(result)
-                return result
+                return self.__class__(result) if isinstance(result, xr.Dataset) else result
             return method_wrapper
         else:
             return attr
@@ -202,7 +220,7 @@ class xsnowDataset:
         --------
         >>> ds = xsnow.read('path/to/data')
         >>> # Create and assign a new variable
-        >>> ds['new_var'] = xr.DataArray([1, 2, 3], dims=['layer'])
+        >>> ds['new_var'] = xr.DataArray([1, 2, 3], dims=['z'])
         """
         if self.data is None:
             raise KeyError("Dataset is not loaded.")
@@ -261,51 +279,6 @@ class xsnowDataset:
         copied_xr_dataset = self.data.copy(deep=deep)
         return self.__class__(copied_xr_dataset)
 
-    def update(self, source: Union[str, List[str], Path]) -> 'xsnowDataset':
-        """
-        Updates the dataset with new data from a source.
-
-        This method is designed for workflows where you load a cached dataset
-        (e.g., from NetCDF) and want to append new data from recent .pro or
-        .smet files. It finds the last timestamp in the current data and only
-        reads new data from the source that is more recent.
-
-        Args:
-            source: Path to a file, a directory, or a list of files
-                containing the new data.
-
-        Returns:
-            A new xsnowDataset instance with the combined data.
-        
-        Examples
-        --------
-        >>> # Load a cached dataset
-        >>> ds_cache = xsnow.read('historical_data.nc')
-        >>> # Update with the latest files from a directory
-        >>> ds_updated = ds_cache.update('path/to/new_data/')
-        """
-        from xsnow.xsnow_io import read
-        from xsnow.selectors import TimeSelector
-
-        if self.data is None or self.data.time.size == 0:
-            new_data_obj = read(source)
-            return new_data_obj if new_data_obj else self
-
-        last_timestamp = self.data.time.max().values
-        last_timestamp_str = pd.to_datetime(last_timestamp).isoformat()
-        
-        time_filter = TimeSelector(sel=slice(last_timestamp_str, None))
-        new_data_obj = read(source, time=time_filter)
-
-        if new_data_obj is None or new_data_obj.data.time.size == 0:
-            return self
-
-        combined = xr.concat([self.data, new_data_obj.data], dim="time")
-        _, index = np.unique(combined['time'], return_index=True)
-        combined = combined.isel(time=index)
-
-        return self.__class__(combined)
-
     def merge_smet(self, smet_source: Union[str, List[str], Path]) -> 'xsnowDataset':
         """
         Reads one or more SMET files and merges their data into this dataset.
@@ -337,37 +310,43 @@ class xsnowDataset:
 
         merged_ds = xr.merge([self.data, smet_data_obj.data])
         return self.__class__(merged_ds)
-
+    
     def to_xarray(self) -> xr.Dataset:
         """
-        Unwrap the dataset from the xsnowDataset class
+        Returns the underlying xarray.Dataset.
+
+        This method unwraps the xsnowDataset and provides direct access to the
+        core xarray.Dataset object. This is useful for interoperability with
+        other libraries or functions that are built to work with standard
+        xarray objects.
+
+        Returns:
+            The stored xarray.Dataset object.
+        
+        Examples
+        --------
+        >>> ds = xsnow.read('path/to/data')
+        >>> # Get the raw xarray object for use with another library
+        >>> xr_ds = ds.to_xarray()
         """
         return self.data
-
-    def to_netcdf(self, output_path: Union[str, Path], **kwargs):
-        """
-        Saves the dataset to a NetCDF file.
-
-        This method provides a convenient way to cache processed data or export
-        it for use in other applications that support NetCDF.
-
-        Args:
-            output_path: The destination file path for the .nc file.
-            **kwargs: Additional keyword arguments passed to `xarray.Dataset.to_netcdf()`.
-        """
-        if self.data is None: return
-        self.data.to_netcdf(output_path, **kwargs)
 
     def compute_hs(self) -> 'xsnowDataset':
         """
         Computes the total snow height (HS) from layer heights.
-        
-        This method calculates the maximum height for each profile and adds it
-        to the dataset as a new variable 'HS'.
-        
+
+        This method calculates the maximum value of the 'height' variable along
+        the 'layer' dimension for each profile. The result is added to the
+        dataset as a new data variable named 'HS' (Total Snow Height).
+
+        The resulting 'HS' variable will not have a 'layer' dimension.
+
         Returns:
             A new xsnowDataset instance with the 'HS' variable added.
             
+        Raises:
+            ValueError: If the dataset is empty or the 'height' variable is missing.
+
         Examples
         --------
         >>> ds = xsnow.read('path/to/data')
@@ -382,6 +361,39 @@ class xsnowDataset:
         
         return self.__class__(self.data.assign({'HS': hs}))
 
+    def compute_z_depth(self) -> 'xsnowDataset':
+        """
+        Calculates the depth below the surface (z) for each snowpack layer
+        and adds it as a non-dimension coordinate.
+
+        This method first computes the total snow height (HS) and then
+        calculates z as (height - HS), adding it as a 'z' data
+        coordinate to the dataset. Metadata is pulled from the central registry.
+
+        Returns:
+            A new xsnowDataset instance with the 'z' coordinate added.
+        """
+        if self.data is None:
+            raise ValueError("Cannot compute on an empty dataset.")
+        
+        ds_with_hs = self.compute_hs() if 'HS' not in self.data else self
+        
+        z_depth = ds_with_hs.data['height'] - ds_with_hs.data['HS']
+        
+        # FIX: Pull metadata from the registry for consistency
+        if 'z' in registry:
+            reg_entry = registry['z']
+            z_depth.attrs = {
+                'long_name': reg_entry.get('long_name', 'Depth Below Snow Surface'),
+                'units': reg_entry.get('si_units', 'm'),
+                'standard_name': reg_entry.get('standard_name', 'depth'),
+                'positive': 'up'
+           }
+        
+        new_xr_ds = ds_with_hs.data.assign_coords(z=z_depth)
+        
+        return self.__class__(new_xr_ds)
+    
     def to_gpu(self) -> 'xsnowDataset':
         """
         Moves the dataset's data to the GPU using CuPy if available.
@@ -414,7 +426,6 @@ class xsnowDataset:
             import logging
             logging.getLogger(__name__).info("Cupy not found or GPU not available. Returning original dataset.")
             return self
-
     def to_cpu(self) -> 'xsnowDataset':
         """
         Moves the dataset's data back to the CPU (NumPy).
@@ -433,6 +444,4 @@ class xsnowDataset:
         >>> ds_cpu_again = ds_gpu.to_cpu()
         >>> ds_cpu_again.to_netcdf('results.nc')
         """
-        if self.data is None: return self
-        # xarray's as_numpy() is hardware-aware and will convert from cupy to numpy
-        return self.__class__(self.data.as_numpy())
+        return self if self.data is None else self.__class__(self.data.as_numpy())

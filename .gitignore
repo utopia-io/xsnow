@@ -1,2 +1,23 @@
-/src/xsnow.egg-info/
-/tests/data/
+# ── Python build artifacts ───────────────────────────────
+build/
+dist/
+*.egg-info/
+src/**/*.egg-info/
+
+# ── Python cache ─────────────────────────────────────────
+src/**/__pycache__
+__pycache__/
+*.pyc
+
+# ── Test cache and data (external, not shipped) ──────────
+data/
+tests/data/
+tests/__pycache__/
+
+# ── Documentation builds ────────────────────────────────
+docs/_build/
+docs/_autosummary/
+docs/_site/
+
+# ── lockfiles ────────────────────────────────────────────
+uv.lock
