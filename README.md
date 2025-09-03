@@ -10,7 +10,7 @@ Read the [development plan](development_plan.md) and [extension strategy](postpr
 
 The implementation has started! Ron Simenhois (CAIC), Bryce Schroers (Avalanche Canada), Florian Herla, and Simon Horton are working towards a first prototype.  
 
-The [xsnow Package Documentation](https://gitlab.com/avacollabra/postprocessing/xsnow/-/blob/Ron_dev/xsnow%20Package%20Documentation.md?ref_type=heads) is continuously updated with details on implemented features and code examples.
+The [xsnow Package Documentation](https://gitlab.com/avacollabra/postprocessing/xsnow/-/blob/Ron_dev/xsnow%20Package%20Documentation.md?ref_type=heads) is continuously updated with details on implemented features and code examples. We are also starting our documentation website at [https://avacollabra.gitlab.io/postprocessing/xsnow/latest/](https://avacollabra.gitlab.io/postprocessing/xsnow/latest/).
 
 We still welcome feedback on our general strategy, please reach out via email or (better) start a gitlab issue.
 
