@@ -170,7 +170,11 @@ docs-tagged:
 
 pages:
   stage: docs
-  needs: [ "docs-latest", "docs-tagged" ]
+  needs:
+    - job: docs-latest
+      optional: true
+    - job: docs-tagged
+      optional: true
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: on_success
