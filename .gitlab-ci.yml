@@ -133,7 +133,8 @@ docs-latest:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: on_success
   script:
-    - make -C docs html
+    - sphinx-apidoc -f -e -o docs/api src/xsnow
+    - jupyter-book build docs --path-output docs/_build
     - mkdir -p public/latest
     - cp -r docs/_build/_build/html/* public/latest/
     - |
@@ -152,7 +153,8 @@ docs-tagged:
     - if: $CI_COMMIT_TAG
       when: on_success
   script:
-    - make -C docs html
+    - sphinx-apidoc -f -e -o docs/api src/xsnow
+    - jupyter-book build docs --path-output docs/_build
     - mkdir -p "public/${CI_COMMIT_TAG}"
     - cp -r docs/_build/_build/html/* "public/${CI_COMMIT_TAG}/"
     - |
