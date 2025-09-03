@@ -250,6 +250,8 @@ def read(
         ds['location'] = [station_id]
         reindexed_datasets.append(ds)
 
+    reindexed_datasets.sort(key=lambda ds: ds.location.item())
+    
     if len(reindexed_datasets) > 1:
         # Use the reindexed datasets for concatenation
         final_xr_dataset = xr.concat(reindexed_datasets, dim='location')
@@ -266,8 +268,12 @@ def read(
     # Create the final xsnowDataset object
     final_dataset = xsnowDataset(final_xr_dataset)
 
-    # Calculate and add the 'z' coordinate before returning
-    return final_dataset.compute_z_depth()
+    # Calculate and add the 'z' coordinate if the dataset contains snow profile data before returning
+    if 'height' in final_dataset.data:
+        return final_dataset.compute_z_depth()
+    else:
+        return final_dataset
+
 def _read_pro_raw(
     filepath: Union[str, Path],
     datetime_start: Optional[str] = None,

@@ -129,20 +129,6 @@ def test_contains(sample_xsnow_dataset):
     """Tests __contains__()"""
     assert 'location' in sample_xsnow_dataset
 
-# def test_merge_smet(mock_xarray_dataset, mock_smet_file):
-#     """Tests merging of SMET data into an existing dataset."""
-#     ds = xsnowDataset(mock_xarray_dataset)
-#     merged_ds = ds.merge_smet(str(mock_smet_file))
-    
-#     assert isinstance(merged_ds, xsnowDataset)
-#     # Check for a variable from the original dataset
-#     assert 'density' in merged_ds.data
-#     # Check for variables from the new SMET file
-#     assert 'VW' in merged_ds.data
-#     assert 'TA' in merged_ds.data
-#     # Check if a value was merged correctly
-#     assert merged_ds.data['VW'].sel(location='station_A', time='2025-01-01').item() == 5.5
-
 def test_to_xarray_returns_xarray_dataset(sample_xsnow_dataset):
     """
     Tests that the to_xarray() method returns a raw xarray.Dataset.
