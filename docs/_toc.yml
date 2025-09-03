@@ -1,0 +1,15 @@
+format: jb-book
+root: index
+chapters:
+  - file: tutorials/01-installation
+  - file: api/modules
+    title: API reference
+    sections:
+      - file: api/xsnow.xsnow_io
+      - file: api/xsnow.dataset
+      - file: api/xsnow.accessors
+      - file: api/xsnow.selectors
+      - file: api/xsnow.registry
+      - file: api/xsnow.plugin
+      - file: api/xsnow.extensions
+      - file: api/xsnow.utils

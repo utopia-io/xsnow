@@ -1,7 +1,5 @@
-SPHINXOPTS    =
-SPHINXBUILD   = jupyter-book
-SOURCEDIR     = .
-BUILDDIR      = _build/html
+SOURCEDIR = .
+BUILDDIR  = _build
 
 .PHONY: help deps api tutorials build clean
 
@@ -9,8 +7,7 @@ help:
 	@echo "Targets:"
 	@echo "  deps       Install documentation dependencies"
 	@echo "  api        Auto-generate API stubs (sphinx-apidoc)"
-	@echo "  tutorials  Build tutorials via Jupyter Book"
-	@echo "  build      Build everything (api + tutorials)"
+	@echo "  html       Build HTML site (api + tutorials)"
 	@echo "  clean      Remove build outputs"
 
 deps:
@@ -18,14 +15,11 @@ deps:
 
 api:
 	@echo "Generating API docs…"
-	# assumes your package is at ../your_package
-	sphinx-apidoc -o api ../your_package
+	sphinx-apidoc -f -e -o api ../src/xsnow
 
-tutorials:
-	@echo "Building tutorials & API site…"
-	$(SPHINXBUILD) build .
-
-build: api tutorials
+html: api
+	pip install -e ..
+	jupyter-book build $(SOURCEDIR) --path-output $(BUILDDIR)
 
 clean:
-	rm -rf _build
+	rm -rf $(BUILDDIR) api

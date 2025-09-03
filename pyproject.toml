@@ -7,24 +7,25 @@ name = "xsnow"
 version = "0.0.1"
 description = "A collaborative Python package for parsing and post-processing snow cover simulations"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [
-  { name = "Florian Herla", email = "fherla@sfu.ca" },
   { name = "Ron Simenhois", email = "ron.simenhois@state.co.us" },
+  { name = "Florian Herla", email = "fherla@sfu.ca" },
 ]
 dependencies = [
-  "xarray>=0.20.0",
-  "numpy>=1.22.0",
-  "pandas>=1.4.0",
+    "netcdf4>=1.7.2",
+    "numpy>=2.3.2",
+    "pandas>=2.3.1",
+    "xarray>=2025.7.1",
+    "scipy>=1.16.1",
+    "bottleneck>=1.5.0",
 ]
 keywords = ["snow", "avalanche", "xarray", "post-processing"]
 classifiers = [
   "License :: OSI Approved :: GNU Affero General Public License v3",
-  "Programming Language :: Python :: 3.8",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Operating System :: OS Independent",
 ]
 
@@ -32,6 +33,19 @@ classifiers = [
 testing = [
   "pytest>=7.0",
   "pytest-cov",
+]
+gpu = [
+  "cupy-cuda12x; platform_system == 'Linux'",  # nvidia wheels
+]
+lint = [
+  "mypy>=1.6",
+  "flake8>=6",
+  "pylint>=3",
+]
+dev = [
+  "matplotlib>=3.8",
+  "ipython",
+  "jupyter",
 ]
 
 [project.urls]

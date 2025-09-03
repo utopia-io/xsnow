@@ -1,0 +1,50 @@
+# docs/_config.yml
+title: xsnow documentation
+author: avacollabra.org
+only_build_toc_files: true
+
+# Notebook execution (JB handles myst-nb under the hood)
+execute:
+  execute_notebooks: auto
+  timeout: 120
+
+# MyST parsing options
+parse:
+  myst_enable_extensions:
+    - colon_fence
+    - deflist
+    - linkify
+
+sphinx:
+  # Put pure Sphinx config here
+  config:
+    project: xsnow
+    html_title: xsnow documentation
+    copyright: "2025 xsnow contributors"
+    html_theme: sphinx_book_theme
+    html_theme_options:
+      use_download_button: true
+      use_repository_button: true
+      use_edit_page_button: true
+      repository_url: https://gitlab.com/avacollabra/postprocessing/xsnow
+      repository_branch: main
+      path_to_docs: docs
+      show_toc_level: 3
+      default_mode: light
+    autosummary_generate: true
+    # If you want numbering across multiple toctrees, enable this:
+    use_multitoc_numbering: true
+    autodoc_default_options:
+      members: true
+      undoc-members: false
+      show-inheritance: true
+      member-order: bysource
+    autoclass_content: "both"   # put class docstring + __init__ docstring together
+
+  # Ensure these extensions are loaded early so their config values exist
+  extra_extensions:
+    - sphinx.ext.autodoc
+    - sphinx.ext.autosummary
+    - sphinx.ext.napoleon
+    - sphinx_autodoc_typehints
+    - sphinx_multitoc_numbering

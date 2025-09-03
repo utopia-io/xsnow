@@ -1,36 +1,23 @@
-import numpy as np
 import xarray as xr
-from xarray.core.extensions import register_dataarray_accessor
 
-@register_dataarray_accessor("labels")
+@xr.register_dataarray_accessor("labels")
 class LabelsAccessor:
+    """
+    A custom xarray accessor to retrieve the integer-to-string label mapping
+    for a coordinate.
+    
+    This is used to get the human-readable names for coordinates that use
+    integer indexing for efficiency.
+    """
     def __init__(self, xarray_obj):
-        self._da = xarray_obj
-        self._mapping = xarray_obj.attrs.get("mapping", None)
-        if self._mapping is None:
-            raise AttributeError("No 'mapping' attribute found in DataArray.")
+        self._obj = xarray_obj
 
-    def get(self, as_dict=False) -> xr.DataArray | dict:
+    def get(self) -> dict:
         """
-        Return a labeled version of the DataArray using the integer-to-label mapping in 
-        `.attrs["mapping"]`.
-
-        Parameters:
-            as_dict (bool): If True, returns a dict instead of a labeled DataArray.
+        Retrieves the label mapping dictionary from the coordinate's attributes.
 
         Returns:
-            Labeled xarray.DataArray or dict.
+            dict: The integer-to-name mapping, or an empty dictionary if no
+                  mapping is found.
         """
-        if as_dict:
-            return self._mapping
-        vectorized = np.vectorize(self._mapping.get)
-        return xr.apply_ufunc(
-            vectorized,
-            self._da,
-            dask="allowed",
-            output_dtypes=[str]
-        )
-
-# TODO: ZAccessor, TZAccessor
-# @register_dataarray_accessor("z")
-# @register_dataarray_accessor("tz")
+        return self._obj.attrs.get("mapping", {})
