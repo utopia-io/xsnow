@@ -16,8 +16,7 @@ tests/__pycache__/
 
 # ── Documentation builds ────────────────────────────────
 docs/_build/
-docs/_autosummary/
-docs/_site/
+docs/api/
 
 # ── lockfiles ────────────────────────────────────────────
 uv.lock
