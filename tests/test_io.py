@@ -263,3 +263,17 @@ def test_merge_smet_method(data_dir_for_io_methods):
     assert 'TA' in ds_merged.data.data_vars
     profile = ds_merged.sel(time='2025-02-09 12:00:00')
     assert np.isclose(profile.TA.item(), 270.0)
+
+def test_read_merge_smet_snp_snowobs():
+    snowobs_dir = snp_snowobs_dir()
+    ds = read([
+        f"{snowobs_dir}/pros/snowobs/",
+        f"{snowobs_dir}/pits/",
+    ])
+    assert isinstance(ds, xsnowDataset)
+    ds.merge_smet([
+        f"{snowobs_dir}/smets/nowcast",
+        f"{snowobs_dir}/smets/forecast"
+    ], realization=1, var_prefix='input.')
+    # TODO: write some more assertions once the reading of the ds is successful,
+    #       for example, checking realizations
