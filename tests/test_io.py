@@ -10,7 +10,7 @@ import xarray as xr
 
 from xsnow import read, xsnowDataset
 from xsnow.selectors import TimeSelector
-from xsnow.sample_data import snp_gridded_dir
+from xsnow.sample_data import snp_gridded_dir, snp_snowobs_dir
 
 # --- Test Data Fixtures ---
 
@@ -205,6 +205,16 @@ def test_read_with_integer_location_index(multi_station_dir):
 def test_read_sample_data_snp_gridded(snp_gridded_sample_dir):
     ds = read(snp_gridded_sample_dir)
     # TODO: write some assertions once the reading of the ds is successful
+
+def test_read_sample_data_snp_snowobs():
+    snowobs_dir = snp_snowobs_dir()
+    ds = read([
+        f"{snowobs_dir}/pros/snowobs/",
+        f"{snowobs_dir}/pits/",
+    ])
+    assert isinstance(ds, xsnowDataset)
+    # TODO: write some more assertions once the reading of the ds is successful,
+    #       for example, checking realizations
 
 def test_to_pro_max_files_raises_error(io_test_dataset):
     """

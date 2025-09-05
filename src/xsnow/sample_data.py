@@ -3,12 +3,11 @@ Sample data utilities for xsnow testing and tutorials.
 
 This module uses `pooch` to manage a registry of small SNOWPACK
 test datasets hosted on GitLab. These datasets are downloaded on first access,
-cached locally in a project-specific directory (by default
-`~/.cache/xsnow-snp-gridded`), and then reused in future runs.
+cached locally in a project-specific directory, and then reused in future runs.
 
 The provided helper functions are intended to support unit tests, tutorials, and development:
 
-* `snp_gridded_dir()`  
+* `snp_gridded_dir()`: A sample of gridded simulations  
   Ensure that all registered SNOWPACK files (input `.smet` drivers and
   output `.pro` & `.smet` profiles) are downloaded, and return the absolute cache
   directory path.
@@ -17,19 +16,21 @@ The provided helper functions are intended to support unit tests, tutorials, and
   Load the gridded sample data into an `xsnowDataset` by calling the package’s
   top-level `read()` function on the cached profile directory.
 
+* `snp_snowobs_dir()`: A sample of manual & modeled profiles  
+  Analogous to above, ensure all data exists and return local path.
+  
 Notes
 -----
-- All files are verified by SHA256 hash on download (see `REGISTRY_SNP_TESTDATA`).
+- All files are verified by SHA256 hash on download to avoid corrupt files.
 - Cached files are never automatically deleted; users can clear the cache
-  manually by removing the directory given in `SNP_GRIDDED.path`.
+  manually by removing the relevant cache directories (`~/.cache/xsnow-*`)
 """
 
 import pooch
-from xsnow.xsnow_io import read
-from xsnow.dataset import xsnowDataset
+from xsnow import read, xsnowDataset
 
-URL_SNP_TESTDATA = "https://gitlab.com/avalanche-warning/universal/archive/test-data/-/raw/main/"
-REGISTRY_SNP_TESTDATA = {
+URL_SNP_TESTDATA = "https://gitlab.com/avacollabra/postprocessing/sample-data/-/raw/main/"
+REGISTRY_SNP_GRIDDED = {
     "pros/gridded/VIR1A.pro": "sha256:f1322f04f4e3250b377bdab3e17695396378df1c5bc66a94dc31af322ec56fb0",
     "pros/gridded/VIR1A.smet": "sha256:958f6c24dff650fa866303f8b2e6f75d37f13585893b4e99c3371434544d136d",
     "pros/gridded/VIR1A1.pro": "sha256:554e2b3120c8c0270aee1e8164326d36f8dab87688bdc4f682a1a7196d2ed6e0",
@@ -95,14 +96,8 @@ REGISTRY_SNP_TESTDATA = {
 SNP_GRIDDED = pooch.create(
     path=pooch.os_cache("xsnow-snp-gridded"),  # cache dir, e.g. ~/.cache/xsnow-snp-gridded
     base_url=URL_SNP_TESTDATA, 
-    registry=REGISTRY_SNP_TESTDATA,
+    registry=REGISTRY_SNP_GRIDDED,
 )
-
-def _get_sample_file(fname: str) -> str:
-    """
-    Get the local path to a sample file (downloads & caches if needed).
-    """
-    return SNP_GRIDDED.fetch(fname)
 
 def snp_gridded_dir() -> str:
     """
@@ -110,10 +105,10 @@ def snp_gridded_dir() -> str:
     
     Returns:
         A path to a locally cached directory, where:
-          - dir/smets/gridded: contains the .smet files used to drive SNOWPACK
-          - dir/pros/gridded: contains the SNOWPACK output files (.pro and .smet)
+          - dir/smets/gridded/[nowcast|forecast]/: contains the .smet files used to drive SNOWPACK
+          - dir/pros/gridded/: contains the SNOWPACK output files (.pro and .smet)
     """
-    for fname in REGISTRY_SNP_TESTDATA:
+    for fname in REGISTRY_SNP_GRIDDED:
         SNP_GRIDDED.fetch(fname)
 
     return str(SNP_GRIDDED.path)
@@ -129,3 +124,50 @@ def snp_gridded_ds() -> xsnowDataset:
     ds = read(f"{snp_dir}/pros/gridded")
 
     return ds
+
+
+REGISTRY_SNP_SNOWOBS = {
+    "pits/LawisProfile20908.caaml": "sha256:b0a68d690985c72c6d1d3ce903d420fe8ee8c9f8b31d256ca67ca93c3bb12d67",
+    "pits/LawisProfile20908.pro": "edcdd5fa16a8d953b207012c878efbf126d070057db91349812686f37fab1f58",
+    "pits/LawisProfile20915.caaml": "sha256:4df0e9179911f0be0bcf7ce787e568a7820ffb7fb51f781730a9aa5938fa043b",
+    "pits/LawisProfile20915.pro": "4582a6a973b54389a8e8aca6473b2c18e136adc340edb37d677e3a2467fafa4c",
+    "pros/snowobs/LawisProfile20908.pro": "sha256:8646bdc87094ffc989aa9ed198d385aa8f765ce0ab0a9dc8227d840667537a11",
+    "pros/snowobs/LawisProfile20908.smet": "sha256:e62f683c3129ed58ae8b9944a3108ad768570d761f6f3b89d86cba5db5308f32",
+    "pros/snowobs/LawisProfile20915.pro": "sha256:4aaa6abd0837c95d1c8674c155ea2b3d342c965297d2ea716201f0ec8efbb36e",
+    "pros/snowobs/LawisProfile20915.smet": "sha256:9d4987937bee60478c35f9f468f7a60cc8de0f89f7f862070a553f0e42a56d87",
+    "smets/snowobs/forecast/LawisProfile20908.smet": "sha256:444aba0615ef6066042d8113eb56f5200aea7a241f0da77c193db7a621ad493a",
+    "smets/snowobs/forecast/LawisProfile20915.smet": "sha256:07f1215a5bc86c1636ae5a5cc854c9e8cea9090ea3007d3391927235d2bfc60d",
+    "smets/snowobs/nowcast/LawisProfile20908.smet": "sha256:44b213fef6e639f044af8e1ae884a0315e2a7b7cbad7abd5d8fd6de122e596da",
+    "smets/snowobs/nowcast/LawisProfile20915.smet": "sha256:58caf597116621b659ae7d4439857226ad3d84a73ffa9d0e6ede0568e2a67e48",
+}
+
+SNP_SNOWOBS = pooch.create(
+    path=pooch.os_cache("xsnow-snp-snowobs"),
+    base_url=URL_SNP_TESTDATA,
+    registry=REGISTRY_SNP_SNOWOBS,
+)
+
+def snp_snowobs_dir() -> str:
+    """
+    Get the local directory containing all SNOWPACK files from a sample simulation that
+    was started off of manual snow profiles.
+    
+    Returns:
+        A path to a locally cached directory, where:
+          - dir/pits/: contains the manual profiles
+          - dir/smets/snowobs/[nowcast|forecast]/: contains the .smet files used to drive SNOWPACK
+          - dir/pros/snowobs/: contains the SNOWPACK output files (.pro and .smet)
+
+    Notes:
+        - This sample dataset is well suited to test the `realization` capability of `xsnow` (manual and modeled profiles)
+        - Until we have a .caaml parser, we can use the converted .pro files of the manuals.
+          The .caaml versions contain a temperature profile on a different vertical spacing than the layers. 
+          The .pro versions are missing this offset-temperature profile.
+        - LawisProfile20908.caaml contains at least one weak layer that is getting loaded by a storm
+        - LawisProfile20915.caaml develops a wetting front over complex stratigraphy
+    """
+    for fname in REGISTRY_SNP_SNOWOBS:
+        SNP_SNOWOBS.fetch(fname)
+
+    return str(SNP_SNOWOBS.path)
+
