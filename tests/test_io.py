@@ -10,6 +10,7 @@ import xarray as xr
 
 from xsnow import read, xsnowDataset
 from xsnow.selectors import TimeSelector
+from xsnow.sample_data import snp_gridded_dir
 
 # --- Test Data Fixtures ---
 
@@ -131,6 +132,11 @@ def io_test_dataset():
     }
     return xsnowDataset(xr.Dataset(data, coords))
 
+@pytest.fixture
+def snp_gridded_sample_dir():
+    """Wraps xsnow.sample_data.snp_gridded_ds() into a pytest fixture"""
+    return f"{snp_gridded_dir()}/pros/gridded"
+
 # --- Test Cases ---
 
 def test_read_single_pro_file(data_directory):
@@ -195,6 +201,10 @@ def test_read_with_integer_location_index(multi_station_dir):
     expected_mapping = {0: 'station_A', 1: 'station_B'}
     assert 'mapping' in ds.location.attrs
     assert ds.location.attrs['mapping'] == expected_mapping
+
+def test_read_sample_data_snp_gridded(snp_gridded_sample_dir):
+    ds = read(snp_gridded_sample_dir)
+    # TODO: write some assertions once the reading of the ds is successful
 
 def test_to_pro_max_files_raises_error(io_test_dataset):
     """
