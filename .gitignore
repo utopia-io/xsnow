@@ -3,6 +3,7 @@ build/
 dist/
 *.egg-info/
 src/**/*.egg-info/
+src/xsnow/_version.py
 
 # ── Python cache ─────────────────────────────────────────
 src/**/__pycache__

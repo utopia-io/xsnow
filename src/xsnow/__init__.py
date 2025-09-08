@@ -8,6 +8,10 @@ from .registry import registry
 from .plugin import register_xsnowDataset_method
 from . import accessors
 from . import extensions
+try:
+    from ._version import version as __version__  # generated at build time by setuptools-scm
+except Exception:
+    __version__ = "0+unknown"
 
 
 # Define what gets imported with 'from xsnow import *'
