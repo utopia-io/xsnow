@@ -6,6 +6,7 @@ from .selectors import TimeSelector, LocationSelector, SlopeSelector, Realizatio
 from .xsnow_io import read, update, to_pro, to_smet, to_netcdf
 from .registry import registry
 from .plugin import register_xsnowDataset_method
+from .sample_data import single_profile, single_profile_timeseries
 from . import accessors
 from . import extensions
 try:
@@ -23,6 +24,8 @@ __all__ = [
     'to_pro',
     'to_smet',
     'to_netcdf',
+    'single_profile',
+    'single_profile_timeseries',
     'TimeSelector',
     'LocationSelector',
     'SlopeSelector',

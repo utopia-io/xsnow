@@ -7,17 +7,17 @@ cached locally in a project-specific directory, and then reused in future runs.
 
 The provided helper functions are intended to support unit tests, tutorials, and development:
 
-* `snp_gridded_dir()`: A sample of gridded simulations  
-  Ensure that all registered SNOWPACK files (input `.smet` drivers and
-  output `.pro` & `.smet` profiles) are downloaded, and return the absolute cache
-  directory path.
+* `single_profile()`: A single, simple profile wrapped into an `xsnowDataset`.
 
-* `snp_gridded_ds()`  
-  Load the gridded sample data into an `xsnowDataset` by calling the package’s
-  top-level `read()` function on the cached profile directory.
+* `single_profile_timeseries()`: An `xsnowDataset` from a single location containing many timestamps.
 
-* `snp_snowobs_dir()`: A sample of manual & modeled profiles  
-  Analogous to above, ensure all data exists and return local path.
+* `snp_gridded_ds()`: A sample `xsnowDataset` of gridded SNOWPACK simulations
+
+For more complex tutorials or integration tests:
+
+* `snp_gridded_dir()`: A locally cached directory tree containing gridded simulations  
+
+* `snp_snowobs_dir()`: A locally cached directory tree of manual & modeled profiles
   
 Notes
 -----
@@ -102,23 +102,43 @@ SNP_GRIDDED = pooch.create(
 def snp_gridded_dir() -> str:
     """
     Get the local directory containing all SNOWPACK files from a sample gridded simulation.
+
+    The function ensures that all registered SNOWPACK files (input `.smet` drivers and
+    output `.pro` & `.smet` profiles) are downloaded, and return the absolute cache
+    directory path.
     
     Returns:
+    --------
         A path to a locally cached directory, where:
           - dir/smets/gridded/[nowcast|forecast]/: contains the .smet files used to drive SNOWPACK
           - dir/pros/gridded/: contains the SNOWPACK output files (.pro and .smet)
+
+    Examples:
+    ---------
+      >>> import os
+      >>> from xsnow.sample_data import snp_gridded_dir
+      >>> gridded_dir = snp_gridded_dir()
+      >>> os.listdir(f"{gridded_dir}/pros/gridded")
     """
     for fname in REGISTRY_SNP_GRIDDED:
         SNP_GRIDDED.fetch(fname)
 
     return str(SNP_GRIDDED.path)
 
+
 def snp_gridded_ds() -> xsnowDataset:
     """
-    Get a sample dataset from a gridded SNOWPACK simulation
+    Get a sample dataset representing a gridded SNOWPACK simulation
     
     Returns:
+    --------
         A sample xsnowDataset
+
+    Examples:
+    ---------
+      >>> from xsnow.sample_data import snp_gridded_ds
+      >>> ds = snp_gridded_ds()
+      >>> ds
     """
     snp_dir = snp_gridded_dir()
     ds = read(f"{snp_dir}/pros/gridded")
@@ -147,18 +167,29 @@ SNP_SNOWOBS = pooch.create(
     registry=REGISTRY_SNP_SNOWOBS,
 )
 
-def snp_snowobs_dir() -> str:
+def snp_snowobs_dir(minimal: bool=False) -> str:
     """
     Get the local directory containing all SNOWPACK files from a sample simulation that
     was started off of manual snow profiles.
+
+    Parameters:
+    -----------
+      minimal (bool): Fetch all files related to this experiment, or only one specific file pattern?
     
     Returns:
+    --------
         A path to a locally cached directory, where:
           - dir/pits/: contains the manual profiles
           - dir/smets/snowobs/[nowcast|forecast]/: contains the .smet files used to drive SNOWPACK
           - dir/pros/snowobs/: contains the SNOWPACK output files (.pro and .smet)
 
+    See Also:
+    ---------
+    single_profile : Get a single profile dataset
+    single_profile_timeseries : Get a single profile timeseries dataset
+
     Notes:
+    ------
         - This sample dataset is well suited to test the `realization` capability of `xsnow` (manual and modeled profiles)
         - Until we have a .caaml parser, we can use the converted .pro files of the manuals.
           The .caaml versions contain a temperature profile on a different vertical spacing than the layers. 
@@ -167,7 +198,38 @@ def snp_snowobs_dir() -> str:
         - LawisProfile20915.caaml develops a wetting front over complex stratigraphy
     """
     for fname in REGISTRY_SNP_SNOWOBS:
-        SNP_SNOWOBS.fetch(fname)
+        if not minimal or "LawisProfile20908.pro" in fname:
+            SNP_SNOWOBS.fetch(fname)
 
     return str(SNP_SNOWOBS.path)
 
+def single_profile() -> xsnowDataset:
+    """
+    Get a single, simple `xsnowDataset` containing one (manual) profile from one location & time.
+
+    Examples:
+    ---------
+      >>> import xsnow
+      >>> ds = xsnow.single_profile()
+      >>> ds
+    """
+    snowobs_dir = snp_snowobs_dir()
+    ds = read(f"{snowobs_dir}/pits/LawisProfile20908.pro")
+    return ds
+
+def single_profile_timeseries() -> xsnowDataset:
+    """
+    Get an `xsnowDataset` from one location with many timestamps.
+
+    In fact, this is a SNOWPACK simulation that was started off of the (manual) `single_profile()`.
+
+    Examples:
+    ---------
+      >>> import xsnow
+      >>> ds = xsnow.single_profile_timeseries()
+      >>> ds
+    """
+    snowobs_dir = snp_snowobs_dir()
+    ds = read(f"{snowobs_dir}/pros/snowobs/")
+    ds = ds.sel(location=[0])
+    return ds
