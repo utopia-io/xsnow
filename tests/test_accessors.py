@@ -5,6 +5,7 @@ import xarray as xr
 import numpy as np
 import xsnow
 from xsnow import accessors
+from xsnow.sample_data import snp_snowobs_dir
 
 @pytest.fixture
 def indexed_coord():
@@ -53,3 +54,27 @@ def test_labels_accessor_no_mapping_empty_dict(non_indexed_coord):
     Tests that the accessor returns an empty dict for a non-existant mapping
     """
     assert non_indexed_coord.labels.get(as_dict=True) == {}
+
+def test_icssg_accessor_on_snowobs_data():
+    snowobs_dir = snp_snowobs_dir()
+    ds = xsnow.read(f"{snowobs_dir}/pros/snowobs")
+    primary = ds.grain_type.icssg.primary().values
+    secondary = ds.grain_type.icssg.secondary().values
+    codes = ds.grain_type.values
+    unique_codes, unique_indices = np.unique(codes, return_index=True, equal_nan=True)
+    unique_primary = primary.flatten()[unique_indices]
+    unique_secondary = secondary.flatten()[unique_indices]
+
+    expected_codes = np.array([110., 121., 210., 211., 220., 230., 231., 240., 241., 321., 330.,
+       341., 421., 430., 431., 440., 450., 490., 550., 591., 660., 770.,
+       772., 951., 990.,  np.nan])
+    expected_primary = np.array(['PP', 'PP', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'RG', 'RG',
+       'RG', 'FC', 'FC', 'FC', 'FC', 'FC', 'FC', 'DH', 'DH', 'SH', 'MF',
+       'MFcr', 'FCxr', 'FCxr', None])
+    expected_secondary = np.array(['PP', 'DF', 'PP', 'PP', 'DF', 'RG', 'RG', 'FC', 'FC', 'DF', 'RG',
+       'FC', 'DF', 'RG', 'RG', 'FC', 'DH', 'FCxr', 'DH', 'FCxr', 'SH',
+       'MF', 'MF', 'DH', 'FCxr', None])
+
+    assert np.array_equal(unique_codes, expected_codes, equal_nan=True)
+    assert np.array_equal(unique_primary, expected_primary)
+    assert np.array_equal(unique_secondary, expected_secondary)
