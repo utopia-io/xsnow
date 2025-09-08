@@ -29,7 +29,7 @@ pip install xsnow
 Once installed, verify it works:
 
 ```bash
-python -c "import xsnow"
+python -c "import xsnow; print(xsnow.__version__)"
 ```
 
 ---
