@@ -14,7 +14,7 @@ import pandas as pd
 from pathlib import Path
 
 # Imports from the package
-from xsnow import read
+from xsnow import read, single_profile_timeseries
 from xsnow.dataset import xsnowDataset
 from xsnow.selectors import TimeSelector
 
@@ -114,6 +114,15 @@ def test_compute_hs(sample_xsnow_dataset):
     ds_with_hs = sample_xsnow_dataset.compute_hs()
     assert 'HS' in ds_with_hs.data
     assert np.isclose(ds_with_hs.data['HS'].item(), 0.3)
+
+def test_compare_processed_hs_against_smet():
+    """Compare whether the SMET file variable `HS_mod` agrees with the 
+    HS calculated from the cumulative layer `height`
+
+    Note that the two variables often only agree to 1 decimal place. This is an issue of SNOWPACK"""
+    ds = single_profile_timeseries()
+    sub = ds.sel(realization=0, slope=16.0)
+    assert np.isclose(sub.HS.values, sub.HS_mod.values, atol=1e-2).all()
 
 def test_dir(sample_xsnow_dataset):
     """Tests __dir__()"""
