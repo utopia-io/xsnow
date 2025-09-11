@@ -526,7 +526,11 @@ def read_smet(
 
     ds = xr.Dataset.from_dataframe(df)
     ds = ds.rename({'timestamp': 'time'})
-    
+    try:
+        ds['time'].tz.set_attr(int(header.get('tz')))
+    except ValueError:
+        logger.warning(f"Cannot set timezone from file {filepath}")
+
     station_name = header.get('station_name', header.get('station_id', file_path.stem))
     ds = ds.expand_dims(location=[station_name])
     ds = ds.assign_coords({
@@ -534,7 +538,7 @@ def read_smet(
         'longitude': ('location', [float(header.get('longitude', np.nan))]),
         'altitude': ('location', [float(header.get('altitude', np.nan))])
     })
-    
+
     return ds
 
 # ================================================================= #
