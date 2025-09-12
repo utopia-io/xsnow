@@ -53,28 +53,7 @@ def add_slab_density(ds: xsnowDataset, slab_thickness: float = 0.3) -> xsnowData
     return xsnowDataset(new_xarray_ds)
 
 
-# --- Example 2: Complex Extension (Decorator Class) ---
-
-class DatasetDecorator:
-    """Generic decorator base class to handle attribute forwarding and re-wrapping."""
-    def __init__(self, base: xsnowDataset):
-        # The decorator should have its own reference to the data,
-        # which can be modified by subclasses.
-        self.data = base.data
-
-    def __getattr__(self, name):
-        # Forward attribute access to the internal xarray.Dataset
-        attr = getattr(self.data, name)
-        if callable(attr):
-            def method_wrapper(*args, **kwargs):
-                result = attr(*args, **kwargs)
-                if isinstance(result, xr.Dataset):
-                    # Re-wrap the result in a new base class, then decorate it
-                    new_base = xsnowDataset(result)
-                    return self.__class__(new_base)
-                return result
-            return method_wrapper
-        return attr
+from xsnow.extensions import DatasetDecorator
 
 class HazardChartData(DatasetDecorator):
     """

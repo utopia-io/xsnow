@@ -1,14 +1,12 @@
 # src/xsnow/__init__.py
 """Top-level package for xsnow."""
 
-from .dataset import xsnowDataset
+from .core import xsnowDataset, DatasetDecorator
 from .selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
 from .xsnow_io import read, update, to_pro, to_smet, to_netcdf
 from .registry import registry
-from .plugin import register_xsnowDataset_method
 from .sample_data import single_profile, single_profile_timeseries
 from . import accessors
-from . import extensions
 try:
     from ._version import version as __version__  # generated at build time by setuptools-scm
 except Exception:
@@ -17,8 +15,7 @@ except Exception:
 
 # Define what gets imported with 'from xsnow import *'
 __all__ = [
-    'xsnowDataset', 
-    'register_xsnowDataset_method',
+    'xsnowDataset',
     'read',
     'update',
     'to_pro',

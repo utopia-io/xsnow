@@ -10,7 +10,7 @@ import numpy as np
 from typing import Union, Any
 import xarray as xr
 
-from .dataset import xsnowDataset
+from .core import xsnowDataset
 
 def get_backend(array_like: Union[xsnowDataset, xr.Dataset, xr.DataArray]) -> Any:
     """

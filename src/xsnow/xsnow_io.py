@@ -17,7 +17,7 @@ import xarray as xr
 
 # Import from the package's modules
 from .registry import registry
-from .dataset import xsnowDataset
+from .core import xsnowDataset
 from .selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
 from .plugin import register_xsnowDataset_method
 

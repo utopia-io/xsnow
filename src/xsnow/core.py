@@ -1,4 +1,3 @@
-# dataset.py
 """
 Defines the core xsnowDataset class for the xsnow package.
 
@@ -42,7 +41,7 @@ The package uses a physically intuitive vertical coordinate system.
   ground in meters.
 """
 
-from typing import Sequence, Union, Any, List, TYPE_CHECKING
+from typing import Sequence, Union, Any, List, Optional
 from pathlib import Path
 
 import pandas as pd
@@ -50,14 +49,8 @@ import xarray as xr
 import numpy as np
 from pathlib import Path
 
-# Use TYPE_CHECKING to avoid circular imports at runtime for type hints
-if TYPE_CHECKING:
-    from xsnow.xsnow_io import read
-    from xsnow.selectors import TimeSelector
-
-from xsnow.registry import registry
-# Import the registry from the plugin module
-from xsnow.plugin import _analysis_plugins
+from .registry import registry
+from .plugin import list_registered_methods
 
 
 class xsnowDataset:
@@ -116,45 +109,21 @@ class xsnowDataset:
         except Exception:
             return f"<xsnowDataset with data (exception occurred on summary)>"
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str):
         """
-        Forwards attribute access to a registered analysis plugin or the
-        underlying xarray.Dataset.
-
-        This is the core mechanism that enables the xsnowDataset to behave like
-        an xarray.Dataset while also providing custom functionality. The lookup
-        priority is:
-        1. Registered analysis plugins (e.g., from `xsnow.register_xsnowDataset_method`).
-        2. Attributes and methods of the underlying `xarray.Dataset` (`self.data`).
-
-        If a forwarded method call returns a new `xarray.Dataset`, it is
-        automatically re-wrapped in an `xsnowDataset` instance to allow for
-        method chaining.
+        Proxy to underlying xarray.Dataset. Extension methods are real
+        attributes on xsnowDataset attached at import-time by the decorator.
         """
-        # Check the plugin registry first for the method name
-        if name in _analysis_plugins:
-            plugin_func = _analysis_plugins[name]
-            def plugin_wrapper(*args, **kwargs):
-                # Pass the instance (self) as the first argument
-                result = plugin_func(self, *args, **kwargs)
-                
-                # FIX: Add re-wrapping logic for plugin results
-                return self.__class__(result) if isinstance(result, xr.Dataset) else result
-            return plugin_wrapper
-        
-        # If not in the registry, then try the underlying xarray.Dataset
         if self.data is None:
             raise AttributeError(f"Dataset is not loaded. Cannot access '{name}'.")
-        
         attr = getattr(self.data, name)
-
         if callable(attr):
             def method_wrapper(*args, **kwargs):
                 result = attr(*args, **kwargs)
+                # Re-wrap new xr.Dataset results so chaining stays in xsnowDataset world
                 return self.__class__(result) if isinstance(result, xr.Dataset) else result
             return method_wrapper
-        else:
-            return attr
+        return attr
 
     def __dir__(self) -> Sequence[str]:
         """
@@ -181,6 +150,9 @@ class xsnowDataset:
                 var_names = set()
         # we skip xr.Dataset’s public attributes to avoid clutter
         # xr_attrs = {a for a in dir(self.data) if not a.startswith("_")}
+
+        # add registered extension method names
+        base_attrs |= set(list_registered_methods().keys())
 
         return sorted(base_attrs | var_names)
 
@@ -445,3 +417,40 @@ class xsnowDataset:
         >>> ds_cpu_again.to_netcdf('results.nc')
         """
         return self if self.data is None else self.__class__(self.data.as_numpy())
+    
+
+
+
+class DatasetDecorator(xsnowDataset):
+    """
+    A decorator that *is also* an xsnowDataset (subclassing), so it exposes the
+    same API as the base wrapper, plus any extra methods/properties that will be added.
+    """
+    def __init__(self, base: "xsnowDataset", *, data: Optional[xr.Dataset] = None):
+        self._base = base
+        super().__init__(data if data is not None else base.data)
+        
+        # stash init args for consistent re-wrapping
+        self._decorator_args   = getattr(base, "_decorator_args", (base,))
+        self._decorator_kwargs = getattr(base, "_decorator_kwargs", {})
+
+    def _rewrap(self, new_data: xr.Dataset):
+        """Return a new instance of *this* decorator class around new_data."""
+        return self.__class__(*self._decorator_args, **self._decorator_kwargs, data=new_data)
+
+    def __getattr__(self, name):
+        # 1) Prefer the xsnowDataset surface (user methods, registered extensions, etc.)
+        if hasattr(self.base, name):
+            return getattr(self.base, name)
+
+        # 2) Fall back to the underlying xr.Dataset API
+        attr = getattr(self.data, name)
+        if callable(attr):
+            def method(*args, **kwargs):
+                result = attr(*args, **kwargs)
+                # If an xarray.Dataset comes back, re-wrap it in the same decorator class
+                if isinstance(result, xr.Dataset):
+                    return self._rewrap(result)
+                return result
+            return method
+        return attr

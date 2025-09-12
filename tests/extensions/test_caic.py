@@ -1,6 +1,5 @@
-# tests/test_analysis.py
 """
-Unit tests for the analysis module.
+Unit tests for the caic extension.
 
 This test suite verifies the functionality of the analysis functions,
 ensuring they work correctly with the layer-based coordinate system and are
@@ -11,8 +10,8 @@ import xarray as xr
 import numpy as np
 import pandas as pd
 
-from xsnow.dataset import xsnowDataset
-# Analysis functions are now methods, no direct import needed
+from xsnow import xsnowDataset
+from xsnow.extensions import caic  # all methods are now registered on xsnowDataset
 
 @pytest.fixture
 def analysis_ds():
@@ -38,7 +37,7 @@ def test_find_layer_by_criteria(analysis_ds):
     filtered_ds = analysis_ds.find_layer_by_criteria(criteria)
 
     expected = np.array([[[150, 250, np.nan, np.nan]]])
-    actual = filtered_ds.data['density'].values
+    actual = filtered_ds['density'].values
     np.testing.assert_allclose(expected, actual, equal_nan=True)
 
 def test_compute_critical_cut_length(analysis_ds):
@@ -47,11 +46,11 @@ def test_compute_critical_cut_length(analysis_ds):
     ds_with_rc = analysis_ds.compute_critical_cut_length()
     ds_with_rc_cpu = ds_with_rc.to_cpu()
 
-    assert 'rc_flat' in ds_with_rc_cpu.data
-    assert ds_with_rc_cpu.data['rc_flat'].dims == ('location', 'time', 'layer')
+    assert 'rc_flat' in ds_with_rc_cpu
+    assert ds_with_rc_cpu['rc_flat'].dims == ('location', 'time', 'layer')
 
-    surface_val = ds_with_rc_cpu.data['rc_flat'].isel(layer=-1).item()
+    surface_val = ds_with_rc_cpu['rc_flat'].isel(layer=-1).item()
     assert np.isnan(surface_val)
 
-    other_vals = ds_with_rc_cpu.data['rc_flat'].isel(layer=slice(None, -1)).values
+    other_vals = ds_with_rc_cpu['rc_flat'].isel(layer=slice(None, -1)).values
     assert np.all(other_vals > 0)
