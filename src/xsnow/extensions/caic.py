@@ -1,103 +1,28 @@
-# src/xsnow/extensions.py
 """
-This module contains all functions registered as methods on the xsnowDataset object.
-
-Functions decorated with `@register_xsnowDataset_method` are defined here and
-become available as methods (e.g., `ds.compute_critical_cut_length()`). This
-keeps the core `xsnowDataset` class lean while allowing for a rich, extensible
-set of features.
+This extension contains xsnowDataset methods from the CAIC.
 
 """
 
 import contextlib
-import re
-from typing import TYPE_CHECKING
 import numpy as np
-import re
-import pandas as pd
 import xarray as xr
 
-from .plugin import register_xsnowDataset_method
-from .utils import get_backend
-from .registry import registry
+from ..core import xsnowDataset
+from ..plugin import register_xsnowDataset_method
+from ..utils import get_backend
+from ..registry import registry
+from .classification import mask_by_criteria
 
-# Use a type-checking block to avoid a circular import at runtime,
-# while still allowing type hints for the xsnowDataset class.
-if TYPE_CHECKING:
-    from .dataset import xsnowDataset
+from ..core import xsnowDataset
 
 # ================================================================= #
 #                  SCIENTIFIC ANALYSIS EXTENSIONS                   #
 # ================================================================= #
 
 @register_xsnowDataset_method
-def find_layer_by_criteria(ds: 'xsnowDataset', criteria: str) -> 'xsnowDataset':
-    """
-    Finds and masks layers that do not match a string of boolean criteria.
+def find_layer_by_criteria(ds: xsnowDataset, criteria: str) -> xsnowDataset:
+    return ds.mask_by_criteria(criteria)
 
-    This function parses a criteria string and applies it as a filter to the
-    dataset. Data in layers that do not meet the specified conditions is
-    replaced with NaN, effectively isolating the layers of interest. The
-    shape and dimensions of the dataset are preserved.
-
-    For robustness, this operation is performed on a CPU-based copy of the data.
-
-    Args:
-        ds: The input dataset to filter.
-        criteria: A string containing the filtering conditions. Conditions can be
-            combined using '&' (and) and '|' (or).
-            Example: "density > 300 & grain_size < 0.5"
-
-    Returns:
-        A new xsnowDataset instance where data in layers that do not match the
-        criteria is replaced with NaN.
-
-    Raises:
-        ValueError: If the criteria string is invalid, or if a variable
-            in the criteria is not found in the dataset.
-    """
-    if ds.data is None:
-        raise ValueError("Cannot filter an empty dataset.")
-
-    # This complex filtering is more robust on the CPU with pandas
-    ds_cpu = ds.to_cpu()
-
-    conditions = re.split(r'\s*([&|])\s*', criteria)
-    final_mask = None
-    
-    i = 0
-    while i < len(conditions):
-        condition_str = conditions[i]
-        
-        match = re.match(r'^\s*(\w+)\s*([<>=!]+)\s*(-?\d+\.?\d*)\s*$', condition_str)
-        if not match:
-            raise ValueError(f"Could not parse condition: '{condition_str}'")
-        
-        var, op, val = match.groups()
-        val = float(val)
-
-        if var not in ds_cpu.data:
-            raise ValueError(f"Variable '{var}' not found in dataset.")
-
-        variable_data = ds_cpu.data[var]
-        if op == '>': mask = variable_data > val
-        elif op == '<': mask = variable_data < val
-        elif op == '>=': mask = variable_data >= val
-        elif op == '<=': mask = variable_data <= val
-        elif op == '==': mask = variable_data == val
-        elif op == '!=': mask = variable_data != val
-        else: raise ValueError(f"Unsupported operator: '{op}'")
-
-        if final_mask is None:
-            final_mask = mask
-        else:
-            logical_op = conditions[i-1]
-            if logical_op == '&': final_mask = final_mask & mask
-            elif logical_op == '|': final_mask = final_mask | mask
-        
-        i += 2
-
-    return ds.data if final_mask is None else ds_cpu.data.where(final_mask)
 
 @register_xsnowDataset_method
 def compute_critical_cut_length(ds: 'xsnowDataset') -> 'xsnowDataset':
@@ -195,8 +120,9 @@ def compute_critical_cut_length(ds: 'xsnowDataset') -> 'xsnowDataset':
             'units': reg_entry.get('si_units'),
             'standard_name': reg_entry.get('standard_name')
         }
-
-    return ds.data.assign(rc_flat=rc_flat_final)
+    # Return a new xsnowDataset (wrap the updated xr.Dataset)
+    new_xr = ds.data.assign(rc_flat=rc_flat_final)
+    return ds.__class__(new_xr)
 
 
 @register_xsnowDataset_method

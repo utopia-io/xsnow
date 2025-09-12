@@ -1,58 +1,63 @@
-# xsnow/plugin.py
 """
-Defines the plugin system for registering custom analysis functions.
+Defines the plugin system for registering xsnowDatset methods.
 
-This module provides the `register_xsnowDataset_method` decorator, which allows
-user-defined functions to be attached to the `xsnowDataset` class at runtime.
-This makes the package extensible, allowing users to create and share their
-own post-processing and analysis routines that integrate seamlessly with the
-core data object.
+This is used in xsnow to keep the xsnowDataset class definition tidy and 
+register class methods from other modules. It can also be used to register completely custom
+functions that do not ship with this package.
 """
 
-from typing import Dict, Callable, Any
+from typing import Dict, Callable, Optional
 import warnings
 
 # The global registry for custom analysis functions.
 # This dictionary maps a function name (str) to the function object (Callable).
-_analysis_plugins: Dict[str, Callable] = {}
+_posthoc_registered_methods: Dict[str, Callable] = {}
 
-
-def register_xsnowDataset_method(func: Callable) -> Callable:
+def register_xsnowDataset_method(func: Optional[Callable] = None, *, name: Optional[str] = None):
     """
-    A decorator to register a function as a custom xsnowDataset method.
+    Decorator to attach a free function as a method on xsnowDataset.
 
     The decorated function must take an `xsnowDataset` object as its first
     argument, followed by any other parameters. When the method is called on an
     `xsnowDataset` instance, the instance itself is automatically passed as this
     first argument.
 
-    Example:
-        import xsnow
+    Parameters:
+    ----------
+        func (Callable): The function to be registered
+        name (str), optional: An alias for the registered method. Defaults to the function name.
 
-        @xsnow.register_xsnowDataset_method
-        def get_surface_temperature(ds):
-            \"\"\"Returns the temperature of the top snow layer.\"\"\"
-            # Find the index of the highest layer for each profile
-            surface_idx = ds.data['height'].argmax(dim='layer')
-            # Use the index to select the corresponding temperature
-            return ds.data['temperature'].isel(layer=surface_idx)
+    Examples:
+    ---------
+        from xsnow.extensions import register_xsnowDataset_method
+        @register_xsnowDataset_method
+        def mytool(self, ...): ...
+
+        @register_xsnowDataset_method(name="alias")
+        def mytool(self, ...): ...
 
         # Usage:
-        my_dataset = xsnow.xsnowDataset('path/to/data')
-        surface_temps = my_dataset.get_surface_temperature()
-
-    Args:
-        func (Callable): The function to be registered.
+        >>> import xsnow
+        >>> ds = xsnow.read('path/to/data')
+        >>> ds.mytool(...)
 
     Returns:
+    --------
         Callable: The original, unmodified function.
     """
-    func_name = func.__name__
-    if func_name in _analysis_plugins:
-        warnings.warn(
-            f"Overwriting existing analysis plugin '{func_name}'.",
-            stacklevel=2
-        )
+    def _attach(f: Callable) -> Callable:
+        meth_name = name or f.__name__
+        _posthoc_registered_methods[meth_name] = f
 
-    _analysis_plugins[func_name] = func
-    return func
+        from xsnow import xsnowDataset  # late import to avoid circulars
+        if hasattr(xsnowDataset, meth_name):
+            warnings.warn(f"xsnowDataset already has attribute '{meth_name}', overwriting.", stacklevel=2)
+        setattr(xsnowDataset, meth_name, f)
+        return f
+
+    return _attach(func) if callable(func) else _attach
+
+
+def list_registered_methods() -> Dict[str, Callable]:
+    """Return a copy of the registered extension methods (for docs/CLI)."""
+    return dict(_posthoc_registered_methods)
