@@ -5,10 +5,10 @@ Handles all data parsing and input/output operations for the xsnow package.
 This module is the primary engine for reading and writing data in various
 formats (e.g., SNOWPACK .pro, .smet, NetCDF).
 """
-
+import os
 import logging
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Union, Tuple
+from typing import Dict, Optional, List, Any, Union, Tuple, Sequence
 import concurrent.futures
 
 import numpy as np
@@ -47,7 +47,7 @@ def _parse_pro_worker(
     datetime_start: Optional[str],
     datetime_end: Optional[str],
     code_map: Dict
-) -> Tuple[Dict, List[Dict]]:
+) -> Optional[Tuple[Dict, List[Dict]]]:
     """
     Internal worker to parse a single .pro file into a raw data structure.
 
@@ -62,217 +62,13 @@ def _parse_pro_worker(
         code_map: Mapping from parameter codes to variable names.
 
     Returns:
-        A tuple containing the station metadata and a list of raw profile dicts.
+        A tuple containing the station metadata and a list of raw profile dicts. Or None if parsing fails
     """
-    return _read_pro_raw(filepath, datetime_start, datetime_end, code_map=code_map)
-
-def _create_pro_dataset_worker(
-    raw_data: Tuple[Dict, List[Dict]],
-    max_layers: int
-) -> Optional[xr.Dataset]:
-    """
-    Internal worker to convert raw parsed .pro data into a padded xarray.Dataset.
-
-    This function is designed to be run in a separate process for parallel
-    dataset creation. It takes the raw output from `_parse_pro_worker` and
-    transforms it into a fully-formed, padded `xarray.Dataset`.
-
-    Args:
-        raw_data: A tuple of metadata and raw profile data.
-        max_layers: The number of layers to pad the dataset to.
-
-    Returns:
-        An xarray.Dataset for a single station, or None if no profiles were found.
-    """
-    metadata, profiles = raw_data
-    if not profiles:
+    try:
+        return _read_pro_raw(filepath, datetime_start, datetime_end, code_map=code_map)
+    except Exception as e:
+        logger.error(f"Failed to parse .pro file {filepath.name}: {e}")
         return None
-    return _create_pro_dataset(metadata, profiles, max_layers)
-
-
-def read(
-    source: Union[str, List[str], Path],
-    time: Optional[TimeSelector] = None,
-    location: Optional[LocationSelector] = None,
-    slope: Optional[SlopeSelector] = None,
-    realization: Optional[RealizationSelector] = None,
-    parallel: bool = True,
-    **parser_kwargs: Any
-) -> Optional[xsnowDataset]:
-    """
-    Reads, parses, and combines snowpack data into a unified xsnowDataset.
-
-    This is the primary, user-facing function for loading data into the xsnow
-    package. It is a high-level interface that discovers and reads snow profile
-    (.pro) and time series (.smet) files from a given source, processes them
-    (in parallel by default), and merges them into a single, coherent dataset.
-
-    The function applies filters at the source for memory efficiency, allowing
-    users to load only the specific time ranges or locations they need from
-    large files.
-
-    Args:
-        source: The data source. Can be a path to a single file (e.g.,
-            '.pro', '.smet', '.nc'), a directory containing data files, or a
-            list of file paths.
-        time: A `TimeSelector` object for filtering the data by time.
-            When a slice is provided, filtering is performed at the source,
-            which is highly memory-efficient.
-        location: A `LocationSelector` object for filtering by station ID
-            or geographic bounding box.
-        slope: A `SlopeSelector` for filtering by slope angle.
-        realization: A `RealizationSelector` for filtering by model realization.
-        parallel: If True (default), multiple files will be read and processed
-            concurrently using a process pool. Set to False for debugging.
-        **parser_kwargs: Additional keyword arguments passed to the underlying
-            parser functions. For example, `max_layers='auto'` or `max_layers=300`
-            can be used to control the padding of snow profile data from .pro files.
-
-    Returns:
-        A unified `xsnowDataset` object containing the data from all sources,
-        or `None` if no valid data files are found. The merging logic groups
-        data by station, so if a .pro and .smet file are found for the same
-        station, their data variables will be combined.
-
-    Examples
-    --------
-    >>> # Load all .pro and .smet files from a directory
-    >>> ds = read('path/to/data_directory/')
-
-    >>> # Load data for a specific time range using a TimeSelector
-    >>> from xsnow.selectors import TimeSelector
-    >>> time_filter = TimeSelector(sel=slice('2024-01-01', '2024-01-31'))
-    >>> ds_jan = read('path/to/data_directory/', time=time_filter)
-
-    >>> # Load data and cap the number of layers to save memory
-    >>> ds_capped = read('path/to/data_directory/', max_layers=250)
-    """
-    # --- File Path Resolution ---
-    if isinstance(source, (str, Path)):
-        p = Path(source)
-        if not p.exists():
-            logger.error(f"Source path does not exist: {source}")
-            return None
-        if p.is_dir():
-            filepaths = sorted(list(p.glob('*.pro'))) + sorted(list(p.glob('*.smet')))
-        elif p.suffix == '.nc':
-            try:
-                return xsnowDataset(xr.open_dataset(p))
-            except Exception as e:
-                logger.error(f"Failed to read NetCDF file {p}: {e}")
-                return None
-        else:
-            filepaths = [p]
-    elif isinstance(source, list):
-        filepaths = [Path(f) for f in source]
-    else:
-        raise TypeError(f"Unsupported source type: {type(source)}")
-
-    if not filepaths:
-        logger.warning("No data files found in the specified source.")
-        return None
-
-    pro_files = [f for f in filepaths if f.suffix == '.pro']
-    smet_files = [f for f in filepaths if f.suffix == '.smet']
-
-    datetime_start, datetime_end = None, None
-    if time and isinstance(time.sel, slice):
-        datetime_start = time.sel.start
-        datetime_end = time.sel.stop
-
-    raw_pro_data = []
-    if pro_files:
-        if parallel and len(pro_files) > 1:
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                future_to_data = {
-                    executor.submit(_parse_pro_worker, fp, datetime_start, datetime_end, CODE_TO_NAME_MAP): fp
-                    for fp in pro_files
-                }
-                raw_pro_data.extend([future.result() for future in concurrent.futures.as_completed(future_to_data)])
-        else:
-            raw_pro_data.extend(
-                [_parse_pro_worker(fp, datetime_start, datetime_end, CODE_TO_NAME_MAP) for fp in pro_files]
-            )
-
-    max_layers_arg = parser_kwargs.get('max_layers', 'auto')
-    if isinstance(max_layers_arg, str) and max_layers_arg == 'auto':
-        if raw_pro_data:
-            max_layers_to_use = max((len(p.get('height', [])) for _, profiles in raw_pro_data for p in profiles), default=1)
-        else:
-            max_layers_to_use = 200
-    else:
-        max_layers_to_use = int(max_layers_arg)
-
-    pro_datasets = []
-    if raw_pro_data:
-        for raw_data in raw_pro_data:
-            if raw_data[1]:
-                ds = _create_pro_dataset_worker(raw_data, max_layers_to_use)
-                if ds is not None:
-                    pro_datasets.append(ds)
-
-    smet_datasets = []
-    for fp in smet_files:
-        ds = read_smet(fp, datetime_start, datetime_end)
-        if ds is not None:
-            smet_datasets.append(ds)
-
-    all_datasets = pro_datasets + smet_datasets
-    if not all_datasets:
-        return None
-
-    grouped_by_location = {}
-    for ds in all_datasets:
-        loc = ds.location.item()
-        if loc not in grouped_by_location:
-            grouped_by_location[loc] = []
-        grouped_by_location[loc].append(ds)
-
-    merged_datasets = [
-        xr.merge(dsets, compat='no_conflicts') for dsets in grouped_by_location.values()
-        ]
-    if not merged_datasets:
-        return None
-
-    # --- FIX: Build the location mapping and re-index datasets ---
-    # 1. Get a sorted, unique list of all station names
-    station_names = sorted([ds.location.item() for ds in merged_datasets])
-    
-    # 2. Create the mappings
-    name_to_int = {name: i for i, name in enumerate(station_names)}
-    int_to_name = dict(enumerate(station_names))
-
-    reindexed_datasets = []
-    for ds in merged_datasets:
-        station_name = ds.location.item()
-        station_id = name_to_int[station_name]
-        # Assign the new integer coordinate to the 'location' dimension
-        ds['location'] = [station_id]
-        reindexed_datasets.append(ds)
-
-    reindexed_datasets.sort(key=lambda ds: ds.location.item())
-    
-    if len(reindexed_datasets) > 1:
-        # Use the reindexed datasets for concatenation
-        final_xr_dataset = xr.concat(reindexed_datasets, dim='location')
-    else:
-        final_xr_dataset = reindexed_datasets[0]
-        
-    final_xr_dataset['location'].attrs['mapping'] = int_to_name
-
-    if time: final_xr_dataset = time.apply(final_xr_dataset)
-    if location: final_xr_dataset = location.apply(final_xr_dataset)
-    if slope: final_xr_dataset = slope.apply(final_xr_dataset)
-    if realization: final_xr_dataset = realization.apply(final_xr_dataset)
-
-    # Create the final xsnowDataset object
-    final_dataset = xsnowDataset(final_xr_dataset)
-
-    # Calculate and add the 'z' coordinate if the dataset contains snow profile data before returning
-    if 'height' in final_dataset.data:
-        return final_dataset.compute_z_depth()
-    else:
-        return final_dataset
 
 def _read_pro_raw(
     filepath: Union[str, Path],
@@ -324,7 +120,8 @@ def _read_pro_raw(
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         for line in f:
             line = line.strip()
-            if not line: continue
+            if not line: 
+                continue
             if line == '[STATION_PARAMETERS]':
                 in_header, in_data = True, False
             elif line == '[DATA]':
@@ -342,8 +139,10 @@ def _read_pro_raw(
                         profile_ts = pd.to_datetime(current_ts_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
                         if pd.notna(profile_ts):
                             in_range = True
-                            if start_ts and profile_ts < start_ts: in_range = False
-                            if end_ts and profile_ts > end_ts: in_range = False
+                            if start_ts and profile_ts < start_ts: 
+                                in_range = False
+                            if end_ts and profile_ts > end_ts: 
+                                in_range = False
                             if in_range:
                                 temp_profiles.append(current_ts_data)
                     current_ts_data = {'timestamp': parts[1]}
@@ -359,12 +158,315 @@ def _read_pro_raw(
         profile_ts = pd.to_datetime(current_ts_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
         if pd.notna(profile_ts):
             in_range = True
-            if start_ts and profile_ts < start_ts: in_range = False
-            if end_ts and profile_ts > end_ts: in_range = False
+            if start_ts and profile_ts < start_ts: 
+                in_range = False
+            if end_ts and profile_ts > end_ts: 
+                in_range = False
             if in_range:
                 temp_profiles.append(current_ts_data)
     
     return metadata, temp_profiles
+
+def _create_pro_dataset_worker(
+    raw_data: Tuple[Dict, List[Dict]],
+    max_layers: int
+) -> Optional[xr.Dataset]:
+    """
+    Internal worker to convert raw parsed .pro data into a padded xarray.Dataset.
+
+    This function is designed to be run in a separate process for parallel
+    dataset creation. It takes the raw output from `_parse_pro_worker` and
+    transforms it into a fully-formed, padded `xarray.Dataset`.
+
+    Args:
+        raw_data: A tuple of metadata and raw profile data.
+        max_layers: The number of layers to pad the dataset to.
+
+    Returns:
+        An xarray.Dataset for a single station, or None if no profiles were found or raw_data is None.
+    """
+    if raw_data is None:
+        return None
+    try:
+        metadata, profiles = raw_data
+        if not profiles:
+            return None
+        return _create_pro_dataset(metadata, profiles, max_layers)
+    except Exception as e:
+        # Note: We don't have the filepath here, but the error source will be the raw data.
+        station_name = raw_data[0].get('stationName', 'unknown')
+        logger.error(f"Failed to create dataset for station '{station_name}': {e}")
+        return None
+
+
+def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]]) -> Tuple[List[Path], List[Path]]:
+    """
+    Resolves the source argument into separate lists of .pro and .smet files.
+
+    Args:
+        source: The data source, which can be a directory path, a single
+            file path, or a list of paths.
+
+    Returns:
+        A tuple containing two lists: one for .pro file paths and one for
+        .smet file paths.
+        
+    Raises:
+        FileNotFoundError: If the source path does not exist.
+        TypeError: If the source is of an unsupported type.
+    """
+    if isinstance(source, (str, Path)):
+        p = Path(source)
+        if not p.exists():
+            raise FileNotFoundError(f"Source path does not exist: {source}")
+        if p.is_dir():
+            filepaths = sorted(list(p.glob('*.pro'))) + sorted(list(p.glob('*.smet')))
+        else:
+            filepaths = [p]
+    elif isinstance(source, list):
+        filepaths = [Path(f) for f in source]
+    else:
+        raise TypeError(f"Unsupported source type: {type(source)}")
+
+    pro_files = [f for f in filepaths if f.suffix == '.pro']
+    smet_files = [f for f in filepaths if f.suffix == '.smet']
+    return pro_files, smet_files
+
+#---------------------------------------------------------------
+# Read() function helper functions
+#---------------------------------------------------------------
+def _read_pro_files(
+    pro_files: List[Path],
+    datetime_start: Optional[str],
+    datetime_end: Optional[str],
+    n_cpus_use: int,
+    parser_kwargs: Dict
+) -> List[xr.Dataset]:
+    """
+    Parses and creates datasets from a list of .pro files.
+
+    This function orchestrates the parallel reading of raw data and the
+    subsequent parallel creation of xarray.Dataset objects.
+
+    Args:
+        pro_files: A list of file paths to .pro files.
+        datetime_start: An optional start timestamp for filtering.
+        datetime_end: An optional end timestamp for filtering.
+        n_cpus_use: The number of CPU cores to use for parallel processing.
+        parser_kwargs: Additional keyword arguments for the parser,
+            such as `max_layers`.
+
+    Returns:
+        A list of xarray.Dataset objects, one for each successfully
+        processed .pro file.
+    """
+    if not pro_files:
+        return []
+
+    # Step 1: Parallel parsing
+    raw_pro_data = []
+    use_parallel = n_cpus_use > 1 and len(pro_files) > 1
+    if use_parallel:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_cpus_use) as executor:
+            futures = {executor.submit(_parse_pro_worker, fp, datetime_start, datetime_end, CODE_TO_NAME_MAP) for fp in pro_files}
+            for future in concurrent.futures.as_completed(futures):
+                if result := future.result():
+                    raw_pro_data.append(result)
+    else:
+        for fp in pro_files:
+            if result := _parse_pro_worker(fp, datetime_start, datetime_end, CODE_TO_NAME_MAP):
+                raw_pro_data.append(result)
+
+    if not raw_pro_data:
+        return []
+
+    # Step 2: Determine max layers
+    max_layers_arg = parser_kwargs.get('max_layers', 'auto')
+    if max_layers_arg == 'auto':
+        max_layers_to_use = max((len(p.get('height', [])) for _, profiles in raw_pro_data for p in profiles if profiles), default=200)
+    else:
+        max_layers_to_use = int(max_layers_arg)
+
+    # Step 3: Parallel dataset creation
+    pro_datasets = []
+    valid_raw_data = [rd for rd in raw_pro_data if rd and rd[1]]
+    if use_parallel and len(valid_raw_data) > 1:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_cpus_use) as executor:
+            futures = {executor.submit(_create_pro_dataset_worker, raw_data, max_layers_to_use) for raw_data in valid_raw_data}
+            for future in concurrent.futures.as_completed(futures):
+                if ds := future.result():
+                    pro_datasets.append(ds)
+    else:
+        for raw_data in valid_raw_data:
+            if ds := _create_pro_dataset_worker(raw_data, max_layers_to_use):
+                pro_datasets.append(ds)
+                
+    return pro_datasets
+
+def _read_smet_files(
+    smet_files: List[Path],
+    datetime_start: Optional[str],
+    datetime_end: Optional[str]
+) -> List[xr.Dataset]:
+    """
+    Reads a list of .smet files into xarray.Dataset objects.
+
+    Args:
+        smet_files: A list of file paths to .smet files.
+        datetime_start: An optional start timestamp for filtering.
+        datetime_end: An optional end timestamp for filtering.
+
+    Returns:
+        A list of xarray.Dataset objects, one for each successfully
+        processed .smet file.
+    """
+    smet_datasets = []
+    for fp in smet_files:
+        try:
+            if ds := read_smet(fp, datetime_start, datetime_end):
+                smet_datasets.append(ds)
+        except Exception as e:
+            logger.error(f"Failed to read .smet file {fp.name}: {e}")
+    return smet_datasets
+
+def _merge_and_finalize(
+    all_datasets: List[xr.Dataset],
+    time: Optional[TimeSelector],
+    location: Optional[LocationSelector],
+    slope: Optional[SlopeSelector],
+    realization: Optional[RealizationSelector]
+) -> Optional[xsnowDataset]:
+    """
+    Merges, re-indexes, and applies final filters to a list of datasets.
+
+    This function combines a list of individual xarray.Dataset objects into a
+    single, unified xsnowDataset, handling location-based merging and
+    coordinate re-indexing.
+
+    Args:
+        all_datasets: A list of xarray.Dataset objects to be combined.
+        time: A TimeSelector for post-merge filtering.
+        location: A LocationSelector for post-merge filtering.
+        slope: A SlopeSelector for post-merge filtering.
+        realization: A RealizationSelector for post-merge filtering.
+
+    Returns:
+        A final, unified xsnowDataset object, or None if the input list
+        is empty.
+    """
+    if not all_datasets:
+        return None
+
+    # Group by location and merge
+    grouped_by_location = {}
+    for ds in all_datasets:
+        loc = ds.location.item()
+        grouped_by_location.setdefault(loc, []).append(ds)
+    merged_datasets = [xr.merge(dsets, compat='override') for dsets in grouped_by_location.values()]
+
+    if not merged_datasets:
+        return None
+
+    # Re-index location dimension from strings to integers
+    station_names = sorted([ds.location.item() for ds in merged_datasets])
+    name_to_int = {name: i for i, name in enumerate(station_names)}
+    int_to_name = dict(enumerate(station_names))
+    
+    reindexed_datasets = []
+    for ds in merged_datasets:
+        station_name = ds.location.item()
+        ds['location'] = [name_to_int[station_name]]
+        reindexed_datasets.append(ds)
+
+    final_xr_dataset = xr.concat(
+        sorted(reindexed_datasets, key=lambda ds: ds.location.item()),
+        dim='location',
+        join='outer' 
+    )
+    final_xr_dataset['location'].attrs['mapping'] = int_to_name
+
+    # Apply final filters
+    if time: 
+        final_xr_dataset = time.apply(final_xr_dataset)
+    if location: 
+        final_xr_dataset = location.apply(final_xr_dataset)
+    if slope: 
+        final_xr_dataset = slope.apply(final_xr_dataset)
+    if realization: 
+        final_xr_dataset = realization.apply(final_xr_dataset)
+
+    final_dataset = xsnowDataset(final_xr_dataset)
+    return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
+
+
+
+
+def read(
+    source: Union[str, List[str], Path],
+    time: Optional[TimeSelector] = None,
+    location: Optional[LocationSelector] = None,
+    slope: Optional[SlopeSelector] = None,
+    realization: Optional[RealizationSelector] = None,
+    n_cpus_use: Optional[int] = None,
+    **parser_kwargs: Any
+) -> Optional[xsnowDataset]:
+    """
+    Reads, parses, and combines snowpack data into a unified xsnowDataset.
+
+    This is the primary user-facing function for loading data. It orchestrates
+    the discovery, parallel processing, and merging of snow profile (.pro)
+    and time series (.smet) files into a single, coherent dataset.
+
+    Args:
+        source: The data source. Can be a path to a single file (e.g.,
+            '.pro', '.smet', '.nc'), a directory containing data files, or a
+            list of file paths.
+        time: A `TimeSelector` object for filtering data by time.
+        location: A `LocationSelector` object for filtering by station ID.
+        slope: A `SlopeSelector` for filtering by slope angle.
+        realization: A `RealizationSelector` for filtering by model realization.
+        n_cpus_use (Optional[int]): The number of CPU cores to use. If not
+            provided, it defaults to min(32, total_cores - 1), with a
+            minimum of 1. Set to 1 for sequential processing.
+        **parser_kwargs: Additional keyword arguments passed to the underlying
+            parser functions, such as `max_layers='auto'`.
+
+    Returns:
+        A unified `xsnowDataset` object containing the data from all sources,
+        or `None` if no valid data files are found.
+    """
+    # --- Step 1: Determine CPU count ---
+    if n_cpus_use is None:
+        cpu_count = os.cpu_count()
+        n_cpus_use = min(32, cpu_count - 1) if cpu_count and cpu_count > 1 else 1
+    
+    # --- Step 2: Resolve file paths ---
+    if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
+        try:
+            return xsnowDataset(xr.open_dataset(source))
+        except Exception as e:
+            logger.error(f"Failed to read NetCDF file {source}: {e}")
+            return None
+            
+    try:
+        pro_files, smet_files = _resolve_filepaths(source)
+    except (FileNotFoundError, TypeError) as e:
+        logger.error(e)
+        return None
+
+    if not pro_files and not smet_files:
+        logger.warning("No data files found in the specified source.")
+        return None
+
+    # --- Step 3: Read and process data files ---
+    datetime_start, datetime_end = (time.sel.start, time.sel.stop) if time and isinstance(time.sel, slice) else (None, None)
+    
+    pro_datasets = _read_pro_files(pro_files, datetime_start, datetime_end, n_cpus_use, parser_kwargs)
+    smet_datasets = _read_smet_files(smet_files, datetime_start, datetime_end)
+
+    # --- Step 4: Merge and finalize datasets ---
+    all_datasets = pro_datasets + smet_datasets
+    return _merge_and_finalize(all_datasets, time, location, slope, realization)
 
 def _create_pro_dataset(
     metadata: Dict,
@@ -438,12 +540,13 @@ def _create_pro_dataset(
         'history': f'{pd.Timestamp.now(tz="UTC").isoformat()}: Created by xsnow.',
         'crs': 'EPSG:4326'
     }
-    for var_name in list(ds.variables):
+    for var_name_hashable in list(ds.variables):
+        var_name = str(var_name_hashable)
         if var_name in registry:
-            reg_entry = registry[var_name]
-            ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', 'unknown')
-            ds[var_name].attrs['units'] = reg_entry.get('si_units', 'unknown')
-            ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
+            if reg_entry := registry.get(var_name):
+                ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', 'unknown')
+                ds[var_name].attrs['units'] = reg_entry.get('si_units', 'unknown')
+                ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
 
     return ds
 
@@ -526,11 +629,13 @@ def read_smet(
 
     ds = xr.Dataset.from_dataframe(df)
     ds = ds.rename({'timestamp': 'time'})
-    try:
-        ds['time'].tz.set_attr(int(header.get('tz')))
-    except ValueError:
-        logger.warning(f"Cannot set timezone from file {filepath}")
-
+    # Hnadle cases where a timezone (tz) from a SMET file header that doesn't contain a tz field.
+    tz_val = header.get('tz')
+    if tz_val is not None:
+        try:
+            ds['time'].tz.set_attr(int(tz_val))
+        except (ValueError, TypeError):
+            logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
     station_name = header.get('station_name', header.get('station_id', file_path.stem))
     ds = ds.expand_dims(location=[station_name])
     ds = ds.assign_coords({
@@ -601,7 +706,7 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     print(f"Dataset successfully saved to {path}")
 
 @register_xsnowDataset_method
-def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int = None, **kwargs):
+def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = None, **kwargs):
     """
     Saves time-series data from the dataset to a SMET file.
 
@@ -622,14 +727,14 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int = None, **k
     
     # Check if the number of locations exceeds the specified maximum
     if max_files is not None:
-        num_locations = ds.sizes['location']
+        num_locations = ds.sizes.get('location')
         if num_locations > max_files:
             raise ValueError(
                 f"Dataset contains {num_locations} locations, which exceeds the "
                 f"specified maximum of {max_files} files to save."
             )
             
-    if ds.sizes['location'] > 1:
+    if ds.sizes.get('location') > 1:
         raise ValueError("to_smet() only supports datasets with a single location.")
 
     # Select variables that are time-series (do not have a 'layer' dimension)
@@ -648,7 +753,7 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int = None, **k
         f.write(f"latitude = {ds.latitude.item():.4f}\n")
         f.write(f"longitude = {ds.longitude.item():.4f}\n")
         f.write(f"altitude = {ds.altitude.item():.0f}\n")
-        f.write(f"nodata = -999\n")
+        f.write("nodata = -999\n")
         # SMET convention uses 'timestamp' as the first field
         fields = "timestamp " + " ".join(df.columns)
         f.write(f"fields = {fields}\n")
@@ -661,7 +766,7 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int = None, **k
 
 
 @register_xsnowDataset_method
-def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int = None, **kwargs):
+def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = None, **kwargs):
     """
     Saves a single snow profile to a SNOWPACK .pro file.
 
@@ -686,14 +791,14 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int = None, **kw
         
     # Check if the number of profiles exceeds the specified maximum
     if max_files is not None:
-        num_profiles = ds.sizes['time']
+        num_profiles = ds.sizes.get('time')
         if num_profiles > max_files:
             raise ValueError(
                 f"Dataset contains {num_profiles} profiles, which exceeds the "
                 f"specified maximum of {max_files} files to save."
             )
 
-    if ds.sizes['location'] > 1:
+    if ds.sizes.get('location') > 1:
         raise ValueError("to_pro() only supports datasets with a single location.")
 
     single_loc_ds = ds.data.squeeze()
@@ -716,7 +821,7 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int = None, **kw
             timestamp_str = pd.to_datetime(t.item()).strftime('%d.%m.%Y %H:%M:%S')
             f.write(f"0500,{timestamp_str}\n")
             
-            for var_name, code in NAME_TO_CODE_MAP.items():
+            for var_name, code in registry.items():
                 if var_name in profile_vars:
                     # Get the data, drop NaNs, and format for writing
                     data_array = profile[var_name].dropna(dim='layer').values

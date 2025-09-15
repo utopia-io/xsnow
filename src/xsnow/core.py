@@ -107,7 +107,7 @@ class xsnowDataset:
                 f"\n{indented_xr_repr}"
             )
         except Exception:
-            return f"<xsnowDataset with data (exception occurred on summary)>"
+            return "<xsnowDataset with data (exception occurred on summary)>"
 
     def __getattr__(self, name: str):
         """
