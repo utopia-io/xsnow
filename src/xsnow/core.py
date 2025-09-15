@@ -47,7 +47,6 @@ from pathlib import Path
 import pandas as pd
 import xarray as xr
 import numpy as np
-from pathlib import Path
 
 from .registry import registry
 from .plugin import list_registered_methods
@@ -154,7 +153,10 @@ class xsnowDataset:
         # add registered extension method names
         base_attrs |= set(list_registered_methods().keys())
 
-        return sorted(base_attrs | var_names)
+        # Combine the sets first, then convert every item to a string for sorting
+        combined_attrs = base_attrs | var_names
+        return sorted([str(item) for item in combined_attrs])
+
 
     def __getitem__(self, key: str) -> xr.DataArray:
         """
@@ -325,8 +327,10 @@ class xsnowDataset:
         >>> ds_with_hs = ds.compute_hs()
         >>> print(ds_with_hs['HS'])
         """
-        if self.data is None: raise ValueError("Cannot compute HS on an empty dataset.")
-        if 'height' not in self.data: raise ValueError("Missing 'height' variable to compute HS.")
+        if self.data is None: 
+            raise ValueError("Cannot compute HS on an empty dataset.")
+        if 'height' not in self.data: 
+            raise ValueError("Missing 'height' variable to compute HS.")
         
         hs = self.data['height'].max(dim='layer', skipna=True)
         hs.attrs = {'long_name': 'Total Snow Height', 'units': 'm'}
@@ -385,7 +389,8 @@ class xsnowDataset:
         >>> # Move to GPU for fast computation
         >>> ds_gpu = ds_cpu.to_gpu()
         """
-        if self.data is None: return self
+        if self.data is None: 
+            return self
         try:
             import cupy as cp
             cp.arange(1) # Check if a GPU is present and cupy is working
@@ -449,8 +454,6 @@ class DatasetDecorator(xsnowDataset):
             def method(*args, **kwargs):
                 result = attr(*args, **kwargs)
                 # If an xarray.Dataset comes back, re-wrap it in the same decorator class
-                if isinstance(result, xr.Dataset):
-                    return self._rewrap(result)
-                return result
+                return self._rewrap(result) if isinstance(result, xr.Dataset) else result
             return method
         return attr

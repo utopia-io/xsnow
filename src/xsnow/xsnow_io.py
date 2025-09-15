@@ -303,6 +303,7 @@ def _read_pro_files(
                 
     return pro_datasets
 
+
 def _read_smet_files(
     smet_files: List[Path],
     datetime_start: Optional[str],
@@ -399,8 +400,6 @@ def _merge_and_finalize(
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
 
 
-
-
 def read(
     source: Union[str, List[str], Path],
     time: Optional[TimeSelector] = None,
@@ -467,6 +466,7 @@ def read(
     # --- Step 4: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
     return _merge_and_finalize(all_datasets, time, location, slope, realization)
+
 
 def _create_pro_dataset(
     metadata: Dict,
@@ -549,6 +549,7 @@ def _create_pro_dataset(
                 ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
 
     return ds
+
 
 def read_smet(
     filepath: Union[str, Path],
