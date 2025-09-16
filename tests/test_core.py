@@ -118,7 +118,16 @@ def test_compare_processed_hs_against_smet():
 
     Note that the two variables often only agree to 1 decimal place. This is an issue of SNOWPACK"""
     ds = single_profile_timeseries()
-    sub = ds.sel(realization=0, slope=16.0)
+    # This line causes a KeyError because 16.0 is not in the integer index.
+    # sub = ds.sel(realization=0, slope=16.0)
+
+    # First, find the integer index for the desired slope inclination.
+    # The .where() method filters the dataset, and .item() extracts the integer index.
+    slope_idx_to_select = ds.where(ds.slope_inclination == 16.0, drop=True).slope.item()
+    
+    # Now, select using the correct integer index.
+    sub = ds.sel(realization=0, slope=slope_idx_to_select)
+    
     assert np.isclose(sub.HS.values, sub.HS_mod.values, atol=1e-2).all()
 
 def test_dir(sample_xsnow_dataset):

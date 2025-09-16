@@ -253,17 +253,21 @@ class xsnowDataset:
         copied_xr_dataset = self.data.copy(deep=deep)
         return self.__class__(copied_xr_dataset)
 
-    def merge_smet(self, smet_source: Union[str, List[str], Path]) -> 'xsnowDataset':
+    def merge_smet(self, smet_source: Union[str, List[str], Path],
+                   realization: int = 1
+    ) -> 'xsnowDataset':
         """
         Reads one or more SMET files and merges their data into this dataset.
 
-        This method is useful for adding meteorological timeseries data to an
-        existing dataset of snow profiles. The merge is performed by aligning
-        the 'location' and 'time' coordinates.
+        This method adds meteorological time-series data to the dataset,
+        assigning it to a given realization coordinate. The merge is performed
+        by aligning the 'location' and 'time' coordinates.
 
         Args:
             smet_source: Path to a SMET file, a list of SMET files, or a
                 directory containing SMET files.
+        realization (int): The realization ID to assign to the merged
+            SMET data. Defaults to 1.
 
         Returns:
             A new xsnowDataset instance with the merged data.
@@ -278,13 +282,23 @@ class xsnowDataset:
         if self.data is None:
             return self
 
-        smet_data_obj = read(smet_source)
-        if smet_data_obj is None:
+        if (smet_data_obj := read(smet_source)) is None:
+            # It's good practice to log or warn the user here
+            import logging
+            logging.getLogger(__name__).warning("No SMET data found to merge.")
             return self
+        
+        # Assertion to guarantee the type for Pylance
+        assert isinstance(smet_data_obj, xsnowDataset)
 
-        merged_ds = xr.merge([self.data, smet_data_obj.data], compat='no_conflicts')
-        return self.__class__(merged_ds)
-    
+        # Assign the specified realization as a coordinate to the SMET data
+        smet_xr = smet_data_obj.to_xarray().assign_coords(realization=[realization])
+
+        # Merge the datasets, allowing for different time axes
+        merged_ds = xr.merge([self.data, smet_xr], join='outer', compat='override')
+        
+        return self.__class__(merged_ds)    
+        
     def to_xarray(self) -> xr.Dataset:
         """
         Returns the underlying xarray.Dataset.

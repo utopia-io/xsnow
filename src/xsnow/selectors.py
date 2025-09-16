@@ -85,8 +85,8 @@ class Selector:
 
         # If slice of strings or datetimes => sel
         if isinstance(s, slice) and (
-            isinstance(s.start, (str, pd.Timestamp, type(None))) or
-            isinstance(s.stop,  (str, pd.Timestamp, type(None)))
+            isinstance(s.start, (str, pd.Timestamp)) or
+            isinstance(s.stop,  (str, pd.Timestamp))
         ):
             return ds.sel({self.dim: s})
 
@@ -98,7 +98,12 @@ class Selector:
             return ds.sel({self.dim: s})
             
         # Otherwise, assume integer/indexing => isel
-        return ds.isel({self.dim: s})
+        try:
+            return ds.isel({self.dim: s})
+        except IndexError:
+            # If the index is out of bounds, return an empty dataset
+            # by selecting a zero-length slice of the dimension.
+            return ds.isel({self.dim: slice(0, 0)})
 
 
 class TimeSelector(Selector):

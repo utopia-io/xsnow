@@ -41,7 +41,7 @@ def ds() -> xr.Dataset:
     # return ds
 
     # 48 hours starting 2024-01-17 00:00 (keeps DST out of the way for most tests)
-    time = pd.date_range("2024-01-20 00:00", periods=48, freq="H")
+    time = pd.date_range("2024-01-20 00:00", periods=48, freq="h")
 
     # Coordinates
     location = ["station_A", "station_B"]

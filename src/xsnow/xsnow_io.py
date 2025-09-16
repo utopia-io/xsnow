@@ -46,7 +46,9 @@ def _parse_pro_worker(
     filepath: Path,
     datetime_start: Optional[str],
     datetime_end: Optional[str],
-    code_map: Dict
+    code_map: Dict,
+    logger: logging.Logger,
+    remove_soil: bool
 ) -> Optional[Tuple[Dict, List[Dict]]]:
     """
     Internal worker to parse a single .pro file into a raw data structure.
@@ -60,12 +62,14 @@ def _parse_pro_worker(
         datetime_start: Start timestamp for filtering profiles.
         datetime_end: End timestamp for filtering profiles.
         code_map: Mapping from parameter codes to variable names.
+        logger logging.Logger: A pre-configured
+            logger instance. If None, the default module logger is used.
 
     Returns:
         A tuple containing the station metadata and a list of raw profile dicts. Or None if parsing fails
     """
     try:
-        return _read_pro_raw(filepath, datetime_start, datetime_end, code_map=code_map)
+        return _read_pro_raw(filepath, datetime_start, datetime_end, code_map=code_map, logger=logger, remove_soil=remove_soil)
     except Exception as e:
         logger.error(f"Failed to parse .pro file {filepath.name}: {e}")
         return None
@@ -75,17 +79,17 @@ def _read_pro_raw(
     datetime_start: Optional[str] = None,
     datetime_end: Optional[str] = None,
     code_map: Optional[Dict] = None,
-    **kwargs
+    logger: Optional[logging.Logger] = None,
+    remove_soil: bool = True
 ) -> Tuple[Dict, List[Dict]]:
     """
-    Parses a .pro file into raw Python objects, applying filters at the source.
+    Parses a .pro file into raw Python objects, with an option to remove soil layers.
 
     This low-level function reads a SNOWPACK .pro file line by line, extracting
     metadata from the header and parsing each time-stamped snow profile from
     the data section. It returns data in a memory-efficient intermediate
     format, suitable for parallel processing. It filters profiles by the
-    specified time range *before* storing them, which is crucial for
-    memory efficiency when reading large files.
+    specified time range *before* storing them.
 
     Args:
         filepath: Path to the .pro file.
@@ -95,7 +99,10 @@ def _read_pro_raw(
             this time are skipped.
         code_map: A dictionary mapping parameter codes (e.g., '0501') to
             variable names (e.g., 'height').
-        **kwargs: Catches any unused keyword arguments.
+        logger (Optional[logging.Logger]): An optional, pre-configured
+            logger instance. If None, the default module logger is used.
+        remove_soil (bool): If True (default), layers identified as soil
+            (grain type 81 or 82) are removed from the bottom of the profile.
 
     Returns:
         A tuple containing:
@@ -103,6 +110,9 @@ def _read_pro_raw(
             - temp_profiles (List[Dict]): A list where each element is a
               dictionary representing a single snow profile at one timestamp.
     """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
     file_path = Path(filepath)
     if not file_path.exists():
         logger.error(f"File not found: {filepath}")
@@ -118,7 +128,7 @@ def _read_pro_raw(
     end_ts = pd.to_datetime(datetime_end) if datetime_end else None
 
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for line in f:
+        for i, line in enumerate(f):
             line = line.strip()
             if not line: 
                 continue
@@ -144,7 +154,22 @@ def _read_pro_raw(
                             if end_ts and profile_ts > end_ts: 
                                 in_range = False
                             if in_range:
-                                temp_profiles.append(current_ts_data)
+                                # --- Soil Removal Logic ---
+                                if remove_soil and 'grain_type' in current_ts_data:
+                                    grain_types = current_ts_data['grain_type']
+                                    is_soil = (grain_types == 81) | (grain_types == 82)
+                                    soil_indices = np.where(is_soil)[0]
+                                    
+                                    if soil_indices.size > 0:
+                                        first_soil_idx = soil_indices[0]
+                                        for key, arr in current_ts_data.items():
+                                            if isinstance(arr, np.ndarray) and arr.ndim == 1:
+                                                current_ts_data[key] = arr[:first_soil_idx]
+                                
+                                # Only append if there are still layers left after slicing
+                                if current_ts_data.get('height', np.array([])).size > 0:
+                                    temp_profiles.append(current_ts_data)
+                                    
                     current_ts_data = {'timestamp': parts[1]}
                 else:
                     data_parts = line.split(',')
@@ -152,8 +177,13 @@ def _read_pro_raw(
                         try:
                             current_ts_data[param_name] = np.array(data_parts[2:], dtype=float)
                         except ValueError:
-                            logger.warning(f"Could not parse data for param {param_name} in {filepath}")
+                            ts = current_ts_data.get('timestamp', 'unknown timestamp')
+                            logger.warning(
+                                f"Could not parse data for param {param_name} in {Path(filepath).name} "
+                                f"at timestamp {ts} (line approx {i+1}). Skipping parameter."
+                            )
 
+    # This block handles the very last profile in the file
     if current_ts_data:
         profile_ts = pd.to_datetime(current_ts_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
         if pd.notna(profile_ts):
@@ -163,13 +193,29 @@ def _read_pro_raw(
             if end_ts and profile_ts > end_ts: 
                 in_range = False
             if in_range:
-                temp_profiles.append(current_ts_data)
+                # --- Soil Removal Logic ---
+                if remove_soil and 'grain_type' in current_ts_data:
+                    grain_types = current_ts_data['grain_type']
+                    is_soil = (grain_types == 81) | (grain_types == 82)
+                    soil_indices = np.where(is_soil)[0]
+                    
+                    if soil_indices.size > 0:
+                        first_soil_idx = soil_indices[0]
+                        for key, arr in current_ts_data.items():
+                            if isinstance(arr, np.ndarray) and arr.ndim == 1:
+                                current_ts_data[key] = arr[:first_soil_idx]
+
+                # Only append if there are still layers left after slicing
+                if current_ts_data.get('height', np.array([])).size > 0:
+                    temp_profiles.append(current_ts_data)
     
     return metadata, temp_profiles
 
+
 def _create_pro_dataset_worker(
     raw_data: Tuple[Dict, List[Dict]],
-    max_layers: int
+    max_layers: int,
+    logger: logging.Logger
 ) -> Optional[xr.Dataset]:
     """
     Internal worker to convert raw parsed .pro data into a padded xarray.Dataset.
@@ -181,6 +227,8 @@ def _create_pro_dataset_worker(
     Args:
         raw_data: A tuple of metadata and raw profile data.
         max_layers: The number of layers to pad the dataset to.
+        logger logging.Logger: A pre-configured
+            logger instance. If None, the default module logger is used.
 
     Returns:
         An xarray.Dataset for a single station, or None if no profiles were found or raw_data is None.
@@ -193,7 +241,6 @@ def _create_pro_dataset_worker(
             return None
         return _create_pro_dataset(metadata, profiles, max_layers)
     except Exception as e:
-        # Note: We don't have the filepath here, but the error source will be the raw data.
         station_name = raw_data[0].get('stationName', 'unknown')
         logger.error(f"Failed to create dataset for station '{station_name}': {e}")
         return None
@@ -240,6 +287,7 @@ def _read_pro_files(
     datetime_start: Optional[str],
     datetime_end: Optional[str],
     n_cpus_use: int,
+    logger: logging.Logger,
     parser_kwargs: Dict
 ) -> List[xr.Dataset]:
     """
@@ -263,18 +311,21 @@ def _read_pro_files(
     if not pro_files:
         return []
 
+    # Extract remove_soil arg with a default of True
+    remove_soil = parser_kwargs.get('remove_soil', True)
+
     # Step 1: Parallel parsing
     raw_pro_data = []
     use_parallel = n_cpus_use > 1 and len(pro_files) > 1
     if use_parallel:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_cpus_use) as executor:
-            futures = {executor.submit(_parse_pro_worker, fp, datetime_start, datetime_end, CODE_TO_NAME_MAP) for fp in pro_files}
+            futures = {executor.submit(_parse_pro_worker, fp, datetime_start, datetime_end, CODE_TO_NAME_MAP, logger, remove_soil) for fp in pro_files}
             for future in concurrent.futures.as_completed(futures):
                 if result := future.result():
                     raw_pro_data.append(result)
     else:
         for fp in pro_files:
-            if result := _parse_pro_worker(fp, datetime_start, datetime_end, CODE_TO_NAME_MAP):
+            if result := _parse_pro_worker(fp, datetime_start, datetime_end, CODE_TO_NAME_MAP, logger, remove_soil):
                 raw_pro_data.append(result)
 
     if not raw_pro_data:
@@ -292,13 +343,13 @@ def _read_pro_files(
     valid_raw_data = [rd for rd in raw_pro_data if rd and rd[1]]
     if use_parallel and len(valid_raw_data) > 1:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_cpus_use) as executor:
-            futures = {executor.submit(_create_pro_dataset_worker, raw_data, max_layers_to_use) for raw_data in valid_raw_data}
+            futures = {executor.submit(_create_pro_dataset_worker, raw_data, max_layers_to_use, logger) for raw_data in valid_raw_data}
             for future in concurrent.futures.as_completed(futures):
                 if ds := future.result():
                     pro_datasets.append(ds)
     else:
         for raw_data in valid_raw_data:
-            if ds := _create_pro_dataset_worker(raw_data, max_layers_to_use):
+            if ds := _create_pro_dataset_worker(raw_data, max_layers_to_use, logger):
                 pro_datasets.append(ds)
                 
     return pro_datasets
@@ -307,7 +358,8 @@ def _read_pro_files(
 def _read_smet_files(
     smet_files: List[Path],
     datetime_start: Optional[str],
-    datetime_end: Optional[str]
+    datetime_end: Optional[str],
+    logger: logging.Logger,
 ) -> List[xr.Dataset]:
     """
     Reads a list of .smet files into xarray.Dataset objects.
@@ -324,7 +376,7 @@ def _read_smet_files(
     smet_datasets = []
     for fp in smet_files:
         try:
-            if ds := read_smet(fp, datetime_start, datetime_end):
+            if ds := read_smet(fp, datetime_start, datetime_end, logger=logger):
                 smet_datasets.append(ds)
         except Exception as e:
             logger.error(f"Failed to read .smet file {fp.name}: {e}")
@@ -337,34 +389,47 @@ def _merge_and_finalize(
     slope: Optional[SlopeSelector],
     realization: Optional[RealizationSelector]
 ) -> Optional[xsnowDataset]:
-    """
-    Merges, re-indexes, and applies final filters to a list of datasets.
-
-    This function combines a list of individual xarray.Dataset objects into a
-    single, unified xsnowDataset, handling location-based merging and
-    coordinate re-indexing.
-
-    Args:
-        all_datasets: A list of xarray.Dataset objects to be combined.
-        time: A TimeSelector for post-merge filtering.
-        location: A LocationSelector for post-merge filtering.
-        slope: A SlopeSelector for post-merge filtering.
-        realization: A RealizationSelector for post-merge filtering.
-
-    Returns:
-        A final, unified xsnowDataset object, or None if the input list
-        is empty.
-    """
+    """Merges, re-indexes, and applies final filters to the datasets."""
     if not all_datasets:
         return None
 
-    # Group by location and merge
+    # Group datasets by their location (station name)
     grouped_by_location = {}
     for ds in all_datasets:
         loc = ds.location.item()
         grouped_by_location.setdefault(loc, []).append(ds)
-    merged_datasets = [xr.merge(dsets, compat='override') for dsets in grouped_by_location.values()]
+        
+    # Merge datasets for each location, enforcing coordinate consistency
+    
+    merged_datasets = []
+    for dsets in grouped_by_location.values():    
+        # 1. Separate datasets into those with a slope dim (from .pro) and those without (from .smet)
+        slope_dsets = [ds for ds in dsets if 'slope' in ds.dims]
+        other_dsets = [ds for ds in dsets if 'slope' not in ds.dims]
 
+        combined_slope_ds = None
+        if slope_dsets:
+            # 2. If there are profile datasets, concatenate them along the slope dimension
+            if len(slope_dsets) > 1:
+                combined_slope_ds = xr.concat(slope_dsets, dim='slope')
+                # Create a new, sequential integer index for the concatenated dimension
+                new_slope_index = np.arange(combined_slope_ds.sizes['slope'])
+                combined_slope_ds['slope'] = new_slope_index
+            else:
+                combined_slope_ds = slope_dsets[0]
+
+        # 3. Create a list of all datasets to be merged for this location
+        all_to_merge = ([combined_slope_ds] if combined_slope_ds is not None else []) + other_dsets
+
+        if not all_to_merge:
+            continue
+
+        # 4. Merge the combined profile data with the time-series data
+        if len(all_to_merge) > 1:
+             merged_loc_ds = xr.merge(all_to_merge)
+             merged_datasets.append(merged_loc_ds)
+        else:
+             merged_datasets.append(all_to_merge[0])
     if not merged_datasets:
         return None
 
@@ -379,10 +444,14 @@ def _merge_and_finalize(
         ds['location'] = [name_to_int[station_name]]
         reindexed_datasets.append(ds)
 
+    # Concatenate all location datasets into the final dataset
     final_xr_dataset = xr.concat(
         sorted(reindexed_datasets, key=lambda ds: ds.location.item()),
         dim='location',
-        join='outer' 
+        join='outer',
+        coords='minimal',
+        data_vars='all',
+        compat='override'
     )
     final_xr_dataset['location'].attrs['mapping'] = int_to_name
 
@@ -401,12 +470,13 @@ def _merge_and_finalize(
 
 
 def read(
-    source: Union[str, List[str], Path],
+    source: Union[str, List[str], Path, List[Path]],
     time: Optional[TimeSelector] = None,
     location: Optional[LocationSelector] = None,
     slope: Optional[SlopeSelector] = None,
     realization: Optional[RealizationSelector] = None,
     n_cpus_use: Optional[int] = None,
+    logger: Optional[logging.Logger] = None,
     **parser_kwargs: Any
 ) -> Optional[xsnowDataset]:
     """
@@ -427,14 +497,20 @@ def read(
         n_cpus_use (Optional[int]): The number of CPU cores to use. If not
             provided, it defaults to min(32, total_cores - 1), with a
             minimum of 1. Set to 1 for sequential processing.
+        logger (Optional[logging.Logger]): An optional, pre-configured
+            logger instance. If None, the default module logger is used.
         **parser_kwargs: Additional keyword arguments passed to the underlying
-            parser functions, such as `max_layers='auto'`.
+            parser functions, such as `max_layers='auto'` or
+            `remove_soil=True`.
 
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
         or `None` if no valid data files are found.
     """
-    # --- Step 1: Determine CPU count ---
+    # --- Step 1: Setup Logger and CPU count ---
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
         n_cpus_use = min(32, cpu_count - 1) if cpu_count and cpu_count > 1 else 1
@@ -444,7 +520,7 @@ def read(
         try:
             return xsnowDataset(xr.open_dataset(source))
         except Exception as e:
-            logger.error(f"Failed to read NetCDF file {source}: {e}")
+            logger.warning(f"Failed to read NetCDF file {source}: {e}")
             return None
             
     try:
@@ -460,8 +536,8 @@ def read(
     # --- Step 3: Read and process data files ---
     datetime_start, datetime_end = (time.sel.start, time.sel.stop) if time and isinstance(time.sel, slice) else (None, None)
     
-    pro_datasets = _read_pro_files(pro_files, datetime_start, datetime_end, n_cpus_use, parser_kwargs)
-    smet_datasets = _read_smet_files(smet_files, datetime_start, datetime_end)
+    pro_datasets = _read_pro_files(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
+    smet_datasets = _read_smet_files(smet_files, datetime_start, datetime_end, logger)
 
     # --- Step 4: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
@@ -518,18 +594,21 @@ def _create_pro_dataset(
                     data_vars[param][1][0, i, 0, 0, :layers_to_copy] = np.array(values)[:layers_to_copy]
 
     station_name = metadata.get('stationName', 'unknown')
+
+    slope_index = [0]
     ds = xr.Dataset(
         data_vars,
         coords={
             'location': [station_name],
             'time': timestamps,
-            'slope': [float(metadata.get('slopeAngle', np.nan))],
+            'slope': slope_index, # Integer index for the dimension
             'realization': [0],
             'layer': np.arange(max_layers),
             'latitude': ('location', [float(metadata.get('latitude', np.nan))]),
             'longitude': ('location', [float(metadata.get('longitude', np.nan))]),
             'altitude': ('location', [float(metadata.get('altitude', np.nan))]),
-            'slope_aspect': ('slope', [float(metadata.get('slopeAzi', np.nan))])
+            'slope_inclination': ('slope', [float(metadata.get('slopeAngle', np.nan))]),
+            'slope_azimuth': ('slope', [float(metadata.get('slopeAzi', np.nan))])
         }
     )
 
@@ -542,19 +621,18 @@ def _create_pro_dataset(
     }
     for var_name_hashable in list(ds.variables):
         var_name = str(var_name_hashable)
-        if var_name in registry:
-            if reg_entry := registry.get(var_name):
-                ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', 'unknown')
-                ds[var_name].attrs['units'] = reg_entry.get('si_units', 'unknown')
-                ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
+        if reg_entry := registry.get(var_name):
+            ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', 'unknown')
+            ds[var_name].attrs['units'] = reg_entry.get('si_units', 'unknown')
+            ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
 
     return ds
-
 
 def read_smet(
     filepath: Union[str, Path],
     datetime_start: Optional[str] = None,
-    datetime_end: Optional[str] = None
+    datetime_end: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
 ) -> Optional[xr.Dataset]:
     """
     Parses a single SMET file into an xarray.Dataset.
@@ -569,11 +647,17 @@ def read_smet(
             this time is dropped.
         datetime_end: The end of the time range to read. Data after
             this time is dropped.
+        logger (Optional[logging.Logger]): An optional, pre-configured
+            logger instance. If None, the default module logger is used.
 
     Returns:
         An xarray.Dataset containing the SMET data, or None if the file
         cannot be parsed or contains no data in the specified time range.
     """
+   # Use the provided logger or fall back to the module's default
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
     file_path = Path(filepath)
     if not file_path.exists():
         logger.error(f"File not found: {filepath}")
@@ -669,24 +753,36 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
     Returns:
         A new xsnowDataset instance with the combined data.
     """
-    if existing_ds.data is None or existing_ds.data.time.size == 0:
-        new_data_obj = read(source)
-        return new_data_obj or existing_ds
+    # Resolve filepaths first to exit early if no files are found
+    try:
+        pro_files, smet_files = _resolve_filepaths(source)
+        if not pro_files and not smet_files:
+            logger.warning("Update source contains no data files.")
+            return existing_ds
+        # Pass the resolved list of files to read()
+        resolved_source = pro_files + smet_files
+    except (FileNotFoundError, TypeError) as e:
+        logger.error(e)
+        return existing_ds
 
-    last_timestamp = existing_ds.data.time.max().values
-    last_timestamp_str = pd.to_datetime(last_timestamp).isoformat()
+    if existing_ds.data is None or existing_ds.data.time.size == 0:
+        return read(resolved_source) or existing_ds
+
+    last_timestamp = pd.to_datetime(existing_ds.data.time.max().values).isoformat()
     
-    time_filter = TimeSelector(sel=slice(last_timestamp_str, None))
-    new_data_obj = read(source, time=time_filter)
+    time_filter = TimeSelector(sel=slice(last_timestamp, None))
+    new_data_obj = read(resolved_source, time=time_filter)
 
     if new_data_obj is None or new_data_obj.data.time.size == 0:
         return existing_ds
 
+    # Combine and deduplicate the datasets
     combined = xr.concat([existing_ds.data, new_data_obj.data], dim="time")
     _, index = np.unique(combined['time'], return_index=True)
     combined = combined.isel(time=index)
 
     return xsnowDataset(combined)
+
     
 @register_xsnowDataset_method
 def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
