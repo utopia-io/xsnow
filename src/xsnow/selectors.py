@@ -44,7 +44,7 @@ from typing import Any, Union, Sequence, Optional, Tuple
 import pandas as pd
 import xarray as xr
 import warnings
-
+import numpy as np
 
 class Selector:
     """
@@ -72,6 +72,7 @@ class Selector:
         Returns:
             xr.Dataset: The subsetted dataset.
         """
+        
         s = self.sel
         if s is None:
             return ds
@@ -79,7 +80,7 @@ class Selector:
         # Boolean mask or DataArray: always label-based
         if isinstance(s, (xr.DataArray, xr.Dataset)) or (
             isinstance(s, Sequence) and hasattr(s, "dtype")
-            and getattr(s, "dtype", None) == bool
+            and np.issubdtype(getattr(s, "dtype", None), np.bool_)
         ):
             return ds.sel({self.dim: s})
 

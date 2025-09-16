@@ -393,6 +393,20 @@ def _merge_and_finalize(
     if not all_datasets:
         return None
 
+    # 1. Check for and enforce timezone consistency across all source files.
+    final_timezone = None
+    for ds in all_datasets:
+        if 'time' in ds and 'timezone' in ds.time.attrs:
+            current_tz = ds.time.attrs['timezone']
+            if final_timezone is None:
+                final_timezone = current_tz
+            elif final_timezone != current_tz:
+                raise ValueError(
+                    f"Conflicting timezones found in source files: "
+                    f"'{final_timezone}' and '{current_tz}'. "
+                    "Please ensure all SMET files use the same timezone."
+                )
+
     # Group datasets by their location (station name)
     grouped_by_location = {}
     for ds in all_datasets:
@@ -411,6 +425,8 @@ def _merge_and_finalize(
         if slope_dsets:
             # 2. If there are profile datasets, concatenate them along the slope dimension
             if len(slope_dsets) > 1:
+                # Sort the datasets by the slope_inclination coordinate before concatenating
+                slope_dsets.sort(key=lambda ds: ds.slope_inclination.item())
                 combined_slope_ds = xr.concat(slope_dsets, dim='slope')
                 # Create a new, sequential integer index for the concatenated dimension
                 new_slope_index = np.arange(combined_slope_ds.sizes['slope'])

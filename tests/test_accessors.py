@@ -79,7 +79,31 @@ def ds() -> xr.Dataset:
     ds["time"].attrs["timezone"] = "UTC+01:00"
     return ds
 
-
+@pytest.fixture
+def ds(tmp_path) -> xsnow.xsnowDataset:
+    """
+    Dataset created by reading a temporary SMET file with a timezone
+    attribute set in the header (tz = 1).
+    """
+    # This SMET content includes a timezone and covers the date ranges
+    # needed by the accessor tests.
+    smet_content = """
+SMET 1.1 ASCII
+[HEADER]
+station_name = station_A
+tz = 1
+fields = timestamp HS
+[DATA]
+2024-01-20T00:00:00 0.50
+2024-01-20T06:00:00 0.56
+2024-01-21T12:00:00 0.62
+2024-01-22T00:00:00 0.64
+"""
+    smet_file = tmp_path / "test.smet"
+    smet_file.write_text(smet_content)
+    
+    # The read() function will now automatically handle attaching the timezone.
+    return xsnow.read(smet_file)
 
 ## ------- LabelsAccessor ----------------------------------- ##
 def test_labels_accessor_get(indexed_coord):
@@ -237,7 +261,12 @@ def test_between_series_mask(ds):
         "2024-01-20", "2024-01-22", tz="UTC", as_series=True
     )
     assert isinstance(mask_series, pd.Series)
-    hs = ds["HS"].isel(location=0, slope=0, realization=0).to_pandas()
+    # This failed because the 'slope' and 'realization' dimensions
+    # are not present in the dataset loaded from a SMET file.
+    # hs = ds["HS"].isel(location=0, slope=0, realization=0).to_pandas()
+
+    #Remove the non-existent dimensions from the selection.
+    hs = ds["HS"].isel(location=0).to_pandas()
     assert len(mask_series) == len(hs)  # aligned lengths
 
 
