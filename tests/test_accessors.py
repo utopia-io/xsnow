@@ -266,7 +266,7 @@ def test_between_series_mask(ds):
     # hs = ds["HS"].isel(location=0, slope=0, realization=0).to_pandas()
 
     #Remove the non-existent dimensions from the selection.
-    hs = ds["HS"].isel(location=0).to_pandas()
+    hs = ds["HS"].isel(location=0, slope=0, realization=0).to_pandas()
     assert len(mask_series) == len(hs)  # aligned lengths
 
 

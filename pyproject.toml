@@ -22,6 +22,7 @@ dependencies = [
     "bottleneck>=1.5.0",
     "pooch",
     "tzdata>=2024.1",
+    "pytest>=8.4.2",
 ]
 keywords = ["snow", "stratigraphy", "avalanche", "xarray", "post-processing"]
 classifiers = [

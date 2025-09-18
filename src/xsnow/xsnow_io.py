@@ -246,37 +246,52 @@ def _create_pro_dataset_worker(
         return None
 
 
+# xsnow_io.py
+
 def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]]) -> Tuple[List[Path], List[Path]]:
     """
     Resolves the source argument into separate lists of .pro and .smet files.
 
     Args:
         source: The data source, which can be a directory path, a single
-            file path, or a list of paths.
+            file path, or a list of paths (including a mix of files and directories).
 
     Returns:
         A tuple containing two lists: one for .pro file paths and one for
         .smet file paths.
         
     Raises:
-        FileNotFoundError: If the source path does not exist.
         TypeError: If the source is of an unsupported type.
     """
+    paths_to_process = []
     if isinstance(source, (str, Path)):
-        p = Path(source)
-        if not p.exists():
-            raise FileNotFoundError(f"Source path does not exist: {source}")
-        if p.is_dir():
-            filepaths = sorted(list(p.glob('*.pro'))) + sorted(list(p.glob('*.smet')))
-        else:
-            filepaths = [p]
+        # If the source is a single item, wrap it in a list to process uniformly
+        paths_to_process.append(Path(source))
     elif isinstance(source, list):
-        filepaths = [Path(f) for f in source]
+        paths_to_process = [Path(p) for p in source]
     else:
         raise TypeError(f"Unsupported source type: {type(source)}")
 
-    pro_files = [f for f in filepaths if f.suffix == '.pro']
-    smet_files = [f for f in filepaths if f.suffix == '.smet']
+    resolved_files = []
+    for p in paths_to_process:
+        if not p.exists():
+            logger.warning(f"Source path does not exist and will be skipped: {p}")
+            continue
+        
+        if p.is_dir():
+            # If it's a directory, glob for files and add them to our list
+            resolved_files.extend(p.glob('*.pro'))
+            resolved_files.extend(p.glob('*.smet'))
+        else:
+            # If it's a file, just add it
+            resolved_files.append(p)
+
+    # Use dict.fromkeys to get unique files while preserving order, then sort
+    unique_files = sorted(list(dict.fromkeys(resolved_files)))
+
+    pro_files = [f for f in unique_files if f.suffix == '.pro']
+    smet_files = [f for f in unique_files if f.suffix == '.smet']
+    
     return pro_files, smet_files
 
 #---------------------------------------------------------------
@@ -417,32 +432,36 @@ def _merge_and_finalize(
     
     merged_datasets = []
     for dsets in grouped_by_location.values():    
-        # 1. Separate datasets into those with a slope dim (from .pro) and those without (from .smet)
-        slope_dsets = [ds for ds in dsets if 'slope' in ds.dims]
-        other_dsets = [ds for ds in dsets if 'slope' not in ds.dims]
+        # 1. Separate datasets based on the presence of the 'layer' dimension.
+        profile_dsets = [ds for ds in dsets if 'layer' in ds.dims]
+        timeseries_dsets = [ds for ds in dsets if 'layer' not in ds.dims]
 
-        combined_slope_ds = None
-        if slope_dsets:
+        combined_profiles_ds = None
+        if profile_dsets:
             # 2. If there are profile datasets, concatenate them along the slope dimension
-            if len(slope_dsets) > 1:
+            if len(profile_dsets) > 1:
                 # Sort the datasets by the slope_inclination coordinate before concatenating
-                slope_dsets.sort(key=lambda ds: ds.slope_inclination.item())
-                combined_slope_ds = xr.concat(slope_dsets, dim='slope')
+                profile_dsets.sort(key=lambda ds: ds.slope_inclination.item())
+                
+                # Add coords='minimal' as recommended by the error for robustness
+                combined_profiles_ds = xr.concat(profile_dsets, dim='slope', join='outer', coords='minimal')
+                
                 # Create a new, sequential integer index for the concatenated dimension
-                new_slope_index = np.arange(combined_slope_ds.sizes['slope'])
-                combined_slope_ds['slope'] = new_slope_index
+                new_slope_index = np.arange(combined_profiles_ds.sizes['slope'])
+                combined_profiles_ds['slope'] = new_slope_index
             else:
-                combined_slope_ds = slope_dsets[0]
+                combined_profiles_ds = profile_dsets[0]
 
         # 3. Create a list of all datasets to be merged for this location
-        all_to_merge = ([combined_slope_ds] if combined_slope_ds is not None else []) + other_dsets
-
+        all_to_merge = ([combined_profiles_ds] if combined_profiles_ds is not None else []) + timeseries_dsets
+        
         if not all_to_merge:
             continue
 
         # 4. Merge the combined profile data with the time-series data
         if len(all_to_merge) > 1:
-             merged_loc_ds = xr.merge(all_to_merge)
+            # Merge with compat='override'. 
+             merged_loc_ds = xr.merge(all_to_merge, compat='override', join='outer') # The value from the last dataset in the merge list will silently overwrite the values from the earlier ones
              merged_datasets.append(merged_loc_ds)
         else:
              merged_datasets.append(all_to_merge[0])
@@ -738,11 +757,17 @@ def read_smet(
         except (ValueError, TypeError):
             logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
     station_name = header.get('station_name', header.get('station_id', file_path.stem))
-    ds = ds.expand_dims(location=[station_name])
+    
+    # Expand dims to be consistent with the 5D structure from .pro files
+    ds = ds.expand_dims(location=[station_name], slope=[0], realization=[0])
+    
+    # Assign coordinates for the new dimensions to ensure proper merging later
     ds = ds.assign_coords({
         'latitude': ('location', [float(header.get('latitude', np.nan))]),
         'longitude': ('location', [float(header.get('longitude', np.nan))]),
-        'altitude': ('location', [float(header.get('altitude', np.nan))])
+        'altitude': ('location', [float(header.get('altitude', np.nan))]),
+        'slope_inclination': ('slope', [np.nan]), # Use NaN as SMET has no slope info
+        'slope_azimuth': ('slope', [np.nan])      # Use NaN as SMET has no slope info
     })
 
     return ds

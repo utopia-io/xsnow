@@ -50,7 +50,7 @@ import numpy as np
 
 from .registry import registry
 from .plugin import list_registered_methods
-
+from .selectors import RealizationSelector
 
 class xsnowDataset:
     """
@@ -253,52 +253,66 @@ class xsnowDataset:
         copied_xr_dataset = self.data.copy(deep=deep)
         return self.__class__(copied_xr_dataset)
 
-    def merge_smet(self, smet_source: Union[str, List[str], Path],
-                   realization: int = 1
+# In core.py, inside the xsnowDataset class
+
+    def merge_smet(
+        self,
+        source: Union[str, List[str], Path, List[Path]],
+        var_prefix: Optional[str] = None,
+        **kwargs
     ) -> 'xsnowDataset':
         """
-        Reads one or more SMET files and merges their data into this dataset.
+        Reads SMET data and merges it into the dataset.
 
-        This method adds meteorological time-series data to the dataset,
-        assigning it to a given realization coordinate. The merge is performed
-        by aligning the 'location' and 'time' coordinates.
+        An optional prefix can be added to the variable names from the SMET
+        file to avoid naming conflicts (e.g., when merging input forcing
+        data with model output data).
 
         Args:
-            smet_source: Path to a SMET file, a list of SMET files, or a
-                directory containing SMET files.
-        realization (int): The realization ID to assign to the merged
-            SMET data. Defaults to 1.
+            source: Path to a .smet file, a directory, or a list of files.
+            var_prefix (Optional[str]): A string prefix to add to all data
+                variable names read from the SMET files (e.g., 'input.').
+            **kwargs: Additional keyword arguments passed to the underlying
+                `xsnow.read()` function (e.g., time selectors).
 
         Returns:
-            A new xsnowDataset instance with the merged data.
-        
-        Examples
-        --------
-        >>> ds = xsnow.read('station_A.pro')
-        >>> ds_with_meteo = ds.merge_smet('station_A.smet')
+            A new xsnowDataset with the combined data.
         """
         from xsnow.xsnow_io import read
+        
+        # If 'realization' is passed as an int, wrap it in a Selector object
+        if 'realization' in kwargs and isinstance(kwargs['realization'], int):
+            kwargs['realization'] = RealizationSelector(sel=kwargs['realization'])
+            
+        # Read the new SMET data, passing through any extra kwargs like time selectors
+        smet_ds = read(source, **kwargs)
 
+        # If there's no new data to merge, just return the original dataset
+        if smet_ds is None or smet_ds.data is None:
+            return self
+        
+        # If the original dataset is empty, just return the new data
         if self.data is None:
-            return self
+            return smet_ds
 
-        if (smet_data_obj := read(smet_source)) is None:
-            # It's good practice to log or warn the user here
-            import logging
-            logging.getLogger(__name__).warning("No SMET data found to merge.")
-            return self
-        
-        # Assertion to guarantee the type for Pylance
-        assert isinstance(smet_data_obj, xsnowDataset)
+        smet_xarray = smet_ds.to_xarray()
 
-        # Assign the specified realization as a coordinate to the SMET data
-        smet_xr = smet_data_obj.to_xarray().assign_coords(realization=[realization])
+        if var_prefix:
+            # Create a mapping for renaming, e.g., {'TA': 'prefix.TA'}
+            rename_mapping = {
+                name: f"{var_prefix}{name}"
+                for name in smet_xarray.data_vars
+            }
+            smet_xarray = smet_xarray.rename(rename_mapping)
 
-        # Merge the datasets, allowing for different time axes
-        merged_ds = xr.merge([self.data, smet_xr], join='outer', compat='override')
-        
-        return self.__class__(merged_ds)    
-        
+        # Merge the (potentially renamed) SMET data into the existing dataset
+        combined = xr.merge(
+            [self.data, smet_xarray],
+            compat='override',
+            join='outer'
+        )
+        return xsnowDataset(combined)
+            
     def to_xarray(self) -> xr.Dataset:
         """
         Returns the underlying xarray.Dataset.

@@ -7,6 +7,8 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import xarray as xr
+import re
+import shutil
 
 from xsnow import read, xsnowDataset
 from xsnow.selectors import TimeSelector, SlopeSelector, RealizationSelector
@@ -221,12 +223,15 @@ def test_read_sample_data_snp_gridded(snp_gridded_sample_dir):
     # TODO: write some assertions once the reading of the ds is successful
 
 def test_read_sample_data_snp_snowobs():
-    snowobs_dir = snp_snowobs_dir()
-    ds = read([
-        f"{snowobs_dir}/pros/snowobs/",
-        f"{snowobs_dir}/pits/",
-    ])
-    assert (isinstance(ds, xsnowDataset) or ds is None)
+    
+    snowobs_path = Path(snp_snowobs_dir())
+    
+    pro_dir = snowobs_path / "pros" / "snowobs"
+    pit_dir = snowobs_path / "pits"
+
+    ds = read([pro_dir, pit_dir])
+
+    assert (isinstance(ds, xsnowDataset))
     # TODO: write some more assertions once the reading of the ds is successful,
     #       for example, checking realizations
 
@@ -283,27 +288,28 @@ def test_read_merge_smet_snp_snowobs():
     Tests merging SMET data with the snow observation sample dataset.
     Skips if the sample data is not available.
     """
-    snowobs_dir = snp_snowobs_dir()
+    snowobs_dir = Path(snp_snowobs_dir())
+    
+    pro_dir = snowobs_dir / "pros" / "snowobs"
+    pit_dir = snowobs_dir / "pits"
+
     ds = read([
-        f"{snowobs_dir}/pros/snowobs/",
-        f"{snowobs_dir}/pits/",
+        pro_dir,
+        pit_dir,
     ])
 
-    # If read() returns None, it means the sample data was not found.
-    # Skip the test instead of failing.
-    if ds is None:
-        pytest.skip("Could not find snp_snowobs sample data to run merge test.")
+    assert isinstance(ds, xsnowDataset)
 
     # The rest of the test proceeds only if ds is a valid dataset
     assert isinstance(ds, xsnowDataset)
     ds_merged = ds.merge_smet([
-        f"{snowobs_dir}/smets/nowcast",
-        f"{snowobs_dir}/smets/forecast"
+        snowobs_dir / "smets" / "snowobs" / "nowcast",
+        snowobs_dir / "smets" / "snowobs" /"forecast"
     ], realization=1, var_prefix='input.')
     
     # Add assertions to verify the merge was successful
     assert isinstance(ds_merged, xsnowDataset)
-    assert 'input.TA' in ds_merged.data
+    assert ('input.TA' in ds_merged.data)
     
 @pytest.fixture(scope="module")
 def pro_data_with_soil():
@@ -424,3 +430,51 @@ def test_read_with_realization_selector(multi_slope_directory):
 
     # An empty selection on a dimension results in a size of 0 for that dim
     assert ds_absent is not None and ds_absent.sizes['realization'] == 0
+    
+def test_all_station_files_merge_correctly(tmp_path):
+    """
+    Tests the comprehensive merging of various station files by the `read` function.
+
+    This test ensures that when the `read` function is pointed to a source
+    containing multiple file types (.pro from modeled runs, .pro from manual
+    pits, and .smet) for the same stations, it correctly groups and merges them
+    into a single dataset per station.
+
+    The test performs the following steps:
+    1.  Sets up paths to the 'snowobs' sample data, which contains all three
+        file types for two distinct stations.
+    2.  Calls `read()` on this temporary directory.
+    3.  Verifies the merge by first asserting that the total number of
+        locations in the final dataset is 2, not the total number of
+        individual files. This confirms the grouping logic worked.
+    4.  It then inspects each of the two merged locations to confirm that they
+        contain variables originating from both the profile files (`density`)
+        and the time-series files (`TA`), proving the content was merged.
+    """
+    # 1. Setup paths to all original sample data directories
+    snowobs_path = Path(snp_snowobs_dir())
+    modeled_dir = snowobs_path / "pros" / "snowobs"
+    pit_dir = snowobs_path / "pits"
+
+    # 2. Read from the temporary directory using the original 'source' argument
+    ds = read([modeled_dir, pit_dir])
+
+    # 3. Assertions
+    assert ds is not None
+    assert isinstance(ds, xsnowDataset)
+
+    # Assert that all files for the two stations were merged into two locations
+    assert ds.sizes['location'] == 2
+
+    location_map = ds.location.attrs['mapping']
+    name_map = {v: k for k, v in location_map.items()}
+
+    # Confirm that both dataset contain variables originating from both the profile files
+    for station_name, station_index in name_map.items():
+        
+        station_ds = ds.sel(location=station_index)
+
+        assert 'density' in station_ds.data, f"Variable 'density' missing for {station_name}"
+        assert 'layer' in station_ds.data['density'].dims, f"Dimension 'layer' missing for {station_name}"
+        assert 'TA' in station_ds.data, f"Variable 'TA' missing for {station_name}"
+        assert 'layer' not in station_ds.data['TA'].dims, f"Dimension 'layer' present in 'TA' for {station_name}"
