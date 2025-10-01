@@ -127,10 +127,43 @@ def _read_pro_raw(
     start_ts = pd.to_datetime(datetime_start) if datetime_start else None
     end_ts = pd.to_datetime(datetime_end) if datetime_end else None
 
+    def test_timestamp(timestamp: str) -> bool:
+        if not start_ts and not end_ts:
+            return True
+        profile_ts = pd.to_datetime(current_ts_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
+        if not pd.notna(profile_ts):
+            return False
+        if start_ts and profile_ts < start_ts:
+            return False
+        if end_ts and profile_ts > end_ts:
+            return False
+        return True
+
+    def add_data():
+        if not current_ts_data:
+            return
+        if not test_timestamp(current_ts_data['timestamp']):
+            return
+        # --- Soil Removal Logic ---
+        if remove_soil and 'grain_type' in current_ts_data:
+            grain_types = current_ts_data['grain_type']
+            is_soil = (grain_types == 81) | (grain_types == 82)
+            soil_indices = np.where(is_soil)[0]
+
+            if soil_indices.size > 0:
+                first_soil_idx = soil_indices[0]
+                for key, arr in current_ts_data.items():
+                    if isinstance(arr, np.ndarray) and arr.ndim == 1:
+                        current_ts_data[key] = arr[:first_soil_idx]
+
+        # Only append if there are still layers left after slicing
+        if current_ts_data.get('height', np.array([])).size > 0:
+            temp_profiles.append(current_ts_data)
+
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         for i, line in enumerate(f):
             line = line.strip()
-            if not line: 
+            if not line:
                 continue
             if line == '[STATION_PARAMETERS]':
                 in_header, in_data = True, False
@@ -143,39 +176,13 @@ def _read_pro_raw(
                     if line.startswith(key):
                         metadata[value] = line.split('=', 1)[1].strip()
             elif in_data:
-                parts = line.split(',', 1)
-                if parts[0] == "0500":
-                    if current_ts_data:
-                        profile_ts = pd.to_datetime(current_ts_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
-                        if pd.notna(profile_ts):
-                            in_range = True
-                            if start_ts and profile_ts < start_ts: 
-                                in_range = False
-                            if end_ts and profile_ts > end_ts: 
-                                in_range = False
-                            if in_range:
-                                # --- Soil Removal Logic ---
-                                if remove_soil and 'grain_type' in current_ts_data:
-                                    grain_types = current_ts_data['grain_type']
-                                    is_soil = (grain_types == 81) | (grain_types == 82)
-                                    soil_indices = np.where(is_soil)[0]
-                                    
-                                    if soil_indices.size > 0:
-                                        first_soil_idx = soil_indices[0]
-                                        for key, arr in current_ts_data.items():
-                                            if isinstance(arr, np.ndarray) and arr.ndim == 1:
-                                                current_ts_data[key] = arr[:first_soil_idx]
-                                
-                                # Only append if there are still layers left after slicing
-                                if current_ts_data.get('height', np.array([])).size > 0:
-                                    temp_profiles.append(current_ts_data)
-                                    
-                    current_ts_data = {'timestamp': parts[1]}
+                if line.startswith("0500,"):
+                    add_data()
+                    current_ts_data = {'timestamp': line[5:]}
                 else:
-                    data_parts = line.split(',')
-                    if (param_name := code_map_to_use.get(data_parts[0])):
+                    if (param_name := code_map_to_use.get(line[:line.index(',')])):
                         try:
-                            current_ts_data[param_name] = np.array(data_parts[2:], dtype=float)
+                            current_ts_data[param_name] = np.fromstring(line, dtype=float, sep=',')[2:]
                         except ValueError:
                             ts = current_ts_data.get('timestamp', 'unknown timestamp')
                             logger.warning(
@@ -184,31 +191,7 @@ def _read_pro_raw(
                             )
 
     # This block handles the very last profile in the file
-    if current_ts_data:
-        profile_ts = pd.to_datetime(current_ts_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
-        if pd.notna(profile_ts):
-            in_range = True
-            if start_ts and profile_ts < start_ts: 
-                in_range = False
-            if end_ts and profile_ts > end_ts: 
-                in_range = False
-            if in_range:
-                # --- Soil Removal Logic ---
-                if remove_soil and 'grain_type' in current_ts_data:
-                    grain_types = current_ts_data['grain_type']
-                    is_soil = (grain_types == 81) | (grain_types == 82)
-                    soil_indices = np.where(is_soil)[0]
-                    
-                    if soil_indices.size > 0:
-                        first_soil_idx = soil_indices[0]
-                        for key, arr in current_ts_data.items():
-                            if isinstance(arr, np.ndarray) and arr.ndim == 1:
-                                current_ts_data[key] = arr[:first_soil_idx]
-
-                # Only append if there are still layers left after slicing
-                if current_ts_data.get('height', np.array([])).size > 0:
-                    temp_profiles.append(current_ts_data)
-    
+    add_data()
     return metadata, temp_profiles
 
 
