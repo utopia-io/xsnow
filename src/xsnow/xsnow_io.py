@@ -71,7 +71,7 @@ def _parse_pro_worker(
     try:
         return _read_pro_raw(filepath, datetime_start, datetime_end, code_map=code_map, logger=logger, remove_soil=remove_soil)
     except Exception as e:
-        logger.error(f"Failed to parse .pro file {filepath.name}: {e}")
+        logger.error(f"Failed to parse .pro file {filepath.name}", exc_info=e)
         return None
 
 def _read_pro_raw(
@@ -242,7 +242,7 @@ def _create_pro_dataset_worker(
         return _create_pro_dataset(metadata, profiles, max_layers)
     except Exception as e:
         station_name = raw_data[0].get('stationName', 'unknown')
-        logger.error(f"Failed to create dataset for station '{station_name}': {e}")
+        logger.error(f"Failed to create dataset for station '{station_name}'", exc_info=e)
         return None
 
 
@@ -394,7 +394,7 @@ def _read_smet_files(
             if ds := read_smet(fp, datetime_start, datetime_end, logger=logger):
                 smet_datasets.append(ds)
         except Exception as e:
-            logger.error(f"Failed to read .smet file {fp.name}: {e}")
+            logger.error(f"Failed to read .smet file {fp.name}", exc_info=e)
     return smet_datasets
 
 def _merge_and_finalize(
