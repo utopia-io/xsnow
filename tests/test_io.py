@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 import xarray as xr
 import re
-import shutil
+import warnings
 
 from xsnow import read, xsnowDataset
 from xsnow.selectors import TimeSelector, SlopeSelector, RealizationSelector
@@ -169,10 +169,9 @@ def gridded_data_integrity_check(snp_gridded_sample_dir):
                     msg = (
                         f"Inconsistent coordinates found for station '{station_name}'.\n"
                         f"  - File '{first_file.name}' has (Lat, Lon): ({stored_lat}, {stored_lon})\n"
-                        f"  - File '{pro_file.name}' has (Lat, Lon): ({latitude}, {longitude})\n"
-                        "Skipping test due to inconsistent source data."
+                        f"  - File '{pro_file.name}' has (Lat, Lon): ({latitude}, {longitude})"
                     )
-                    pytest.skip(msg)
+                    warnings.warn(msg)
             else:
                 station_coords[station_name] = (latitude, longitude, pro_file)
 
