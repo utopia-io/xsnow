@@ -13,6 +13,7 @@ workflow:
     - when: never
 
 variables:
+  GIT_DEPTH: "0"               # ensure setuptools-scm sees full history
   PIP_CACHE_DIR: ".cache/pip"
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
@@ -20,7 +21,8 @@ variables:
 default:
   image: python:3.12-slim
   before_script:
-    - python -V
+    - python --version
+    - apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
     - python -m pip install --upgrade pip
     - pip --version
   cache:
@@ -85,20 +87,19 @@ tests-gpu:
   tags: ["gpu"]   # requires a runner with this tag
   image: nvidia/cuda:12.4.1-runtime-ubuntu22.04
   before_script:
-    - apt-get update && apt-get install -y python3-pip python3-venv && rm -rf /var/lib/apt/lists/*
-    - python3 -V
+    - apt-get update && apt-get install -y --no-install-recommends git python3-pip && rm -rf /var/lib/apt/lists/*
+    - python3 --version
     - python3 -m pip install --upgrade pip
-    - pip --version
+    - python3 -m pip --version
   variables:
     NVIDIA_VISIBLE_DEVICES: "all"
     NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-    PIP_CACHE_DIR: ".cache/pip"
   cache:
     key: "${CI_JOB_NAME}"
     paths: [ .cache/pip ]
     policy: pull-push
   script:
-    - pip install -e ".[gpu,testing]"
+    - python3 -m pip install -e ".[gpu,testing]"
     - pytest -q -m "not slow" --maxfail=1 --disable-warnings --junitxml=pytest-gpu.xml
   artifacts:
     when: always
@@ -115,6 +116,7 @@ tests-gpu:
   image: python:3.12-slim
   stage: docs
   before_script:
+    - apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
     - python -m pip install --upgrade pip
     - pip install -r docs/requirements.txt
     - pip install -e .
@@ -136,7 +138,7 @@ docs-latest:
     - sphinx-apidoc -f -e -o docs/api src/xsnow
     - jupyter-book build docs --path-output docs/_build
     - mkdir -p public/latest
-    - cp -r docs/_build/_build/html/* public/latest/
+    - cp -r docs/_build/html/* public/latest/
     - |
       cat > public/index.html <<'HTML'
       <!doctype html><meta charset="utf-8">
@@ -156,7 +158,7 @@ docs-tagged:
     - sphinx-apidoc -f -e -o docs/api src/xsnow
     - jupyter-book build docs --path-output docs/_build
     - mkdir -p "public/${CI_COMMIT_TAG}"
-    - cp -r docs/_build/_build/html/* "public/${CI_COMMIT_TAG}/"
+    - cp -r docs/_build/html/* "public/${CI_COMMIT_TAG}/"
     - |
       if [ ! -f public/index.html ]; then
         cat > public/index.html <<'HTML'
