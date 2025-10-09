@@ -327,13 +327,12 @@ def test_merge_smet_method(data_dir_for_io_methods):
     """
     initial_dir, _, smet_file = data_dir_for_io_methods
     ds = read(initial_dir)
-    #assert 'TA' not in ds.data.data_vars
+    assert 'TA' not in ds.data.data_vars
     ds_merged = ds.merge_smet(smet_file)
-    #assert isinstance(ds_merged, xsnowDataset)
-    #assert 'RH' in ds_merged.data.data_vars
-    #assert 'TA' in ds_merged.data.data_vars
+    assert isinstance(ds_merged, xsnowDataset)
+    assert 'TA' in ds_merged.data.data_vars
     profile = ds_merged.sel(time='2025-02-09 12:00:00')
-    #assert np.isclose(profile.TA.item(), 270.0)
+    assert np.isclose(profile.TA.item(), 270.0)
 
 def test_read_merge_smet_snp_snowobs():
     """
