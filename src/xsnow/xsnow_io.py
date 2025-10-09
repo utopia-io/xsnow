@@ -534,7 +534,6 @@ def read(
     realization: Optional[RealizationSelector] = None,
     n_cpus_use: Optional[int] = None,
     logger: Optional[logging.Logger] = None,
-    add_surface_sh_as_layer: bool = True,
     **parser_kwargs: Any
 ) -> Optional[xsnowDataset]:
     """
@@ -558,8 +557,8 @@ def read(
         logger (Optional[logging.Logger]): An optional, pre-configured
             logger instance. If None, the default module logger is used.
         **parser_kwargs: Additional keyword arguments passed to the underlying
-            parser functions, such as `max_layers='auto'` or
-            `remove_soil=True`.
+            parser functions, such as `max_layers='auto'`, `remove_soil=True`,
+            `add_surface_sh_as_layer=True`.
 
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
@@ -592,7 +591,6 @@ def read(
         return None
 
     # --- Step 3: Read and process data files ---
-    parser_kwargs['add_surface_sh_as_layer'] = add_surface_sh_as_layer
     datetime_start, datetime_end = (time.sel.start, time.sel.stop) if time and isinstance(time.sel, slice) else (None, None)
     
     pro_datasets = _read_pro_files(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
