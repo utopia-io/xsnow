@@ -77,6 +77,12 @@ registry = {
         "standard_name": "snow_grain_type",
         "si_units": "Swiss Code F1F2F3"
     },
+    "SH_at_surface": {
+        "param_code": "0514",
+        "aliases": ["Surface Hoar layer is present at the surface", "SH at surface", "SH_surface"],
+        "standard_name": "SH at surface",
+        "si_units": ["mm", "m2 kg-1"] 
+    },
     "ice_content": {
         "param_code": "0515",
         "aliases": ["ice volume fraction"],

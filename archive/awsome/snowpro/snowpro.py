@@ -25,7 +25,7 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 # import awsmet
 from snowpacktools.snowpro import pro_helper, pro_plotter
 
-def read_pro(path,res='1h',keep_soil=False, consider_surface_hoar=True):
+def read_pro(path,res='1h',keep_soil=False, add_surface_sh_as_layer=True):
     """Reads a .PRO file and returns a dictionary with timestamps as keys and values being another dictionary with
     profile parameters as keys and data as value representing the evolving state of the snowpack.
     
@@ -33,7 +33,7 @@ def read_pro(path,res='1h',keep_soil=False, consider_surface_hoar=True):
         path (str):             String pointing to the location of the .PRO file to be read
         res (str):              temporal resolution
         keep_soil (bool):       Decide if soil layers are kept
-        consider_surface_hoar (bool):   Decide if surface hoar should be added as another layer
+        add_surface_sh_as_layer (bool):   Decide if surface hoar should be added as another layer
     Returns:
         profs (dict):           Dictionary with timestamps as keys and values being another dictionary with profile parameters
         meta_dict (dict):       Dictionary with metadata of snow profile
@@ -148,7 +148,7 @@ def read_pro(path,res='1h',keep_soil=False, consider_surface_hoar=True):
     """Calculate thickness for each layer in current snow profile"""
     for ts in profs.keys():
         """Consider surface hoar at surface"""
-        if consider_surface_hoar:
+        if add_surface_sh_as_layer:
             if 'grain type, grain size (mm), and density (kg m-3) of SH at surface' in profs[ts].keys():
                 surf_hoar = profs[ts]['grain type, grain size (mm), and density (kg m-3) of SH at surface']
                 if not np.isscalar(surf_hoar):

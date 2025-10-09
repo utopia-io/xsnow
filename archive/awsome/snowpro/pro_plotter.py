@@ -46,7 +46,7 @@ def plot_snp_evo(config, DATETIME_STR=None):
 
     """Read .pro file"""
     start_time= time.time()
-    profs, meta_dict = snowpro.read_pro(config.get('SNOWPRO','PRO_FILE_PATH'), res=config.get('SNOWPRO-EVO', 'RESOLUTION'), keep_soil=False, consider_surface_hoar=True)
+    profs, meta_dict = snowpro.read_pro(config.get('SNOWPRO','PRO_FILE_PATH'), res=config.get('SNOWPRO-EVO', 'RESOLUTION'), keep_soil=False, add_surface_sh_as_layer=True)
 
     """Filter for certain resolution and time frame"""
     w, __ = pro_helper.set_resolution(config.get('SNOWPRO-EVO', 'RESOLUTION'))

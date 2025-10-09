@@ -139,6 +139,45 @@ def snp_gridded_sample_dir():
     """Wraps xsnow.sample_data.snp_gridded_ds() into a pytest fixture"""
     return f"{snp_gridded_dir()}/pros/gridded"
 
+@pytest.fixture
+def gridded_data_integrity_check(snp_gridded_sample_dir):
+    """
+    Checks for consistent lat/lon values for each station name in a directory.
+    If an inconsistency is found, the test is skipped with a warning.
+    """
+    directory_path = Path(snp_gridded_sample_dir)
+    station_coords = {}
+    pro_files = list(directory_path.glob("*.pro"))
+
+    for pro_file in pro_files:
+        with open(pro_file, 'r', errors='ignore') as f:
+            content = f.read()
+            station_match = re.search(r"StationName=\s*(.*)", content)
+            lat_match = re.search(r"Latitude=\s*([0-9.-]+)", content)
+            lon_match = re.search(r"Longitude=\s*([0-9.-]+)", content)
+
+            if not (station_match and lat_match and lon_match):
+                continue
+
+            station_name = station_match.group(1).strip()
+            latitude = float(lat_match.group(1))
+            longitude = float(lon_match.group(1))
+
+            if station_name in station_coords:
+                stored_lat, stored_lon, first_file = station_coords[station_name]
+                if not np.isclose(latitude, stored_lat) or not np.isclose(longitude, stored_lon):
+                    msg = (
+                        f"Inconsistent coordinates found for station '{station_name}'.\n"
+                        f"  - File '{first_file.name}' has (Lat, Lon): ({stored_lat}, {stored_lon})\n"
+                        f"  - File '{pro_file.name}' has (Lat, Lon): ({latitude}, {longitude})\n"
+                        "Skipping test due to inconsistent source data."
+                    )
+                    pytest.skip(msg)
+            else:
+                station_coords[station_name] = (latitude, longitude, pro_file)
+
+    return directory_path
+
 # --- Test Cases ---
 
 def test_read_single_pro_file(data_directory):
@@ -204,23 +243,36 @@ def test_read_with_integer_location_index(multi_station_dir):
     assert 'mapping' in ds.location.attrs
     assert ds.location.attrs['mapping'] == expected_mapping
 
-def test_read_sample_data_snp_gridded(snp_gridded_sample_dir):
-    """
-    This test is failing with an xarray.MergeError because of conflicting latitude values.
 
-    Problem: The read function is trying to merge multiple datasets (from different .pro files) into one. 
-    The error indicates that at least two of your sample .pro files have the same StationName but different 
-    latitude values in their headers. xarray cannot merge these because it doesn't know which latitude is the 
-    correct one for that station name.
-
-    Solution: This points to an inconsistency in the sample data itself. To resolve this, we need to ensure that every .pro 
-    file in your gridded dataset that represents a unique location also has a unique StationName.
-    I have commented this test for now. 
-    Ron Simenhois
+def test_read_sample_data_snp_gridded(gridded_data_integrity_check):
     """
-    pass
-    # ds = read(snp_gridded_sample_dir)
-    # TODO: write some assertions once the reading of the ds is successful
+    This test reads a gridded dataset after verifying its integrity.
+    It confirms that all expected stations are loaded correctly.
+    If the data is inconsistent, the gridded_data_integrity_check fixture
+    will skip this test.
+    """
+    verified_dir = gridded_data_integrity_check
+    ds = read(verified_dir)
+
+    # 1. Basic dataset validation
+    assert ds is not None
+    assert isinstance(ds, xsnowDataset)
+    assert 'location' in ds.dims
+
+    # 2. Verify all expected stations are present
+    location_map = ds.location.attrs.get('mapping', {})
+    loaded_stations = set(location_map.values())
+    expected_stations = {"VIR1A", "VIR2A", "VIR3A", "VIR4A", "VIR5A"}
+
+    assert ds.sizes['location'] == len(expected_stations)
+    assert expected_stations.issubset(loaded_stations)
+
+    # 3. Check a specific station for correct dimension merging (e.g., slope)
+    station_names = list(location_map.values())
+    vir1a_ds = ds.sel(location=station_names.index('VIR1A'))
+    assert 'slope' in vir1a_ds.dims
+    assert vir1a_ds.sizes['slope'] > 1
+    
 
 def test_read_sample_data_snp_snowobs():
     
@@ -478,3 +530,45 @@ def test_all_station_files_merge_correctly(tmp_path):
         assert 'layer' in station_ds.data['density'].dims, f"Dimension 'layer' missing for {station_name}"
         assert 'TA' in station_ds.data, f"Variable 'TA' missing for {station_name}"
         assert 'layer' not in station_ds.data['TA'].dims, f"Dimension 'layer' present in 'TA' for {station_name}"
+        
+
+def test_read_real_pro_with_mixed_sh(snp_gridded_sample_dir):
+    """
+    Tests reading a real .pro file containing profiles with and without surface hoar.
+    It verifies that the SH layer is correctly added or skipped based on the data.
+    """
+    pro_file = Path(snp_gridded_sample_dir) / "VIR3A3.pro"
+    ds = read(pro_file)
+    assert ds is not None
+
+    # Flags to confirm we found at least one of each profile type
+    found_sh_profile = False
+    found_no_sh_profile = False
+
+    # Iterate through each timestamp in the dataset
+    for timestamp in ds.time.values:
+        profile = ds.sel(time=timestamp).squeeze()
+        
+        # Drop padding to get the true profile for this timestamp
+        true_profile = profile.dropna(dim='layer', how='all')
+        if true_profile.sizes.get('layer', 0) == 0:
+            continue # Skip empty profiles
+
+        top_layer = true_profile.isel(layer=-1)
+
+        # Check if this is a surface hoar layer (identified by NaN temperature)
+        if np.isnan(top_layer['temperature'].item()):
+            # This is an SH profile, verify its properties
+            assert np.isclose(top_layer['grain_type'].item(), 660)
+            assert np.isclose(top_layer['density'].item(), 100)
+            assert np.isclose(top_layer['grain_size'].item(), 0.5)
+            found_sh_profile = True
+        
+        # FIX: A valid, non-SH profile is one where the temperature is NOT NaN.
+        elif not np.isnan(top_layer['temperature'].item()):
+            assert not np.isclose(top_layer['grain_type'].item(), 660, equal_nan=True)
+            found_no_sh_profile = True
+
+    # After checking all profiles, assert that we found both types
+    assert found_sh_profile, "No profile with surface hoar was found in the test file."
+    assert found_no_sh_profile, "No valid profile without surface hoar was found."
