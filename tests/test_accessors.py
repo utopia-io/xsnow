@@ -153,21 +153,25 @@ def test_icssg_accessor_on_snowobs_data():
     unique_primary = primary.flatten()[unique_indices]
     unique_secondary = secondary.flatten()[unique_indices]
 
-    expected_codes = np.array([110., 121., 210., 211., 220., 230., 231., 240., 241., 321., 330.,
-       341., 421., 430., 431., 440., 450., 490., 550., 591., 660., 770.,
-       772., 951., 990.,  np.nan])
-    expected_primary = np.array(['PP', 'PP', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'RG', 'RG',
-       'RG', 'FC', 'FC', 'FC', 'FC', 'FC', 'FC', 'DH', 'DH', 'SH', 'MF',
-       'MFcr', 'FCxr', 'FCxr', None])
-    expected_secondary = np.array(['PP', 'DF', 'PP', 'PP', 'DF', 'RG', 'RG', 'FC', 'FC', 'DF', 'RG',
-       'FC', 'DF', 'RG', 'RG', 'FC', 'DH', 'FCxr', 'DH', 'FCxr', 'SH',
-       'MF', 'MF', 'DH', 'FCxr', None])
+    expected_codes = np.array([
+        110., 121., 210., 211., 220., 230., 231., 240., 241., 321., 330.,
+        341., 421., 430., 431., 440., 450., 490., 550., 591., 660., 770.,
+        772., 951., 990., np.nan
+    ])
+    expected_primary = np.array([
+        'PP', 'PP', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'RG', 'RG',
+        'RG', 'FC', 'FC', 'FC', 'FC', 'FC', 'FC', 'DH', 'DH', 'SH', 'MF',
+        'MFcr', 'FCxr', 'FCxr', None
+    ])
+    expected_secondary = np.array([
+        'PP', 'DF', 'PP', 'PP', 'DF', 'RG', 'RG', 'FC', 'FC', 'DF', 'RG',
+        'FC', 'DF', 'RG', 'RG', 'FC', 'DH', 'FCxr', 'DH', 'FCxr', 'SH',
+        'MF', 'MF', 'DH', 'FCxr', None
+    ])
 
     assert np.array_equal(unique_codes, expected_codes, equal_nan=True)
     assert np.array_equal(unique_primary, expected_primary)
     assert np.array_equal(unique_secondary, expected_secondary)
-
-
 
 ## ------- TimezoneAccessor ----------------------------------- ##
 def test_set_get_attr(ds):

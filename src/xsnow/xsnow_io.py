@@ -48,7 +48,8 @@ def _parse_pro_worker(
     datetime_end: Optional[str],
     code_map: Dict,
     logger: logging.Logger,
-    remove_soil: bool
+    remove_soil: bool,
+    add_surface_sh_as_layer: bool
 ) -> Optional[Tuple[Dict, List[Dict]]]:
     """
     Internal worker to parse a single .pro file into a raw data structure.
@@ -69,7 +70,13 @@ def _parse_pro_worker(
         A tuple containing the station metadata and a list of raw profile dicts. Or None if parsing fails
     """
     try:
-        return _read_pro_raw(filepath, datetime_start, datetime_end, code_map=code_map, logger=logger, remove_soil=remove_soil)
+        return _read_pro_raw(filepath, 
+                             datetime_start, 
+                             datetime_end, 
+                             code_map=code_map, 
+                             logger=logger, 
+                             remove_soil=remove_soil,
+                             add_surface_sh_as_layer=add_surface_sh_as_layer)
     except Exception as e:
         logger.error(f"Failed to parse .pro file {filepath.name}", exc_info=e)
         return None
@@ -80,7 +87,8 @@ def _read_pro_raw(
     datetime_end: Optional[str] = None,
     code_map: Optional[Dict] = None,
     logger: Optional[logging.Logger] = None,
-    remove_soil: bool = True
+    remove_soil: bool = True,
+    add_surface_sh_as_layer: bool = True
 ) -> Tuple[Dict, List[Dict]]:
     """
     Parses a .pro file into raw Python objects, with an option to remove soil layers.
@@ -103,6 +111,9 @@ def _read_pro_raw(
             logger instance. If None, the default module logger is used.
         remove_soil (bool): If True (default), layers identified as soil
             (grain type 81 or 82) are removed from the bottom of the profile.
+        add_sh_as_layer (bool): If True, synthesizes a surface hoar layer
+            from the 'SH_at_surface' data and adds it to the top of the
+            snowpack. Defaults to True.
 
     Returns:
         A tuple containing:
@@ -121,84 +132,110 @@ def _read_pro_raw(
     code_map_to_use = code_map if code_map is not None else CODE_TO_NAME_MAP
     metadata: Dict[str, Any] = {}
     temp_profiles: List[Dict] = []
-    current_ts_data: Dict = {}
+    
     in_header, in_data = False, False
 
     start_ts = pd.to_datetime(datetime_start) if datetime_start else None
     end_ts = pd.to_datetime(datetime_end) if datetime_end else None
 
-    def test_timestamp(timestamp: str) -> bool:
-        if not start_ts and not end_ts:
-            return True
-        profile_ts = pd.to_datetime(current_ts_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
-        if not pd.notna(profile_ts):
-            return False
-        if start_ts and profile_ts < start_ts:
-            return False
-        if end_ts and profile_ts > end_ts:
-            return False
-        return True
-
-    def add_data():
-        if not current_ts_data:
+    # --- HELPER FUNCTIONS ---
+    def _process_and_append_profile(profile_data: Dict):
+        """Helper to process a completed profile dictionary."""
+        if not profile_data or 'timestamp' not in profile_data:
             return
-        if not test_timestamp(current_ts_data['timestamp']):
+
+        profile_ts = pd.to_datetime(profile_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
+        if pd.notna(profile_ts):
+            in_range = True
+            if start_ts and profile_ts < start_ts:
+                in_range = False
+            if end_ts and profile_ts > end_ts:
+                in_range = False
+            
+            if in_range:
+                if remove_soil and 'grain_type' in profile_data:
+                    grain_types = profile_data['grain_type']
+                    is_soil = (grain_types == 81) | (grain_types == 82)
+                    if np.any(is_soil):
+                        first_soil_idx = np.where(is_soil)[0][0]
+                        for key, arr in profile_data.items():
+                            if isinstance(arr, np.ndarray) and arr.ndim == 1:
+                                profile_data[key] = arr[:first_soil_idx]
+                
+                # FIX: Check if max height is > 0, not just if the array exists.
+                height_array = profile_data.get('height', np.array([]))
+                has_snow = height_array.size > 0 and np.nanmax(height_array) > 0
+
+                sh_data = profile_data.get('SH_at_surface', np.array([]))
+                has_sh = add_surface_sh_as_layer and sh_data.size >= 3 and sh_data[0] > 0
+                
+                if has_snow or has_sh:
+                    temp_profiles.append(profile_data)
+
+    def _parse_and_process_block(lines_block: List[str]):
+        """Parses a block of lines for one timestamp into a dict and processes it."""
+        if not lines_block:
             return
-        # --- Soil Removal Logic ---
-        if remove_soil and 'grain_type' in current_ts_data:
-            grain_types = current_ts_data['grain_type']
-            is_soil = (grain_types == 81) | (grain_types == 82)
-            soil_indices = np.where(is_soil)[0]
+        
+        profile_dict = {}
+        # The first line is always the timestamp
+        ts_line = lines_block[0]
+        profile_dict['timestamp'] = ts_line.split(',', 1)[1]
+        
+        # Process the rest of the lines for this block
+        for profile_line in lines_block[1:]:
+            try:
+                param_code, *data_parts = profile_line.split(',')
+                if (param_name := code_map_to_use.get(param_code)):
+                    data_values = data_parts[1:] # Skip the layer count
+                    profile_dict[param_name] = np.array(data_values, dtype=float)
+            except (ValueError, IndexError):
+                logger.warning(
+                    f"Could not parse data in {file_path.name} at timestamp "
+                    f"{profile_dict.get('timestamp', 'unknown')}. Line: '{profile_line}'"
+                )
+        _process_and_append_profile(profile_dict)
 
-            if soil_indices.size > 0:
-                first_soil_idx = soil_indices[0]
-                for key, arr in current_ts_data.items():
-                    if isinstance(arr, np.ndarray) and arr.ndim == 1:
-                        current_ts_data[key] = arr[:first_soil_idx]
-
-        # Only append if there are still layers left after slicing
-        if current_ts_data.get('height', np.array([])).size > 0:
-            temp_profiles.append(current_ts_data)
-
+    # --- MAIN PARSING LOGIC ---
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for i, line in enumerate(f):
-            line = line.strip()
-            if not line:
-                continue
-            if line == '[STATION_PARAMETERS]':
-                in_header, in_data = True, False
-            elif line == '[DATA]':
-                in_header, in_data = False, True
-            elif line.startswith('['):
-                in_header, in_data = False, False
-            elif in_header:
-                for key, value in HEADER_MAP.items():
-                    if line.startswith(key):
-                        metadata[value] = line.split('=', 1)[1].strip()
-            elif in_data:
-                if line.startswith("0500,"):
-                    add_data()
-                    current_ts_data = {'timestamp': line[5:]}
-                else:
-                    if (param_name := code_map_to_use.get(line[:line.index(',')])):
-                        try:
-                            current_ts_data[param_name] = np.fromstring(line, dtype=float, sep=',')[2:]
-                        except ValueError:
-                            ts = current_ts_data.get('timestamp', 'unknown timestamp')
-                            logger.warning(
-                                f"Could not parse data for param {param_name} in {Path(filepath).name} "
-                                f"at timestamp {ts} (line approx {i+1}). Skipping parameter."
-                            )
+        lines = f.readlines()
 
-    # This block handles the very last profile in the file
-    add_data()
+    current_profile_lines = []
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        if line == '[STATION_PARAMETERS]':
+            in_header, in_data = True, False
+        elif line == '[DATA]':
+            in_header, in_data = False, True
+        elif line.startswith('['):
+            in_header, in_data = False, False
+        elif in_header:
+            for key, value in HEADER_MAP.items():
+                if line.startswith(key):
+                    metadata[value] = line.split('=', 1)[1].strip()
+        elif in_data:
+            # Detect the start of a new profile block
+            if line.startswith("0500,"):
+                # If we have lines from a previous block, process them now
+                _parse_and_process_block(current_profile_lines)
+                # Start a new block
+                current_profile_lines = [line]
+            else:
+                # Add the current line to the block
+                current_profile_lines.append(line)
+
+    # After the loop, process the very last profile block in the file
+    _parse_and_process_block(current_profile_lines)
+
     return metadata, temp_profiles
-
 
 def _create_pro_dataset_worker(
     raw_data: Tuple[Dict, List[Dict]],
     max_layers: int,
-    logger: logging.Logger
+    logger: logging.Logger,
+    add_surface_sh_as_layer: bool
 ) -> Optional[xr.Dataset]:
     """
     Internal worker to convert raw parsed .pro data into a padded xarray.Dataset.
@@ -212,6 +249,7 @@ def _create_pro_dataset_worker(
         max_layers: The number of layers to pad the dataset to.
         logger logging.Logger: A pre-configured
             logger instance. If None, the default module logger is used.
+        add_surface_sh_as_layer: If True, adds an additional top layer
 
     Returns:
         An xarray.Dataset for a single station, or None if no profiles were found or raw_data is None.
@@ -222,7 +260,7 @@ def _create_pro_dataset_worker(
         metadata, profiles = raw_data
         if not profiles:
             return None
-        return _create_pro_dataset(metadata, profiles, max_layers)
+        return _create_pro_dataset(metadata, profiles, max_layers, add_surface_sh_as_layer)
     except Exception as e:
         station_name = raw_data[0].get('stationName', 'unknown')
         logger.error(f"Failed to create dataset for station '{station_name}'", exc_info=e)
@@ -311,19 +349,20 @@ def _read_pro_files(
 
     # Extract remove_soil arg with a default of True
     remove_soil = parser_kwargs.get('remove_soil', True)
+    add_surface_sh_as_layer = parser_kwargs.get('add_surface_sh_as_layer', True)
 
     # Step 1: Parallel parsing
     raw_pro_data = []
     use_parallel = n_cpus_use > 1 and len(pro_files) > 1
     if use_parallel:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_cpus_use) as executor:
-            futures = {executor.submit(_parse_pro_worker, fp, datetime_start, datetime_end, CODE_TO_NAME_MAP, logger, remove_soil) for fp in pro_files}
+            futures = {executor.submit(_parse_pro_worker, fp, datetime_start, datetime_end, CODE_TO_NAME_MAP, logger, remove_soil, add_surface_sh_as_layer) for fp in pro_files}
             for future in concurrent.futures.as_completed(futures):
                 if result := future.result():
                     raw_pro_data.append(result)
     else:
         for fp in pro_files:
-            if result := _parse_pro_worker(fp, datetime_start, datetime_end, CODE_TO_NAME_MAP, logger, remove_soil):
+            if result := _parse_pro_worker(fp, datetime_start, datetime_end, CODE_TO_NAME_MAP, logger, remove_soil, add_surface_sh_as_layer):
                 raw_pro_data.append(result)
 
     if not raw_pro_data:
@@ -341,13 +380,13 @@ def _read_pro_files(
     valid_raw_data = [rd for rd in raw_pro_data if rd and rd[1]]
     if use_parallel and len(valid_raw_data) > 1:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_cpus_use) as executor:
-            futures = {executor.submit(_create_pro_dataset_worker, raw_data, max_layers_to_use, logger) for raw_data in valid_raw_data}
+            futures = {executor.submit(_create_pro_dataset_worker, raw_data, max_layers_to_use, logger, add_surface_sh_as_layer) for raw_data in valid_raw_data}
             for future in concurrent.futures.as_completed(futures):
                 if ds := future.result():
                     pro_datasets.append(ds)
     else:
         for raw_data in valid_raw_data:
-            if ds := _create_pro_dataset_worker(raw_data, max_layers_to_use, logger):
+            if ds := _create_pro_dataset_worker(raw_data, max_layers_to_use, logger, add_surface_sh_as_layer):
                 pro_datasets.append(ds)
                 
     return pro_datasets
@@ -518,8 +557,8 @@ def read(
         logger (Optional[logging.Logger]): An optional, pre-configured
             logger instance. If None, the default module logger is used.
         **parser_kwargs: Additional keyword arguments passed to the underlying
-            parser functions, such as `max_layers='auto'` or
-            `remove_soil=True`.
+            parser functions, such as `max_layers='auto'`, `remove_soil=True`,
+            `add_surface_sh_as_layer=True`.
 
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
@@ -565,36 +604,53 @@ def read(
 def _create_pro_dataset(
     metadata: Dict,
     profiles: List[Dict],
-    max_layers: int
+    max_layers: int,
+    add_surface_sh_as_layer: bool = True
 ) -> Optional[xr.Dataset]:
-    """
-    Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
+    """Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
 
     This function transforms the intermediate raw data from `_read_pro_raw`
     into a fully-formed, 5-dimensional xarray.Dataset. It pads all snow
     profile arrays with np.nan up to `max_layers` to ensure consistent array
     shapes across all time steps. CF-compliant metadata is attached to the
-    dataset and its variables.
+    dataset and its variables based on the internal registry.
+
+    The `add_surface_sh_as_layer` flag controls the handling of surface hoar (SH). If
+    True, and a profile contains SH information (from the '0514' parameter
+    in the .pro file), an artificial layer is synthesized and added to the
+    top of that profile. This new layer will have a grain type of 660, with
+    density and grain size taken from the file, while other variables like
+    temperature are set to np.nan.
 
     The final dataset will have dimensions:
     ('location', 'time', 'slope', 'realization', 'layer')
 
     Args:
-        metadata: A dictionary of station parameters from the .pro file header.
-        profiles: A list of dictionaries, where each represents a single profile
-            at a specific timestamp.
-        max_layers: The number of layers to pad the profile data to. This ensures
-            all profile variables have the same shape along the 'layer' dimension.
+        metadata (Dict): A dictionary of station parameters from the .pro
+            file header (e.g., stationName, latitude).
+        profiles (List[Dict]): A list of dictionaries, where each represents
+            a single profile at a specific timestamp. The dictionaries
+            contain parameter names as keys and numpy arrays of layer values.
+        max_layers (int): The number of layers to pad the profile data to.
+            This ensures all profile variables have the same shape along the
+            'layer' dimension for consistent stacking.
+        add_surface_sh_as_layer (bool): If True, synthesizes a surface hoar layer
+            from the 'SH_at_surface' data and adds it to the top of the
+            snowpack. Defaults to True.
 
     Returns:
-        An xarray.Dataset containing the structured snow profile data,
-        or None if the input profiles list is empty.
+        Optional[xr.Dataset]: An xarray.Dataset containing the structured
+        snow profile data, or None if the input profiles list is empty.
     """
     if not profiles:
         return None
 
     timestamps = pd.to_datetime([p['timestamp'] for p in profiles], format='%d.%m.%Y %H:%M:%S')
-    all_params = sorted({key for p in profiles for key in p if key != 'timestamp'})
+    
+    all_params = sorted({
+        key for p in profiles for key in p 
+        if key not in ['timestamp', 'SH_at_surface']
+    })
 
     data_vars = {}
     for param in all_params:
@@ -603,23 +659,58 @@ def _create_pro_dataset(
         data_vars[param] = (("location", "time", "slope", "realization", "layer"), arr)
 
     for i, profile in enumerate(profiles):
-        num_layers = len(profile.get('height', []))
+        has_sh = False
+        sh_gsize = np.nan
+        sh_density = np.nan
+        
+        if add_surface_sh_as_layer and 'SH_at_surface' in profile:
+            sh_data = profile['SH_at_surface']
+            if sh_data.size >= 3 and sh_data[0] > 0:
+                has_sh = True
+                sh_gsize = sh_data[1]
+                sh_density = sh_data[2]
+
+        num_snow_layers = len(profile.get('height', []))
+
         for param in all_params:
-            if param in profile:
-                values = profile.get(param)
-                if values is not None:
-                    layers_to_copy = min(num_layers, max_layers)
-                    data_vars[param][1][0, i, 0, 0, :layers_to_copy] = np.array(values)[:layers_to_copy]
+            # Get data from existing snow layers first
+            param_data = profile.get(param, [])
+            final_values = list(param_data[:num_snow_layers])
+            
+            # Ensure list has correct length, filling with nan if data is ragged
+            while len(final_values) < num_snow_layers:
+                final_values.append(np.nan)
+
+            # If surface hoar is present, append it as a new top layer
+            if has_sh:
+                if param == 'grain_type':
+                    final_values.append(660)
+                elif param == 'grain_size':
+                    final_values.append(sh_gsize)
+                elif param == 'density':
+                    final_values.append(sh_density)
+                elif param == 'height':
+                    # This unified logic works for both bare ground (final_values is empty)
+                    # and existing snow.
+                    last_height = final_values[-1] if final_values and not np.isnan(final_values[-1]) else 0.0
+                    final_values.append(last_height + 0.001)
+                else:
+                    # For all other variables, the SH layer has no data
+                    final_values.append(np.nan)
+
+            if final_values:
+                num_to_copy = min(len(final_values), max_layers)
+                data_vars[param][1][0, i, 0, 0, :num_to_copy] = np.array(final_values)[:num_to_copy]
 
     station_name = metadata.get('stationName', 'unknown')
-
+    
     slope_index = [0]
     ds = xr.Dataset(
         data_vars,
         coords={
             'location': [station_name],
             'time': timestamps,
-            'slope': slope_index, # Integer index for the dimension
+            'slope': slope_index,
             'realization': [0],
             'layer': np.arange(max_layers),
             'latitude': ('location', [float(metadata.get('latitude', np.nan))]),
