@@ -23,6 +23,7 @@ dependencies = [
     "pooch",
     "tzdata>=2024.1",
     "pytest>=8.4.2",
+    "dask>=2025.9.1",
 ]
 keywords = ["snow", "stratigraphy", "avalanche", "xarray", "post-processing"]
 classifiers = [
@@ -66,3 +67,20 @@ package-dir = {"" = "src"}
 write_to = "src/xsnow/_version.py"
 version_scheme = "guess-next-dev"
 local_scheme = "node-and-date"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "benchmark: marks tests that benchmark performance",
+]
+
+# Configure warnings (Optional)
+filterwarnings = [
+    "ignore::DeprecationWarning:multiprocessing",
+]
+
+# Add test discovery patterns (Optional)
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
