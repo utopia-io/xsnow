@@ -3,12 +3,13 @@
 Unit tests for the xsnow_io module and registered I/O methods.
 """
 import pytest
-from pathlib import Path
+import re
+import warnings
 import pandas as pd
 import numpy as np
 import xarray as xr
-import re
-import warnings
+from pathlib import Path
+from datetime import datetime
 
 from xsnow import read, xsnowDataset
 from xsnow.selectors import TimeSelector, SlopeSelector, RealizationSelector
@@ -360,6 +361,25 @@ def test_read_merge_smet_snp_snowobs():
     # Add assertions to verify the merge was successful
     assert isinstance(ds_merged, xsnowDataset)
     assert ('input.TA' in ds_merged.data)
+
+def test_merge_override_order():
+    """
+    The two smet files overlap for one hour. Test which values are being kept,
+    depending on the order in which they are read. We expect the last file that got parsed to
+    override the values of the file that got parsed first.
+    """
+    snp_gridded = snp_gridded_dir()
+    nc_file = f"{snp_gridded}/smets/gridded/nowcast/VIR1A.smet"
+    fc_file = f"{snp_gridded}/smets/gridded/forecast/VIR1A.smet"
+    dt = datetime(2024, 1, 31, 1)
+
+    nc = read(nc_file).sel(time=dt)
+    fc = read(fc_file).sel(time=dt)
+    nc_fc = read([nc_file, fc_file]).sel(time=dt)     # first nowcast, second forecast
+    fc_nc = read([fc_file, nc_file]).sel(time=dt)     # vice versa
+    
+    assert nc_fc.TA.values == fc.TA.values          # last read file should override the previous
+    assert fc_nc.TA.values == nc.TA.values          # vice versa
     
 @pytest.fixture(scope="module")
 def pro_data_with_soil():
