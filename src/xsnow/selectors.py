@@ -72,10 +72,26 @@ class Selector:
         Returns:
             xr.Dataset: The subsetted dataset.
         """
-        
         s = self.sel
         if s is None:
             return ds
+
+        # Convert numpy datetime64 to pandas Timestamp
+        if isinstance(s, np.datetime64):
+            s = pd.Timestamp(s)
+        elif isinstance(s, slice):
+            start = s.start
+            stop = s.stop
+            step = s.step
+            
+            # Convert numpy datetime64 to pandas Timestamp
+            if start is not None and isinstance(start, np.datetime64):
+                start = pd.Timestamp(start)
+            if stop is not None and isinstance(stop, np.datetime64):
+                stop = pd.Timestamp(stop)
+            
+            # Reconstruct slice with converted values
+            s = slice(start, stop, step)
 
         # Boolean mask or DataArray: always label-based
         if isinstance(s, (xr.DataArray, xr.Dataset)) or (
@@ -84,12 +100,11 @@ class Selector:
         ):
             return ds.sel({self.dim: s})
 
-        # If slice of strings or datetimes => sel
-        if isinstance(s, slice) and (
-            isinstance(s.start, (str, pd.Timestamp)) or
-            isinstance(s.stop,  (str, pd.Timestamp))
-        ):
-            return ds.sel({self.dim: s})
+        # If slice with any datetime-like values => sel
+        if isinstance(s, slice):
+            if (s.start is not None and isinstance(s.start, (str, pd.Timestamp))) or \
+            (s.stop is not None and isinstance(s.stop, (str, pd.Timestamp))):
+                return ds.sel({self.dim: s})
 
         # If datetime, string, or a list of those => sel
         if isinstance(s, (str, pd.Timestamp)) or (
@@ -102,8 +117,6 @@ class Selector:
         try:
             return ds.isel({self.dim: s})
         except IndexError:
-            # If the index is out of bounds, return an empty dataset
-            # by selecting a zero-length slice of the dimension.
             return ds.isel({self.dim: slice(0, 0)})
 
 
@@ -133,15 +146,37 @@ class LocationSelector(Selector):
     def apply(self, ds: xr.Dataset) -> xr.Dataset:
         """
         Applies the location selection.
-
-        If lat_range or lon_range are provided, it performs a geographic
-        query. Otherwise, it falls back to the default ID-based selection.
         """
         if self.lat_range is None and self.lon_range is None:
-            # If no geographic range is given, use the default behavior
+            # FIX: Handle string location names by converting to integer indices
+            if isinstance(self.sel, str):
+                # Get mapping from location coordinate attributes
+                mapping = ds.location.attrs.get('mapping', {})
+                if mapping:
+                    # Reverse mapping: name -> index
+                    reverse_map = {v: k for k, v in mapping.items()}
+                    if self.sel in reverse_map:
+                        # Use integer index instead
+                        return ds.sel(location=reverse_map[self.sel])
+                    else:
+                        # Location name not found
+                        return ds.isel(location=slice(0, 0))
+            
+            elif isinstance(self.sel, (list, tuple)) and all(isinstance(s, str) for s in self.sel):
+                # Handle list of location names
+                mapping = ds.location.attrs.get('mapping', {})
+                if mapping:
+                    reverse_map = {v: k for k, v in mapping.items()}
+                    indices = [reverse_map[name] for name in self.sel if name in reverse_map]
+                    if indices:
+                        return ds.sel(location=indices)
+                    else:
+                        return ds.isel(location=slice(0, 0))
+            
+            # Default behavior for integer indices
             return super().apply(ds)
 
-        # Check for CRS consistency
+        # Geographic query logic (unchanged)
         dataset_crs = ds.attrs.get('crs')
         if dataset_crs and dataset_crs != self.crs:
             warnings.warn(
@@ -149,7 +184,6 @@ class LocationSelector(Selector):
                 "Results may be inaccurate. Consider reprojecting your data."
             )
 
-        # Build a boolean mask for the geographic query
         mask = True
         if self.lat_range:
             if 'latitude' not in ds.coords:
@@ -162,7 +196,6 @@ class LocationSelector(Selector):
             mask &= (ds.longitude >= self.lon_range[0]) & (ds.longitude <= self.lon_range[1])
 
         return ds.sel(location=mask)
-
 
 class SlopeSelector(Selector):
     """A selector specifically for the 'slope' dimension."""

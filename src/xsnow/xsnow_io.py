@@ -76,6 +76,7 @@ def read(
     location: Optional[LocationSelector] = None,
     slope: Optional[SlopeSelector] = None,
     realization: Optional[RealizationSelector] = None,
+    lazy: Optional[bool] = None,
     n_cpus_use: Optional[int] = None,
     logger: Optional[logging.Logger] = None,
     **parser_kwargs: Any
@@ -85,9 +86,7 @@ def read(
 
     This is the primary user-facing function for loading data. It orchestrates
     the discovery, parallel processing, and merging of snow profile (.pro)
-    and time series (.smet) files into a single, coherent dataset. For .pro
-    files, it uses a Dask-powered lazy-loading backend to handle datasets
-    larger than memory.
+    and time series (.smet) files into a single, coherent dataset.
 
     Args:
         source: The data source. Can be a path to a single file (e.g.,
@@ -97,11 +96,13 @@ def read(
         location: A `LocationSelector` object for filtering by station ID.
         slope: A `SlopeSelector` for filtering by slope angle.
         realization: A `RealizationSelector` for filtering by model realization.
-        n_cpus_use (Optional[int]): The number of CPU cores to use. If not
-            provided, it defaults to min(32, total_cores - 1), with a
-            minimum of 1. Set to 1 for sequential processing.
-        logger (Optional[logging.Logger]): An optional, pre-configured
-            logger instance. If None, the default module logger is used.
+        lazy: If True, use Dask for lazy, memory-efficient loading (good for
+            large datasets). If False, load all data eagerly into memory with
+            parallel processing (good for small to medium datasets). If None
+            (default), auto-detect based on file count (>10 files uses lazy).
+        n_cpus_use: The number of CPU cores to use. If not provided, defaults
+            to min(32, total_cores - 1), with a minimum of 1.
+        logger: An optional, pre-configured logger instance.
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions, such as `max_layers='auto'`, `remove_soil=True`,
             `add_surface_sh_as_layer=True`.
@@ -109,6 +110,16 @@ def read(
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
         or `None` if no valid data files are found.
+
+    Examples:
+        >>> # Auto-detect (lazy for >10 files, eager for <=10)
+        >>> ds = read("data/")
+        
+        >>> # Force lazy loading for large datasets
+        >>> ds = read("large_archive/", lazy=True, n_cpus_use=8)
+        
+        >>> # Force eager loading for quick access
+        >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
     """
     # --- Step 1: Setup Logger and CPU count ---
     if logger is None:
@@ -121,11 +132,22 @@ def read(
     # --- Step 2: Resolve file paths ---
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
-            return xsnowDataset(xr.open_dataset(source))
+            ds = xr.open_dataset(source)
+            
+            # Decode location mapping from JSON string if present
+            if 'location' in ds.coords and 'mapping' in ds.location.attrs:
+                import json
+                mapping_str = ds.location.attrs['mapping']
+                if isinstance(mapping_str, str):
+                    # Convert JSON string back to dict
+                    # JSON keys are strings, so convert back to ints
+                    mapping_dict = json.loads(mapping_str)
+                    ds.location.attrs['mapping'] = {int(k): v for k, v in mapping_dict.items()}
+            
+            return xsnowDataset(ds)
         except Exception as e:
             logger.warning(f"Failed to read NetCDF file {source}: {e}")
-            return None
-            
+            return None            
     try:
         pro_files, smet_files = _resolve_filepaths(source)
     except (FileNotFoundError, TypeError) as e:
@@ -136,21 +158,166 @@ def read(
         logger.warning("No data files found in the specified source.")
         return None
 
-    # --- Step 3: Read and process data files ---
+    # --- Step 3: Auto-detect lazy mode if not specified ---
+    if lazy is None:
+        total_files = len(pro_files) + len(smet_files)
+        lazy = total_files > 10
+        logger.info(f"Auto-detected lazy={lazy} for {total_files} files")
+
+    # --- Step 4: Read and process data files ---
     datetime_start, datetime_end = (time.sel.start, time.sel.stop) if time and isinstance(time.sel, slice) else (None, None)
     
-    pro_datasets = _read_pro_files(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
+    if lazy:
+        logger.info("Using lazy loading with Dask")
+        pro_datasets = _read_pro_files_lazy(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
+    else:
+        logger.info("Using eager loading with multiprocessing")
+        pro_datasets = _read_pro_files_eager(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
+    
     smet_datasets = _read_smet_files(smet_files, datetime_start, datetime_end, logger)
 
-    # --- Step 4: Merge and finalize datasets ---
+    # --- Step 5: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
     return _merge_and_finalize(all_datasets, time, location, slope, realization)
 
+
 # --------------------------------------------------------------------------- #
-#                        .PRO FILE PROCESSING PIPELINE                        #
+#                    EAGER LOADING WITH MULTIPROCESSING                       #
 # --------------------------------------------------------------------------- #
 
-def _read_pro_files(
+def _read_pro_files_eager(
+    pro_files: List[Path],
+    datetime_start: Optional[str],
+    datetime_end: Optional[str],
+    n_cpus_use: int,
+    logger: logging.Logger,
+    parser_kwargs: Dict
+) -> List[xr.Dataset]:
+    """
+    Eagerly loads and processes .pro files using direct multiprocessing.
+    
+    This approach immediately loads all data into memory with parallel processing.
+    Best for small to medium datasets (<100 files) where memory is sufficient.
+    
+    Args:
+        pro_files: A list of file paths to .pro files.
+        datetime_start: An optional start timestamp for filtering.
+        datetime_end: An optional end timestamp for filtering.
+        n_cpus_use: The number of CPU cores to use for parallel processing.
+        logger: A configured logger instance.
+        parser_kwargs: Additional keyword arguments for the parser.
+
+    Returns:
+        A list of xarray.Dataset objects, one for each successfully
+        processed .pro file.
+    """
+    if not pro_files:
+        return []
+
+    # --- Stage 1: Pre-scan for Max Layers ---
+    max_layers_arg = parser_kwargs.get('max_layers', 'auto')
+    add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
+    remove_soil = parser_kwargs.get('remove_soil', True)
+    
+    if max_layers_arg == 'auto':
+        logger.info(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
+        
+        if n_cpus_use > 1 and len(pro_files) > 1:
+            # Parallel pre-scan
+            ctx = multiprocessing.get_context('spawn')
+            with concurrent.futures.ProcessPoolExecutor(max_workers=n_cpus_use, mp_context=ctx) as executor:
+                layer_counts = list(executor.map(
+                    _scan_pro_for_max_layers,
+                    pro_files,
+                    [add_sh] * len(pro_files),
+                    [remove_soil] * len(pro_files)
+                ))
+        else:
+            # Sequential pre-scan
+            layer_counts = [_scan_pro_for_max_layers(fp, add_sh, remove_soil) for fp in pro_files]
+        
+        max_layers_to_use = max(layer_counts) if layer_counts else 200
+        logger.info(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
+    else:
+        max_layers_to_use = int(max_layers_arg)
+    
+    # --- Stage 2: Parallel Loading with Direct Multiprocessing ---
+    logger.info(f"Loading {len(pro_files)} files eagerly with {n_cpus_use} workers...")
+    
+    if n_cpus_use > 1 and len(pro_files) > 1:
+        # Parallel processing
+        ctx = multiprocessing.get_context('spawn')
+        
+        # Create task arguments
+        tasks = [
+            (fp, max_layers_to_use, datetime_start, datetime_end, parser_kwargs)
+            for fp in pro_files
+        ]
+        
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_cpus_use, mp_context=ctx) as executor:
+            datasets = list(executor.map(_process_pro_file_eager, tasks))
+    else:
+        # Sequential processing
+        tasks = [
+            (fp, max_layers_to_use, datetime_start, datetime_end, parser_kwargs)
+            for fp in pro_files
+        ]
+        datasets = [_process_pro_file_eager(task) for task in tasks]
+    
+    # Filter out None results
+    final_datasets = [ds for ds in datasets if ds is not None]
+    logger.info(f"Successfully loaded {len(final_datasets)} datasets")
+    
+    return final_datasets
+
+
+def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
+    """
+    Worker function for eager loading of a single .pro file.
+    
+    This function is designed to be called by multiprocessing workers.
+    It unpacks task arguments and processes one file.
+    
+    Args:
+        task_args: Tuple of (filepath, max_layers, datetime_start, datetime_end, parser_kwargs)
+    
+    Returns:
+        An xarray.Dataset or None if processing failed.
+    """
+    filepath, max_layers, datetime_start, datetime_end, parser_kwargs = task_args
+    
+    try:
+        remove_soil = parser_kwargs.get('remove_soil', True)
+        add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
+        
+        # Parse the file
+        raw_data = _read_pro_raw(
+            filepath,
+            datetime_start=datetime_start,
+            datetime_end=datetime_end,
+            code_map=CODE_TO_NAME_MAP,
+            logger=None,  # Don't pass logger to worker (not picklable)
+            remove_soil=remove_soil,
+            add_surface_sh_as_layer=add_sh
+        )
+        
+        # Create dataset if data found
+        if raw_data and raw_data[1]:
+            metadata, profiles = raw_data
+            return _create_pro_dataset(metadata, profiles, max_layers, add_sh)
+    except Exception as e:
+        # Can't use logger in worker, just return None
+        logging.warning(f"Warning: Failed to process {filepath.name}: {e}")
+    
+    return None
+
+
+
+# --------------------------------------------------------------------------- #
+#                      LAZY .PRO FILE PROCESSING PIPELINE                        #
+# --------------------------------------------------------------------------- #
+
+def _read_pro_files_lazy(
     pro_files: List[Path],
     datetime_start: Optional[str],
     datetime_end: Optional[str],
@@ -726,7 +893,7 @@ def read_smet(
     datetime_start: Optional[str] = None,
     datetime_end: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
-) -> Optional[xr.Dataset]:
+) -> Optional[xr.Dataset]:    
     """
     Parses a single SMET file into an xarray.Dataset.
 
@@ -747,7 +914,6 @@ def read_smet(
         An xarray.Dataset containing the SMET data, or None if the file
         cannot be parsed or contains no data in the specified time range.
     """
-   # Use the provided logger or fall back to the module's default
     if logger is None:
         logger = logging.getLogger(__name__)
 
@@ -779,10 +945,10 @@ def read_smet(
     original_names = header['fields'].split()
     new_column_names = []
     for name in original_names:
-            if name in variable_heights:
-                new_column_names.append(f"{name}_{variable_heights[name]}m")
-            else:
-                new_column_names.append(name)
+        if name in variable_heights:
+            new_column_names.append(f"{name}_{variable_heights[name]}m")
+        else:
+            new_column_names.append(name)
     
     df = pd.read_csv(
         file_path,
@@ -810,21 +976,37 @@ def read_smet(
     tz_val = header.get('tz')
     if tz_val is not None:
         try:
-            ds['time'].tz.set_attr(int(tz_val))
+            ds['time'].attrs['timezone'] = int(tz_val)
         except (ValueError, TypeError):
             logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
             
     station_name = header.get('station_name', header.get('station_id', file_path.stem))
     
-    ds = ds.expand_dims(location=[station_name], slope=[0], realization=[0])
+    # Check if dimensions already exist before expanding
+    dims_to_add = {}
+    if 'location' not in ds.dims and 'location' not in ds.coords:  # ADD coord check
+        dims_to_add['location'] = [station_name]
+    if 'slope' not in ds.dims and 'slope' not in ds.coords:
+        dims_to_add['slope'] = [0]
+    if 'realization' not in ds.dims and 'realization' not in ds.coords:
+        dims_to_add['realization'] = [0]
     
-    ds = ds.assign_coords({
-        'latitude': ('location', [float(header.get('latitude', np.nan))]),
-        'longitude': ('location', [float(header.get('longitude', np.nan))]),
-        'altitude': ('location', [float(header.get('altitude', np.nan))]),
-        'slope_inclination': ('slope', [np.nan]),
-        'slope_azimuth': ('slope', [np.nan])
-    })
+    if dims_to_add:
+        ds = ds.expand_dims(dims_to_add)
+    
+    # Add coordinates if they don't exist
+    if 'latitude' not in ds.coords:
+        ds = ds.assign_coords({
+            'latitude': ('location', [float(header.get('latitude', np.nan))]),
+            'longitude': ('location', [float(header.get('longitude', np.nan))]),
+            'altitude': ('location', [float(header.get('altitude', np.nan))]),
+        })
+    
+    if 'slope_inclination' not in ds.coords:
+        ds = ds.assign_coords({
+            'slope_inclination': ('slope', [np.nan]),
+            'slope_azimuth': ('slope', [np.nan])
+        })
 
     return ds
 
@@ -981,6 +1163,11 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
     (e.g., from NetCDF) and want to append new data from recent .pro or
     .smet files. It finds the last timestamp in the current data and only
     reads new data from the source that is more recent.
+    
+    Note: This method is optimized for adding new timestamps to existing data.
+    If the new data has different dimensions (e.g., different slopes), the result
+    may differ from loading all data together. For guaranteed consistency across
+    all dimensions, use a full reload instead.
 
     Args:
         existing_ds (xsnowDataset): The dataset instance to be updated.
@@ -1002,7 +1189,7 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
 
     if existing_ds.data is None or existing_ds.data.time.size == 0:
         return read(resolved_source) or existing_ds
-
+    
     last_timestamp = pd.to_datetime(existing_ds.data.time.max().values).isoformat()
     
     time_filter = TimeSelector(sel=slice(last_timestamp, None))
@@ -1011,12 +1198,45 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
     if new_data_obj is None or new_data_obj.data.time.size == 0:
         return existing_ds
 
-    combined = xr.concat([existing_ds.data, new_data_obj.data], dim="time")
+    # Handle dimension mismatches by reindexing to common dimensions
+    # Get union of all dimension sizes
+    all_dims = set(existing_ds.data.dims) | set(new_data_obj.data.dims)
+    
+    # For each dimension (except time), ensure both datasets have the same size
+    for dim in all_dims:
+        if dim == 'time':
+            continue
+            
+        existing_size = existing_ds.data.sizes.get(dim, 0)
+        new_size = new_data_obj.data.sizes.get(dim, 0)
+        
+        if existing_size != new_size and existing_size > 0 and new_size > 0:
+            logger.warning(
+                f"Dimension mismatch in '{dim}': existing={existing_size}, new={new_size}. "
+                f"Incremental update may differ from full reload. Consider full reload for consistency."
+            )
+        max_size = max(existing_size, new_size)
+        
+        # Reindex to max size if needed
+        if existing_size < max_size and existing_size > 0:
+            existing_ds.data = existing_ds.data.reindex({dim: range(max_size)}, fill_value=np.nan)
+        if new_size < max_size and new_size > 0:
+            new_data_obj.data = new_data_obj.data.reindex({dim: range(max_size)}, fill_value=np.nan)
+    
+    # Now concatenate along time dimension
+    combined = xr.concat(
+        [existing_ds.data, new_data_obj.data], 
+        dim="time",
+        coords='minimal',
+        compat='override',
+        join='outer'
+    )
+    
+    # Remove duplicate times
     _, index = np.unique(combined['time'], return_index=True)
     combined = combined.isel(time=index)
 
     return xsnowDataset(combined)
-
     
 @register_xsnowDataset_method
 def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
@@ -1025,6 +1245,9 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
 
     This method provides a convenient wrapper around the underlying
     `xarray.Dataset.to_netcdf()` method for easy caching and interoperability.
+    
+    The location mapping dictionary is converted to NetCDF-compatible format
+    by encoding it as JSON in a string attribute.
 
     Args:
         ds (xsnowDataset): The dataset instance to save.
@@ -1033,8 +1256,19 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     """
     if ds.data is None:
         raise ValueError("Cannot save an empty dataset.")
-    ds.to_xarray().to_netcdf(path, **kwargs)
-    print(f"Dataset successfully saved to {path}")
+    
+    # Create a copy to avoid modifying the original
+    ds_to_save = ds.to_xarray().copy()
+    
+    # Convert the location mapping dict to JSON string for NetCDF compatibility
+    if 'location' in ds_to_save.coords and 'mapping' in ds_to_save.location.attrs:
+        import json
+        mapping_dict = ds_to_save.location.attrs['mapping']
+        # Convert dict to JSON string
+        ds_to_save.location.attrs['mapping'] = json.dumps(mapping_dict)
+    
+    ds_to_save.to_netcdf(path, **kwargs)
+    logging.info(f"Dataset successfully saved to {path}")
 
 @register_xsnowDataset_method
 def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = None, **kwargs):
@@ -1069,10 +1303,11 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
 
     smet_vars = [name for name, var in ds.data.data_vars.items() if 'layer' not in var.dims]
     if not smet_vars:
-        print("Warning: No time-series variables found to write to SMET file.")
+        logging.warning("Warning: No time-series variables found to write to SMET file.")
         return
 
-    df = ds.data[smet_vars].squeeze().to_dataframe()
+    # Squeeze and convert to dataframe, keeping only data variables
+    df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()  # ADD drop=True
 
     with open(path, 'w') as f:
         f.write("SMET 1.1 ASCII\n")
@@ -1088,7 +1323,7 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
 
     df.index.name = 'timestamp'
     df.to_csv(path, sep=' ', mode='a', header=False, date_format='%Y-%m-%dT%H:%M:%S')
-    print(f"Dataset successfully saved to {path}")
+    logging.info(f"Dataset successfully saved to {path}")
 
 
 @register_xsnowDataset_method
@@ -1126,7 +1361,17 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
     if ds.sizes.get('location') > 1:
         raise ValueError("to_pro() only supports datasets with a single location.")
 
-    single_loc_ds = ds.data.squeeze()
+    # Squeeze location but preserve time dimension
+    single_loc_ds = ds.data.squeeze(dim='location', drop=False)
+    
+    # Select first slope if multiple slopes exist
+    if 'slope' in single_loc_ds.dims and single_loc_ds.sizes['slope'] > 1:
+        single_loc_ds = single_loc_ds.isel(slope=0)
+    
+    # Squeeze slope if it exists
+    if 'slope' in single_loc_ds.dims:
+        single_loc_ds = single_loc_ds.squeeze(dim='slope', drop=False)
+    
     profile_vars = {name: var for name, var in single_loc_ds.data_vars.items() if 'layer' in var.dims}
 
     with open(path, 'w') as f:
@@ -1135,25 +1380,42 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
         f.write(f"Latitude= {single_loc_ds.latitude.item():.4f}\n")
         f.write(f"Longitude= {single_loc_ds.longitude.item():.4f}\n")
         f.write(f"Altitude= {single_loc_ds.altitude.item():.0f}\n")
-        f.write(f"SlopeAngle= {single_loc_ds.slope.item():.1f}\n")
-        f.write(f"SlopeAzi= {getattr(single_loc_ds, 'slope_aspect', 0.0):.1f}\n")
+        
+        # Get slope angle value
+        if 'slope_inclination' in single_loc_ds.coords:
+            slope_val = float(single_loc_ds.slope_inclination.values.item() if single_loc_ds.slope_inclination.size == 1 else 0.0)
+        else:
+            slope_val = 0.0
+        f.write(f"SlopeAngle= {slope_val:.1f}\n")
+        
+        # Handle slope_azimuth
+        if 'slope_azimuth' in single_loc_ds.coords:
+            azimuth = float(single_loc_ds.slope_azimuth.values.item() if single_loc_ds.slope_azimuth.size == 1 else 0.0)
+        else:
+            azimuth = 0.0
+        f.write(f"SlopeAzi= {azimuth:.1f}\n")
+        
         f.write("[DATA]\n")
 
-        for t in single_loc_ds.time:
+        # Iterate over time dimension (will work even if size is 1)
+        for t in single_loc_ds.time.values:
             profile = single_loc_ds.sel(time=t)
-            timestamp_str = pd.to_datetime(t.item()).strftime('%d.%m.%Y %H:%M:%S')
+            timestamp_str = pd.to_datetime(t).strftime('%d.%m.%Y %H:%M:%S')
             f.write(f"0500,{timestamp_str}\n")
             
             for var_name, code in registry.items():
-                if var_name in profile_vars:
+                param_code = code.get('param_code') if isinstance(code, dict) else None
+                if param_code and var_name in profile_vars:
                     data_array = profile[var_name].dropna(dim='layer').values
                     if data_array.size > 0:
                         num_layers = data_array.size
-                        data_str = ",".join(map(str, data_array.round(4)))
-                        f.write(f"{code},{num_layers},{data_str}\n")
+                        formatted_values = [f"{val:.4f}" for val in data_array.flatten()]
+                        data_str = ",".join(formatted_values)
+                        f.write(f"{param_code},{num_layers},{data_str}\n")
                         
-    print(f"Dataset successfully saved to {path}")
-
+                        
+    logging.info(f"Dataset successfully saved to {path}")    
+    
 @register_xsnowDataset_method
 def to_json(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     """Saves the dataset to a structured JSON file. (Not Implemented)"""

@@ -35,8 +35,9 @@ classifiers = [
 
 [project.optional-dependencies]
 testing = [
-  "pytest>=7.0",
+  "pytest>=8.0",
   "pytest-cov",
+  "pytest-benchmark",
 ]
 gpu = [
   "cupy-cuda12x; platform_system == 'Linux'",  # nvidia wheels
