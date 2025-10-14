@@ -502,6 +502,18 @@ def test_read_with_slope_selector(multi_slope_directory):
     # An empty selection on a dimension results in a size of 0 for that dim
     assert ds_empty is not None and ds_empty.sizes['slope'] == 0
 
+# TODO: potentially the next test should be extended to cover all four selectors with at least one non-Selector object
+def test_read_with_slope_selector_as_integer(multi_slope_directory):
+    """
+    Tests that passing an object coercible to SlopeSelector to read() correctly filters the
+    dataset by the slope's integer index.
+    """
+    ds_single = read(multi_slope_directory, slope=0)
+    assert ds_single is not None
+    assert 'slope' not in ds_single.dims
+    assert 'slope' in ds_single.coords
+    assert int(ds_single.slope) == 0
+    assert np.isclose(ds_single.slope_inclination.item(), 15.0)
 
 def test_read_with_realization_selector(multi_slope_directory):
     """
