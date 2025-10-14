@@ -31,6 +31,8 @@ sphinx:
       path_to_docs: docs
       show_toc_level: 3
       default_mode: light
+      pygments_light_style: github-light
+      pygments_dark_style: github-dark-dimmed
     autosummary_generate: true
     # If you want numbering across multiple toctrees, enable this:
     use_multitoc_numbering: true

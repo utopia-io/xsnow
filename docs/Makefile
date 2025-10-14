@@ -15,11 +15,13 @@ deps:
 
 api:
 	@echo "Generating API docs…"
-	sphinx-apidoc -f -e -o api ../src/xsnow
+	sphinx-apidoc -f -e -o api/_generated ../src/xsnow
 
 html: api
+	sed -i '1s/^xsnow\.extensions\.//' api/_generated/*.rst  # make extension titles more legible
+	sed -i '1s/^xsnow\.//' api/_generated/*.rst  # make module titles more legible
 	pip install -e ..
 	jupyter-book build $(SOURCEDIR) --path-output $(BUILDDIR)
 
 clean:
-	rm -rf $(BUILDDIR) api
+	rm -rf $(BUILDDIR) api/_generated
