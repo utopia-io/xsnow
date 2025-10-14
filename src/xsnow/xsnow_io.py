@@ -917,6 +917,48 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     ds.to_xarray().to_netcdf(path, **kwargs)
     print(f"Dataset successfully saved to {path}")
 
+## Helpers for JSON-coding of dict attrs (like 'mapping') (not applied yet)
+def _encode_attrs(obj: xr.Dataset | xr.DataArray) -> None:
+    """Recursively JSON-encode complex attrs in-place for NetCDF compatibility."""
+    def encode_value(v):
+        # Simple types are left untouched
+        if isinstance(v, (str, bytes, int, float)) or v is None:
+            return v
+        if isinstance(v, (list, tuple)):
+            # allow flat lists of scalars
+            if all(isinstance(x, (str, bytes, int, float, type(None))) for x in v):
+                return v
+        # everything else gets JSON encoded
+        try:
+            return json.dumps(v, default=str)
+        except Exception:
+            return str(v)
+
+    # dataset-level attrs
+    obj.attrs = {k: encode_value(v) for k, v in obj.attrs.items()}
+
+    # variable-level attrs
+    for var in obj.variables:
+        obj[var].attrs = {k: encode_value(v) for k, v in obj[var].attrs.items()}
+
+
+def _decode_attrs(obj: xr.Dataset | xr.DataArray) -> None:
+    """Recursively JSON-decode attrs that look like JSON strings."""
+    def decode_value(v):
+        if isinstance(v, str):
+            try:
+                loaded = json.loads(v)
+                # Keep decoded value if it yields dict/list
+                if isinstance(loaded, (dict, list)):
+                    return loaded
+            except Exception:
+                pass
+        return v
+
+    obj.attrs = {k: decode_value(v) for k, v in obj.attrs.items()}
+    for var in obj.variables:
+        obj[var].attrs = {k: decode_value(v) for k, v in obj[var].attrs.items()}
+
 @register_xsnowDataset_method
 def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = None, **kwargs):
     """

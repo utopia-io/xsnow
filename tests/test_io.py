@@ -5,6 +5,7 @@ Unit tests for the xsnow_io module and registered I/O methods.
 import pytest
 import re
 import warnings
+import tempfile
 import pandas as pd
 import numpy as np
 import xarray as xr
@@ -13,7 +14,7 @@ from datetime import datetime
 
 from xsnow import read, xsnowDataset
 from xsnow.selectors import TimeSelector, SlopeSelector, RealizationSelector
-from xsnow.sample_data import snp_gridded_dir, snp_snowobs_dir
+from xsnow.sample_data import snp_gridded_dir, snp_snowobs_dir, snp_gridded_ds
 
 # --- Test Data Fixtures ---
 
@@ -117,6 +118,7 @@ StationName= IO_STATION
 [HEADER]
 station_name = IO_STATION
 fields = timestamp TA
+tz = 1
 [DATA]
 2025-02-09T12:00:00 270.0
 """)
@@ -177,6 +179,12 @@ def gridded_data_integrity_check(snp_gridded_sample_dir):
                 station_coords[station_name] = (latitude, longitude, pro_file)
 
     return directory_path
+
+@pytest.fixture
+def writable_tempdir():
+    import tempfile
+    tmpdir = tempfile.mkdtemp(prefix="xsnow-test-")
+    return tmpdir
 
 # --- Test Cases ---
 
@@ -253,11 +261,18 @@ def test_read_sample_data_snp_gridded(gridded_data_integrity_check):
     """
     verified_dir = gridded_data_integrity_check
     ds = read(verified_dir)
+    assert_sample_data_snp_gridded(ds)
+
+
+def assert_sample_data_snp_gridded(ds_snp_gridded):
+    ds = ds_snp_gridded
 
     # 1. Basic dataset validation
     assert ds is not None
     assert isinstance(ds, xsnowDataset)
     assert 'location' in ds.dims
+    assert 'timezone' in ds['time'].attrs
+    assert ds['time'].attrs['timezone'] == "UTC"  # may be 'utc' or slightly different string
 
     # 2. Verify all expected stations are present
     location_map = ds.location.attrs.get('mapping', {})
@@ -304,6 +319,13 @@ def test_to_smet_max_files_raises_error(multi_station_dir):
     with pytest.raises(ValueError, match="exceeds the specified maximum"):
         ds.to_smet("test.smet", max_files=1)
 
+def test_to_netcdf_roundtrip(writable_tempdir):
+    ncfpath = f"{writable_tempdir}/test.nc"
+    ds = snp_gridded_ds()
+    ds.to_netcdf(ncfpath)
+    ds_round = read(ncfpath)
+    assert_sample_data_snp_gridded(ds_round)
+
 def test_update_method(data_dir_for_io_methods):
     """
     Tests the .update() method to ensure it loads and appends new data.
@@ -328,9 +350,12 @@ def test_merge_smet_method(data_dir_for_io_methods):
     initial_dir, _, smet_file = data_dir_for_io_methods
     ds = read(initial_dir)
     assert 'TA' not in ds.data.data_vars
+    assert 'timezone' not in ds['time'].attrs
     ds_merged = ds.merge_smet(smet_file)
     assert isinstance(ds_merged, xsnowDataset)
     assert 'TA' in ds_merged.data.data_vars
+    assert 'timezone' in ds['time'].attrs
+    assert ds['time'].attrs['timezone'] == 'utc+1'  # to be fixed: sth like that: 1h offset from utc
     profile = ds_merged.sel(time='2025-02-09 12:00:00')
     assert np.isclose(profile.TA.item(), 270.0)
 
