@@ -9,6 +9,7 @@ parts:
   - caption: "Tutorials: xsnow"
     chapters:
       - file: tutorials/04-01-reading_writing
+      - file: tutorials/04-02-subsetting_filtering
 
   - caption: "API reference"
     chapters:
