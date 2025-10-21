@@ -14,21 +14,17 @@ This script performs the following steps:
 To run this script, ensure you have the `xsnow` package and `matplotlib`
 installed in your environment.
 """
-
 import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
 
-# Import the main class from the installed xsnow package
-from xsnow.dataset import xsnowDataset
+from xsnow import read
 
 
 def main():
     """Main function to run the example workflow."""
 
     # --- 1. Specify the path to your data files ---
-    # IMPORTANT: Change this path to the directory containing your
-    #            .pro and .smet files.
     data_directory = r"C:\Users\Avalanche\Documents\projects\SNOWPACK\post_processing\hazard_forecasting\data\external\snowpack\2023\zone009\098441"
     
     data_dir = Path(data_directory)
@@ -42,11 +38,10 @@ def main():
     # --- 2. Load and process the data ---
     print("\n--- 2. Loading and processing data ---")
     
-    # Initialize the dataset from the directory. `read` will be called
-    # internally to find and merge both the .pro and .smet files.
-    ds = xsnowDataset(str(data_dir))
+    # ✨ CHANGED: Use read() function
+    ds = read(str(data_dir))
     
-    if ds.data is None:
+    if ds is None or ds.data is None:
         print("No data was loaded. Exiting.")
         sys.exit(1)
         
@@ -59,13 +54,12 @@ def main():
     # --- 3. Plot the results ---
     print("\n--- 3. Generating plot ---")
     if processed_ds.data:
-        # Squeeze singleton dimensions for easier plotting
         plot_data = processed_ds.data.squeeze()
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
         
-        # Use the station name from the data for the title
-        station_name = plot_data.location.item() if 'location' in plot_data.coords else "Snowpack Analysis"
+        # ✨ UPDATED: Location is now a string
+        station_name = str(plot_data.location.values) if 'location' in plot_data.coords else "Snowpack Analysis"
         fig.suptitle(f"Snowpack Analysis for {station_name}", fontsize=16)
 
         # Plot Snow Height (HS)
@@ -81,7 +75,6 @@ def main():
         ax2.set_xlabel("Date")
         ax2.grid(True, linestyle='--', alpha=0.6)
         
-        # Add a horizontal line at zero for reference
         ax2.axhline(0, color='black', linewidth=0.8, linestyle='--')
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])

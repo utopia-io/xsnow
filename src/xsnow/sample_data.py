@@ -231,5 +231,8 @@ def single_profile_timeseries() -> xsnowDataset:
     """
     snowobs_dir = snp_snowobs_dir()
     ds = read(f"{snowobs_dir}/pros/snowobs/")
-    ds = ds.sel(location=[0])
+    
+    first_location = ds.data.location.values[0]
+    ds = ds.sel(location=[first_location])
+    
     return ds

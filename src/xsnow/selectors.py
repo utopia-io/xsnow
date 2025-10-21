@@ -72,10 +72,26 @@ class Selector:
         Returns:
             xr.Dataset: The subsetted dataset.
         """
-        
         s = self.sel
         if s is None:
             return ds
+
+        # Convert numpy datetime64 to pandas Timestamp
+        if isinstance(s, np.datetime64):
+            s = pd.Timestamp(s)
+        elif isinstance(s, slice):
+            start = s.start
+            stop = s.stop
+            step = s.step
+            
+            # Convert numpy datetime64 to pandas Timestamp
+            if start is not None and isinstance(start, np.datetime64):
+                start = pd.Timestamp(start)
+            if stop is not None and isinstance(stop, np.datetime64):
+                stop = pd.Timestamp(stop)
+            
+            # Reconstruct slice with converted values
+            s = slice(start, stop, step)
 
         # Boolean mask or DataArray: always label-based
         if isinstance(s, (xr.DataArray, xr.Dataset)) or (
@@ -84,12 +100,11 @@ class Selector:
         ):
             return ds.sel({self.dim: s})
 
-        # If slice of strings or datetimes => sel
-        if isinstance(s, slice) and (
-            isinstance(s.start, (str, pd.Timestamp)) or
-            isinstance(s.stop,  (str, pd.Timestamp))
-        ):
-            return ds.sel({self.dim: s})
+        # If slice with any datetime-like values => sel
+        if isinstance(s, slice):
+            if (s.start is not None and isinstance(s.start, (str, pd.Timestamp))) or \
+            (s.stop is not None and isinstance(s.stop, (str, pd.Timestamp))):
+                return ds.sel({self.dim: s})
 
         # If datetime, string, or a list of those => sel
         if isinstance(s, (str, pd.Timestamp)) or (
@@ -102,8 +117,6 @@ class Selector:
         try:
             return ds.isel({self.dim: s})
         except IndexError:
-            # If the index is out of bounds, return an empty dataset
-            # by selecting a zero-length slice of the dimension.
             return ds.isel({self.dim: slice(0, 0)})
 
 
@@ -132,37 +145,37 @@ class LocationSelector(Selector):
 
     def apply(self, ds: xr.Dataset) -> xr.Dataset:
         """
-        Applies the location selection.
-
-        If lat_range or lon_range are provided, it performs a geographic
-        query. Otherwise, it falls back to the default ID-based selection.
+        Apply location selection - NOW MUCH SIMPLER!
         """
-        if self.lat_range is None and self.lon_range is None:
-            # If no geographic range is given, use the default behavior
-            return super().apply(ds)
-
-        # Check for CRS consistency
+        # Geographic bounding box selection
+        if self.lat_range is not None or self.lon_range is not None:
+            return self._apply_bbox(ds)
+        
+        # ✨ STRING SELECTION JUST WORKS!
+        # Base class handles str, list[str], int, slice automatically
+        return super().apply(ds)
+    
+    def _apply_bbox(self, ds: xr.Dataset) -> xr.Dataset:
+        """Apply geographic bounding box filter."""
         dataset_crs = ds.attrs.get('crs')
         if dataset_crs and dataset_crs != self.crs:
             warnings.warn(
                 f"Query CRS ('{self.crs}') does not match dataset CRS ('{dataset_crs}'). "
-                "Results may be inaccurate. Consider reprojecting your data."
+                "Results may be inaccurate."
             )
 
-        # Build a boolean mask for the geographic query
         mask = True
         if self.lat_range:
             if 'latitude' not in ds.coords:
-                raise ValueError("Dataset must have 'latitude' coordinates for geographic selection.")
+                raise ValueError("Dataset must have 'latitude' coordinates")
             mask &= (ds.latitude >= self.lat_range[0]) & (ds.latitude <= self.lat_range[1])
         
         if self.lon_range:
             if 'longitude' not in ds.coords:
-                raise ValueError("Dataset must have 'longitude' coordinates for geographic selection.")
+                raise ValueError("Dataset must have 'longitude' coordinates")
             mask &= (ds.longitude >= self.lon_range[0]) & (ds.longitude <= self.lon_range[1])
 
         return ds.sel(location=mask)
-
 
 class SlopeSelector(Selector):
     """A selector specifically for the 'slope' dimension."""
