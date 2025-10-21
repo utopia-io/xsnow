@@ -58,6 +58,7 @@ CODE_TO_NAME_MAP["0500"] = "timestamp"
 
 # --- Static Mappings ---
 HEADER_MAP = {
+    'StationName': 'station_name',
     'Altitude=': 'altitude',
     'Latitude=': 'latitude',
     'Longitude=': 'longitude',
@@ -121,7 +122,7 @@ def read(
         >>> # Force eager loading for quick access
         >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
     """
-    # --- Step 1: Setup Logger and CPU count ---
+# --- Step 1: Setup Logger and CPU count ---
     if logger is None:
         logger = logging.getLogger(__name__)
 
@@ -134,24 +135,30 @@ def read(
         try:
             ds = xr.open_dataset(source)
             
-            # Decode location mapping from JSON string if present
-            if 'location' in ds.coords and 'mapping' in ds.location.attrs:
-                import json
-                mapping_str = ds.location.attrs['mapping']
-                if isinstance(mapping_str, str):
-                    # Convert JSON string back to dict
-                    # JSON keys are strings, so convert back to ints
-                    mapping_dict = json.loads(mapping_str)
-                    ds.location.attrs['mapping'] = {int(k): v for k, v in mapping_dict.items()}
+            # FIX: Decode bytes to strings for string-based coordinates
+            for coord_name in ('location', 'realization'):
+                if coord_name in ds.coords:
+                    coord_data = ds[coord_name]
+                    if coord_data.dtype.kind == 'S':  # Byte string
+                        # Decode to Unicode strings
+                        decoded_values = [val.decode('utf-8') if isinstance(val, bytes) else str(val) 
+                                        for val in coord_data.values]
+                        ds[coord_name] = (coord_data.dims, decoded_values)
             
             return xsnowDataset(ds)
         except Exception as e:
             logger.warning(f"Failed to read NetCDF file {source}: {e}")
-            return None            
+            return None
+    
+    # Continue with normal .pro/.smet file processing
     try:
         pro_files, smet_files = _resolve_filepaths(source)
     except (FileNotFoundError, TypeError) as e:
         logger.error(e)
+        return None
+
+    if not pro_files and not smet_files:
+        logger.warning("No data files found in the specified source.")
         return None
 
     if not pro_files and not smet_files:
@@ -457,6 +464,123 @@ def _create_dataset_from_pro_file(
     
     return None
 
+# --------------------------------------------------------------------------- #
+#          STATION NAME/LOCATION HELPER FUNCTIONS FOR read .PRO FILES         #
+# --------------------------------------------------------------------------- #
+
+def _sanitize_station_name(name: str) -> str:
+    """
+    Sanitize station name for use as xarray coordinate.
+    
+    Rules:
+    - Strip leading/trailing whitespace
+    - Replace whitespace sequences with single underscore
+    - Replace problematic characters with underscore
+    - Ensure non-empty
+    - Limit length to 64 characters
+    
+    Parameters:
+    -----------
+    name : str
+        Raw station name from .pro file
+    
+    Returns:
+    --------
+    str
+        Sanitized station name safe for xarray/NetCDF
+    
+    Examples:
+    ---------
+    >>> _sanitize_station_name("Station A-1")
+    'Station_A-1'
+    >>> _sanitize_station_name("  VIR1A  ")
+    'VIR1A'
+    >>> _sanitize_station_name("")
+    'UNNAMED_STATION'
+    """
+    import re
+    
+    # Strip whitespace
+    name = name.strip()
+    
+    # If empty, return generic name
+    if not name:
+        return "UNNAMED_STATION"
+    
+    # Replace sequences of whitespace with single underscore
+    name = re.sub(r'\s+', '_', name)
+    
+    # Replace problematic characters (keep alphanumeric, underscore, hyphen, period)
+    # This ensures NetCDF compatibility
+    name = re.sub(r'[^\w\-.]', '_', name)
+    
+    # Remove leading/trailing underscores
+    name = name.strip('_')
+    
+    # Limit length
+    MAX_NAME_LENGTH = 64
+    if len(name) > MAX_NAME_LENGTH:
+        name = name[:MAX_NAME_LENGTH]
+    
+    return name
+
+
+
+def _handle_duplicate_names(names: List[str]) -> List[str]:
+    """
+    Ensure all station names are unique by appending indices to duplicates.
+    
+    Parameters:
+    -----------
+    names : list[str]
+        Original station names (may contain duplicates)
+    
+    Returns:
+    --------
+    list[str]
+        Unique station names with indices appended to duplicates
+    
+    Examples:
+    ---------
+    >>> _handle_duplicate_names(['A', 'B', 'A', 'C', 'A'])
+    ['A_0', 'B', 'A_1', 'C', 'A_2']
+    >>> _handle_duplicate_names(['A', 'B', 'C'])
+    ['A', 'B', 'C']
+    """
+    if len(names) == len(set(names)):
+        return names
+    
+    # Find duplicates
+    from collections import Counter
+    name_counts = Counter(names)
+    duplicates = {name for name, count in name_counts.items() if count > 1}
+    
+    # Rename all occurrences of duplicate names
+    occurrence_counter = {}
+    unique_names = []
+    warned = set()
+    
+    for name in names:
+        if name in duplicates:
+            count = occurrence_counter.get(name, 0)
+            unique_name = f"{name}_{count}"
+            occurrence_counter[name] = count + 1
+            
+            # Warn once per duplicate name
+            if name not in warned:
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"Duplicate station name '{name}' found. "
+                    f"Renaming all occurrences with indices (e.g., {name}_0, {name}_1, ...)."
+                )
+                warned.add(name)
+        else:
+            unique_name = name
+        
+        unique_names.append(unique_name)
+    
+    return unique_names
+
 def _read_pro_raw(
     filepath: Union[str, Path],
     datetime_start: Optional[str] = None,
@@ -617,6 +741,18 @@ def _read_pro_raw(
     # After the loop, process the very last profile block in the file
     _parse_and_process_block(current_profile_lines)
 
+    # POST-PROCESSING: Sanitize station name
+    if 'station_name' not in metadata or not metadata['station_name']:
+        # Use filename as fallback
+        metadata['station_name'] = file_path.stem
+        if logger:
+            logger.warning(
+                f"No StationName found in {file_path.name}, using filename: {file_path.stem}"
+            )
+    
+    # Sanitize the station name
+    metadata['station_name'] = _sanitize_station_name(metadata['station_name'])
+
     return metadata, temp_profiles
 
 def _create_pro_dataset(
@@ -714,13 +850,14 @@ def _create_pro_dataset(
                 num_to_copy = min(len(final_values), max_layers)
                 data_vars[param][1][0, i, 0, 0, :num_to_copy] = np.array(final_values)[:num_to_copy]
 
-    station_name = metadata.get('stationName', 'unknown')
+    # USE STRING STATION NAME DIRECTLY (not 'stationName')
+    station_name = metadata.get('station_name', metadata.get('stationName', 'unknown'))
     
     slope_index = [0]
     ds = xr.Dataset(
         data_vars,
         coords={
-            'location': [station_name],
+            'location': [station_name],  # ✨ STRING COORDINATE!
             'time': timestamps,
             'slope': slope_index,
             'realization': [0],
@@ -740,6 +877,8 @@ def _create_pro_dataset(
         'history': f'{pd.Timestamp.now(tz="UTC").isoformat()}: Created by xsnow.',
         'crs': 'EPSG:4326'
     }
+    
+    # Add variable metadata
     for var_name_hashable in list(ds.variables):
         var_name = str(var_name_hashable)
         if reg_entry := registry.get(var_name):
@@ -973,6 +1112,21 @@ def read_smet(
     ds = xr.Dataset.from_dataframe(df)
     ds = ds.rename({'timestamp': 'time'})
     
+    station_name = header.get('station_name', header.get('station_id', file_path.stem))
+    station_name = _sanitize_station_name(station_name)  # ✨ Sanitize!
+    
+    # Check if dimensions already exist before expanding
+    dims_to_add = {}
+    if 'location' not in ds.dims and 'location' not in ds.coords:
+        dims_to_add['location'] = [station_name]  # STRING!
+    if 'slope' not in ds.dims and 'slope' not in ds.coords:
+        dims_to_add['slope'] = [0]
+    if 'realization' not in ds.dims and 'realization' not in ds.coords:
+        dims_to_add['realization'] = [0]
+    
+    if dims_to_add:
+        ds = ds.expand_dims(dims_to_add)
+    
     tz_val = header.get('tz')
     if tz_val is not None:
         try:
@@ -1091,21 +1245,35 @@ def _merge_and_finalize(
                 raise ValueError(
                     f"Conflicting timezones: '{final_timezone}' vs '{current_tz}'.")
 
-    # Group datasets by location
+    # Group datasets by location (location is already a string)
     grouped_by_location = {}
     for ds in all_datasets:
-        loc = ds.location.item()
+        loc = str(ds.location.values[0])  # Get string location name
         grouped_by_location.setdefault(loc, []).append(ds)
-        
+    
+    # HANDLE DUPLICATE STATION NAMES
+    station_names = list(grouped_by_location.keys())
+    unique_names = _handle_duplicate_names(station_names)
+    
+    # Rename locations if duplicates were found
+    if unique_names != station_names:
+        new_grouped = {}
+        for old_name, new_name in zip(station_names, unique_names):
+            new_grouped[new_name] = grouped_by_location[old_name]
+            # Update location coordinate in datasets
+            for ds in new_grouped[new_name]:
+                ds['location'] = [new_name]
+        grouped_by_location = new_grouped
+    
     merged_datasets = []
-    for dsets in grouped_by_location.values():    
+    for loc_name, dsets in grouped_by_location.items():    
         profile_dsets = [ds for ds in dsets if 'layer' in ds.dims]
         timeseries_dsets = [ds for ds in dsets if 'layer' not in ds.dims]
 
         combined_profiles_ds = None
         if profile_dsets:
             if len(profile_dsets) > 1:
-                profile_dsets.sort(key=lambda ds: ds.slope_inclination.item())
+                profile_dsets.sort(key=lambda ds: ds.slope_inclination.values[0])
                 combined_profiles_ds = xr.concat(profile_dsets, dim='slope', join='outer', coords='minimal')
                 combined_profiles_ds['slope'] = np.arange(combined_profiles_ds.sizes['slope'])
             else:
@@ -1113,41 +1281,44 @@ def _merge_and_finalize(
 
         all_to_merge = ([combined_profiles_ds] if combined_profiles_ds is not None else []) + timeseries_dsets
         
-        if not all_to_merge: continue
+        if not all_to_merge: 
+            continue
 
         if len(all_to_merge) > 1:
-             merged_loc_ds = xr.merge(all_to_merge, compat='override', join='outer')
-             merged_datasets.append(merged_loc_ds)
+            merged_loc_ds = xr.merge(all_to_merge, compat='override', join='outer')
+            merged_datasets.append(merged_loc_ds)
         else:
-             merged_datasets.append(all_to_merge[0])
+            merged_datasets.append(all_to_merge[0])
 
-    if not merged_datasets: return None
+    if not merged_datasets: 
+        return None
 
-    # Re-index location dimension
-    station_names = sorted([ds.location.item() for ds in merged_datasets])
-    name_to_int = {name: i for i, name in enumerate(station_names)}
-    int_to_name = dict(enumerate(station_names))
+    # Sort by station name for consistent ordering
+    merged_datasets.sort(key=lambda ds: str(ds.location.values[0]))
     
-    reindexed_datasets = []
-    for ds in merged_datasets:
-        station_name = ds.location.item()
-        ds['location'] = [name_to_int[station_name]]
-        reindexed_datasets.append(ds)
-
-    # Concatenate all locations
     final_xr_dataset = xr.concat(
-        sorted(reindexed_datasets, key=lambda ds: ds.location.item()),
-        dim='location', join='outer', coords='minimal', data_vars='all', compat='override'
+        merged_datasets,
+        dim='location', 
+        join='outer', 
+        coords='minimal', 
+        data_vars='all', 
+        compat='override'
     )
-    final_xr_dataset['location'].attrs['mapping'] = int_to_name
-
+    
+    # The location coordinate is already meaningful strings
+    
     # Apply final filters
-    if time: final_xr_dataset = time.apply(final_xr_dataset)
-    if location: final_xr_dataset = location.apply(final_xr_dataset)
-    if slope: final_xr_dataset = slope.apply(final_xr_dataset)
-    if realization: final_xr_dataset = realization.apply(final_xr_dataset)
+    if time: 
+        final_xr_dataset = time.apply(final_xr_dataset)
+    if location: 
+        final_xr_dataset = location.apply(final_xr_dataset)
+    if slope: 
+        final_xr_dataset = slope.apply(final_xr_dataset)
+    if realization: 
+        final_xr_dataset = realization.apply(final_xr_dataset)
 
     final_dataset = xsnowDataset(final_xr_dataset)
+    
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
 
 # --------------------------------------------------------------------------- #
@@ -1159,7 +1330,7 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
     """
     Updates an existing xsnowDataset with new data from a source.
 
-    This function is designed for workflows where you load a cached dataset
+    This method is designed for workflows where you load a cached dataset
     (e.g., from NetCDF) and want to append new data from recent .pro or
     .smet files. It finds the last timestamp in the current data and only
     reads new data from the source that is more recent.
@@ -1198,41 +1369,134 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
     if new_data_obj is None or new_data_obj.data.time.size == 0:
         return existing_ds
 
-    # Handle dimension mismatches by reindexing to common dimensions
-    # Get union of all dimension sizes
-    all_dims = set(existing_ds.data.dims) | set(new_data_obj.data.dims)
+    # ========================================================================
+    # FIX: Handle string-based location coordinates properly
+    # ========================================================================
     
-    # For each dimension (except time), ensure both datasets have the same size
-    for dim in all_dims:
-        if dim == 'time':
-            continue
+    # Get location names from both datasets
+    def _get_location_names(ds):
+        """Extract location names as strings, handling bytes if needed."""
+        return [loc.decode('utf-8') if isinstance(loc, bytes) else str(loc) 
+                for loc in ds.location.values]
+    
+    existing_locations = _get_location_names(existing_ds.data)
+    new_locations = _get_location_names(new_data_obj.data)
+    
+    # Find common and unique locations
+    common_locations = set(existing_locations) & set(new_locations)
+    only_in_existing = set(existing_locations) - set(new_locations)
+    only_in_new = set(new_locations) - set(existing_locations)
+    
+    logger.info(f"Update: {len(common_locations)} common, {len(only_in_new)} new locations")
+    
+    # Process based on whether we have common locations
+    if common_locations:
+        # Merge data for common locations along time dimension
+        merged_parts = []
+        
+        # 1. Handle locations that exist in both datasets
+        for loc_name in common_locations:
+            # Select data for this location from both datasets
+            existing_loc_data = existing_ds.data.sel(location=loc_name)
+            new_loc_data = new_data_obj.data.sel(location=loc_name)
             
-        existing_size = existing_ds.data.sizes.get(dim, 0)
-        new_size = new_data_obj.data.sizes.get(dim, 0)
-        
-        if existing_size != new_size and existing_size > 0 and new_size > 0:
-            logger.warning(
-                f"Dimension mismatch in '{dim}': existing={existing_size}, new={new_size}. "
-                f"Incremental update may differ from full reload. Consider full reload for consistency."
+            # Align dimensions (except time)
+            for dim in set(existing_loc_data.dims) | set(new_loc_data.dims):
+                if dim == 'time':
+                    continue
+                
+                existing_size = existing_loc_data.sizes.get(dim, 0)
+                new_size = new_loc_data.sizes.get(dim, 0)
+                
+                if existing_size != new_size and existing_size > 0 and new_size > 0:
+                    logger.warning(
+                        f"Location '{loc_name}' dimension mismatch in '{dim}': "
+                        f"existing={existing_size}, new={new_size}. Reindexing to match."
+                    )
+                    max_size = max(existing_size, new_size)
+                    
+                    if existing_size < max_size:
+                        existing_loc_data = existing_loc_data.reindex(
+                            {dim: range(max_size)}, fill_value=np.nan
+                        )
+                    if new_size < max_size:
+                        new_loc_data = new_loc_data.reindex(
+                            {dim: range(max_size)}, fill_value=np.nan
+                        )
+            
+            # Concatenate along time dimension for this location
+            merged_loc = xr.concat(
+                [existing_loc_data, new_loc_data],
+                dim='time',
+                coords='minimal',
+                compat='override'
             )
-        max_size = max(existing_size, new_size)
+            
+            # Ensure location is preserved as a coordinate
+            if 'location' not in merged_loc.dims:
+                merged_loc = merged_loc.expand_dims(location=[loc_name])
+            
+            merged_parts.append(merged_loc)
         
-        # Reindex to max size if needed
-        if existing_size < max_size and existing_size > 0:
-            existing_ds.data = existing_ds.data.reindex({dim: range(max_size)}, fill_value=np.nan)
-        if new_size < max_size and new_size > 0:
-            new_data_obj.data = new_data_obj.data.reindex({dim: range(max_size)}, fill_value=np.nan)
+        # 2. Add locations that only exist in existing dataset
+        for loc_name in only_in_existing:
+            loc_data = existing_ds.data.sel(location=loc_name)
+            if 'location' not in loc_data.dims:
+                loc_data = loc_data.expand_dims(location=[loc_name])
+            merged_parts.append(loc_data)
+        
+        # 3. Add locations that only exist in new dataset
+        for loc_name in only_in_new:
+            loc_data = new_data_obj.data.sel(location=loc_name)
+            if 'location' not in loc_data.dims:
+                loc_data = loc_data.expand_dims(location=[loc_name])
+            merged_parts.append(loc_data)
+        
+        # Combine all location data
+        combined = xr.concat(
+            merged_parts,
+            dim='location',
+            coords='minimal',
+            compat='override'
+        )
+        
+    else:
+        # No common locations - simple concatenation along location dimension
+        # Handle dimension mismatches
+        all_dims = set(existing_ds.data.dims) | set(new_data_obj.data.dims)
+        
+        for dim in all_dims:
+            if dim in ('time', 'location'):
+                continue
+                
+            existing_size = existing_ds.data.sizes.get(dim, 0)
+            new_size = new_data_obj.data.sizes.get(dim, 0)
+            
+            if existing_size != new_size and existing_size > 0 and new_size > 0:
+                logger.warning(
+                    f"Dimension mismatch in '{dim}': existing={existing_size}, new={new_size}. "
+                    f"Incremental update may differ from full reload."
+                )
+                max_size = max(existing_size, new_size)
+                
+                if existing_size < max_size:
+                    existing_ds.data = existing_ds.data.reindex(
+                        {dim: range(max_size)}, fill_value=np.nan
+                    )
+                if new_size < max_size:
+                    new_data_obj.data = new_data_obj.data.reindex(
+                        {dim: range(max_size)}, fill_value=np.nan
+                    )
+        
+        # Concatenate along location dimension (different stations)
+        combined = xr.concat(
+            [existing_ds.data, new_data_obj.data],
+            dim='location',
+            coords='minimal',
+            compat='override'
+        )
     
-    # Now concatenate along time dimension
-    combined = xr.concat(
-        [existing_ds.data, new_data_obj.data], 
-        dim="time",
-        coords='minimal',
-        compat='override',
-        join='outer'
-    )
-    
-    # Remove duplicate times
+    # Remove duplicate times (keep first occurrence)
     _, index = np.unique(combined['time'], return_index=True)
     combined = combined.isel(time=index)
 
@@ -1260,13 +1524,29 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     # Create a copy to avoid modifying the original
     ds_to_save = ds.to_xarray().copy()
     
-    # Convert the location mapping dict to JSON string for NetCDF compatibility
-    if 'location' in ds_to_save.coords and 'mapping' in ds_to_save.location.attrs:
-        import json
-        mapping_dict = ds_to_save.location.attrs['mapping']
-        # Convert dict to JSON string
-        ds_to_save.location.attrs['mapping'] = json.dumps(mapping_dict)
-    
+    # ENCODE STRING COORDINATES FOR NETCDF
+    for coord_name in ("location", "realization"):
+        if coord_name in ds_to_save.coords:
+            coord_data = ds_to_save[coord_name]
+            
+            # Check if coordinate is string-like
+            if coord_data.dtype.kind in ("U", "S", "O"):
+                # Determine max string length
+                if coord_data.dtype.kind == "U":
+                    max_len = max(len(str(x)) for x in coord_data.values)
+                elif coord_data.dtype.kind == "S":
+                    max_len = coord_data.dtype.itemsize
+                else:  # Object dtype
+                    max_len = max(len(str(x)) for x in coord_data.values)
+                
+                # Set encoding to fixed-length string
+                ds_to_save[coord_name].encoding = {
+                    "dtype": f"S{max_len}",
+                    "compression": "zlib",
+                    "complevel": 4
+                }
+                
+                logger.info(f"Encoding {coord_name} as S{max_len}")    
     ds_to_save.to_netcdf(path, **kwargs)
     logging.info(f"Dataset successfully saved to {path}")
 

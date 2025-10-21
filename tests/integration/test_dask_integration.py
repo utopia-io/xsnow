@@ -713,7 +713,8 @@ def test_chunk_processing_efficiency(tmp_path):
     assert ds.sizes['location'] == len(sizes)
     
     # Verify that all expected data is present
+    # Use isel for integer-based indexing, not sel
     for idx in range(len(sizes)):
-        station_data = ds.sel(location=idx)
-        # Each station should have its expected number of profiles
-        # (accounting for NaN padding from xarray operations)
+        station_data = ds.isel(location=idx)
+        # Each station should have data - verify non-empty
+        assert station_data.sizes['time'] > 0

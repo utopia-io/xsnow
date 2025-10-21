@@ -41,7 +41,7 @@ def test_read_pro_raw_basic_real_file(sample_pro_file):
     metadata, profiles = _read_pro_raw(sample_pro_file)
     
     # Metadata should be present
-    assert 'stationName' in metadata
+    assert 'station_name' in metadata  # Changed from 'stationName'
     assert 'latitude' in metadata
     assert 'longitude' in metadata
     assert 'altitude' in metadata
@@ -286,13 +286,17 @@ def test_parse_corrupted_file_invalid_timestamp(tmp_path, synthetic_pro):
 def test_parse_empty_file(tmp_path, synthetic_pro):
     """
     Edge case: Completely empty file.
+    
+    Note: Even empty files get a station_name (from filename fallback)
+    to ensure all datasets have proper identification.
     """
     empty = synthetic_pro.corrupted(tmp_path, "empty")
     
     metadata, profiles = _read_pro_raw(empty)
     
-    # Should return empty structures
-    assert metadata == {}
+    # Should have fallback station name from filename
+    assert 'station_name' in metadata
+    assert metadata['station_name'] == 'corrupted_empty'
     assert profiles == []
 
 
@@ -353,7 +357,7 @@ def test_create_pro_dataset_empty_profiles(tmp_path, synthetic_pro):
     Edge case: Creating dataset from empty profile list.
     """
     metadata = {
-        'stationName': 'TEST',
+        'station_name': 'TEST',  # Changed from 'stationName'
         'latitude': '46.5',
         'longitude': '10.5',
         'altitude': '2500'
@@ -515,6 +519,66 @@ def test_parsing_preserves_physical_validity(sample_pro_file, assert_physical_va
         xsnow_ds = xsnowDataset(ds)
         assert_physical_validity(xsnow_ds)
 
+@pytest.mark.synthetic
+class TestStationNameParsing:
+    """Test station name extraction from .pro files."""
+    
+    def test_extract_station_name_from_header(self, tmp_path):
+        """Test extracting StationName from [STATION_PARAMETERS]."""
+        content = """[STATION_PARAMETERS]
+StationName= TEST_STATION
+Latitude= 46.5
+Longitude= 10.5
+
+[DATA]
+0500,01.01.2025 12:00:00
+0501,2,0.1,0.2
+0502,2,100,200
+"""
+        filepath = tmp_path / "test.pro"
+        filepath.write_text(content)
+        
+        from xsnow.xsnow_io import _read_pro_raw
+        metadata, profiles = _read_pro_raw(filepath)
+        
+        assert metadata['station_name'] == 'TEST_STATION'
+    
+    def test_fallback_to_filename(self, tmp_path):
+        """Test fallback to filename when StationName missing."""
+        content = """[STATION_PARAMETERS]
+Latitude= 46.5
+
+[DATA]
+0500,01.01.2025 12:00:00
+0501,2,0.1,0.2
+0502,2,100,200
+"""
+        filepath = tmp_path / "my_station.pro"
+        filepath.write_text(content)
+        
+        from xsnow.xsnow_io import _read_pro_raw
+        metadata, profiles = _read_pro_raw(filepath)
+        
+        assert metadata['station_name'] == 'my_station'
+    
+    def test_sanitize_on_parse(self, tmp_path):
+        """Test that names are sanitized during parsing."""
+        content = """[STATION_PARAMETERS]
+StationName= Test Station@2024
+
+[DATA]
+0500,01.01.2025 12:00:00
+0501,2,0.1,0.2
+0502,2,100,200
+"""
+        filepath = tmp_path / "test.pro"
+        filepath.write_text(content)
+        
+        from xsnow.xsnow_io import _read_pro_raw
+        metadata, profiles = _read_pro_raw(filepath)
+        
+        assert '@' not in metadata['station_name']
+        assert ' ' not in metadata['station_name']
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

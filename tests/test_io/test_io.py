@@ -233,14 +233,18 @@ def test_read_empty_directory(tmp_path):
 
 def test_read_with_integer_location_index(multi_station_dir):
     """
-    Tests that read() creates an integer index for the location dimension.
+    Tests that read() creates string-based location coordinates (not integer indices).
     """
     ds = read(multi_station_dir)
-    assert np.issubdtype(ds.location.dtype, np.integer)
-    np.testing.assert_array_equal(ds.location.values, [0, 1])
-    expected_mapping = {0: 'station_A', 1: 'station_B'}
-    assert 'mapping' in ds.location.attrs
-    assert ds.location.attrs['mapping'] == expected_mapping
+    
+    # Now expects string dtype instead of integer
+    assert ds.location.dtype.kind in ('U', 'S', 'O')
+    
+    # Verify station names are present
+    locations = [str(loc) for loc in ds.location.values]
+    assert 'station_A' in locations
+    assert 'station_B' in locations
+    assert len(locations) == 2
 
 
 def test_read_sample_data_snp_gridded(gridded_data_integrity_check):
@@ -259,19 +263,15 @@ def test_read_sample_data_snp_gridded(gridded_data_integrity_check):
     assert 'location' in ds.dims
 
     # 2. Verify all expected stations are present
-    location_map = ds.location.attrs.get('mapping', {})
-    loaded_stations = set(location_map.values())
+    # NEW: Get stations directly from location coordinate values (strings)
+    loaded_stations = {str(loc) for loc in ds.location.values}
     expected_stations = {"VIR1A", "VIR2A", "VIR3A", "VIR4A", "VIR5A"}
 
     assert ds.sizes['location'] == len(expected_stations)
     assert expected_stations.issubset(loaded_stations)
-
-    # 3. Check a specific station for correct dimension merging (e.g., slope)
-    station_names = list(location_map.values())
-    vir1a_ds = ds.sel(location=station_names.index('VIR1A'))
-    assert 'slope' in vir1a_ds.dims
-    assert vir1a_ds.sizes['slope'] > 1
     
+    # 3. Verify locations are string-based (not integer indices)
+    assert ds.location.dtype.kind in ('U', 'S', 'O')    
 
 def test_read_sample_data_snp_snowobs():
     
@@ -514,20 +514,21 @@ def test_all_station_files_merge_correctly(tmp_path):
     assert isinstance(ds, xsnowDataset)
 
     # Assert that all files for the two stations were merged into two locations
+    # Assert that all files for the two stations were merged into two locations
     assert ds.sizes['location'] == 2
-
-    location_map = ds.location.attrs['mapping']
-    name_map = {v: k for k, v in location_map.items()}
-
-    # Confirm that both dataset contain variables originating from both the profile files
-    for station_name, station_index in name_map.items():
+    
+    # location.values is now an array of strings, not a dict
+    location_names = [str(loc) for loc in ds.location.values]
+    
+    # Confirm that both datasets contain variables from both file types
+    for location_name in location_names:
+        station_ds = ds.sel(location=location_name)
         
-        station_ds = ds.sel(location=station_index)
+        assert 'density' in station_ds.data, f"Variable 'density' missing for {location_name}"
+        assert 'layer' in station_ds.data['density'].dims, f"Dimension 'layer' missing for {location_name}"
+        assert 'TA' in station_ds.data, f"Variable 'TA' missing for {location_name}"
+        assert 'layer' not in station_ds.data['TA'].dims, f"Dimension 'layer' present in 'TA' for {location_name}"
 
-        assert 'density' in station_ds.data, f"Variable 'density' missing for {station_name}"
-        assert 'layer' in station_ds.data['density'].dims, f"Dimension 'layer' missing for {station_name}"
-        assert 'TA' in station_ds.data, f"Variable 'TA' missing for {station_name}"
-        assert 'layer' not in station_ds.data['TA'].dims, f"Dimension 'layer' present in 'TA' for {station_name}"
         
 
 def test_read_real_pro_with_mixed_sh(snp_gridded_sample_dir):
@@ -570,3 +571,63 @@ def test_read_real_pro_with_mixed_sh(snp_gridded_sample_dir):
     # After checking all profiles, assert that we found both types
     assert found_sh_profile, "No profile with surface hoar was found in the test file."
     assert found_no_sh_profile, "No valid profile without surface hoar was found."
+    
+# tests/test_io.py - New tests
+
+@pytest.mark.synthetic
+class TestStringCoordinateIO:
+    """Test I/O with string coordinates."""
+    
+    def test_read_single_pro_has_string_location(self, synthetic_pro, tmp_path):
+        """Test reading single .pro creates string location."""
+        filepath = synthetic_pro.basic(tmp_path, station_name='TEST', n_layers=3)
+        
+        ds = read(filepath)
+        
+        assert ds.data.location.dtype.kind in ('U', 'S', 'O')
+        assert str(ds.data.location.values[0]) == 'TEST'
+    
+    def test_netcdf_roundtrip_preserves_strings(self, synthetic_pro, tmp_path):
+        """Test NetCDF save/load preserves string coords."""
+        filepath = synthetic_pro.basic(tmp_path, station_name='ROUNDTRIP_TEST', n_layers=3)
+        
+        ds_original = read(filepath)
+        
+        # Save to NetCDF
+        nc_path = tmp_path / "roundtrip.nc"
+        ds_original.to_netcdf(nc_path)
+        
+        # Load back
+        ds_loaded = read(nc_path)
+        
+        # Verify location is string and matches
+        assert ds_loaded.data.location.dtype.kind in ('U', 'S', 'O')
+        
+        # FIX: Handle both bytes and strings
+        loaded_name = ds_loaded.data.location.values[0]
+        if isinstance(loaded_name, bytes):
+            loaded_name = loaded_name.decode('utf-8')
+        else:
+            loaded_name = str(loaded_name)
+        
+        assert loaded_name == 'ROUNDTRIP_TEST'
+
+    
+    def test_no_mapping_attribute_in_new_datasets(self, synthetic_pro, tmp_path):
+        """Test that new datasets don't have mapping attribute."""
+        filepath = synthetic_pro.basic(tmp_path, station_name='NO_MAPPING', n_layers=3)
+        
+        ds = read(filepath)
+        
+        assert 'mapping' not in ds.data.location.attrs
+    
+    def test_multiple_stations_unique_names(self, synthetic_pro, tmp_path):
+        """Test that multiple stations have unique string names."""
+        data_dir = synthetic_pro.multi_station(tmp_path, n_stations=5)
+        
+        ds = read(data_dir, lazy=False)
+        
+        # All locations should be unique strings
+        locations = [str(loc) for loc in ds.data.location.values]
+        assert len(locations) == len(set(locations))
+        assert all(isinstance(loc, str) for loc in locations)

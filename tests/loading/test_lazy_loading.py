@@ -523,13 +523,46 @@ def test_lazy_computes_z_coordinate(real_file_subset):
 @pytest.mark.real_data
 def test_lazy_preserves_location_mapping(real_file_subset):
     """
-    Regression: Lazy mode should preserve location mapping.
+    Regression: Lazy mode should preserve location as string coordinates.
+    
+    Updated: With string-based coordinates, locations are stored directly
+    as meaningful string values instead of integer indices with a mapping dict.
     """
     ds = read(real_file_subset, lazy=True, n_cpus_use=2)
     
-    assert 'mapping' in ds.location.attrs
-    assert isinstance(ds.location.attrs['mapping'], dict)
+    # Verify location is a string-based coordinate (not integers)
+    assert ds.location.dtype.kind in ('U', 'S', 'O')  # Unicode, bytes, or object strings
+    
+    # Verify we have location values
+    assert len(ds.location.values) > 0
+    
+    # Verify location values are meaningful strings (station names)
+    for loc in ds.location.values:
+        loc_str = str(loc)
+        assert loc_str  # Not empty
+        assert loc_str != 'nan'  # Not a placeholder
+    
+    # Verify the old mapping attribute is NOT present (intentional change)
+    assert 'mapping' not in ds.location.attrs
+    
+    # Example: Access station by name directly (the new way!)
+    first_station = str(ds.location.values[0])
+    assert first_station == 'VIR1A'  # Based on the error output
 
+
+@pytest.mark.synthetic
+class TestLazyLoadingWithStringCoords:
+    """Test lazy loading produces string coordinates."""
+    
+    def test_lazy_mode_creates_string_coords(self, synthetic_pro, tmp_path):
+        """Test lazy loading creates string location coordinates."""
+        from xsnow import read
+        
+        data_dir = synthetic_pro.multi_station(tmp_path, n_stations=15)
+        ds = read(data_dir, lazy=True)
+        
+        assert ds.data.location.dtype.kind in ('U', 'S', 'O')
+        assert 'mapping' not in ds.data.location.attrs
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

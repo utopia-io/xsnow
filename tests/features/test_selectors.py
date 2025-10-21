@@ -92,9 +92,8 @@ class TestLocationSelector:
         
         ds = read(data_dir, lazy=False)
         
-        # Get first station name
-        location_map = ds.location.attrs['mapping']
-        first_station = location_map[0]
+        # Get first station name directly from coordinate values
+        first_station = str(ds.data.location.values[0])
         
         # Select by name
         selector = LocationSelector(sel=first_station)
@@ -128,10 +127,13 @@ class TestLocationSelector:
         data_dir = synthetic_pro.multi_station(tmp_path, n_stations=5)
         
         ds = read(data_dir, lazy=False)
-        location_map = ds.location.attrs['mapping']
+        
+        # Get first and last station names directly from coordinate values
+        first_station = str(ds.data.location.values[0])
+        last_station = str(ds.data.location.values[4])
         
         # Select first and last stations
-        stations = [location_map[0], location_map[4]]
+        stations = [first_station, last_station]
         selector = LocationSelector(sel=stations)
         ds_filtered = selector.apply(ds.data)
         
@@ -162,7 +164,7 @@ class TestLocationSelector:
         
         # Read all to get location names
         ds_all = read(data_dir, lazy=False)
-        first_station = ds_all.location.attrs['mapping'][0]
+        first_station = str(ds_all.data.location.values[0])
         
         # Read with filter
         loc_filter = LocationSelector(sel=first_station)
@@ -292,7 +294,7 @@ class TestCombinedSelectors:
         # Get selection criteria
         times = pd.to_datetime(ds_all.data.time.values)
         mid_time = times[len(times) // 2]
-        first_station = ds_all.location.attrs['mapping'][0]
+        first_station = str(ds_all.data.location.values[0])
         
         # Apply multiple filters
         time_filter = TimeSelector(sel=slice(None, mid_time.isoformat()))

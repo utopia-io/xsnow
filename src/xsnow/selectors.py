@@ -145,54 +145,34 @@ class LocationSelector(Selector):
 
     def apply(self, ds: xr.Dataset) -> xr.Dataset:
         """
-        Applies the location selection.
+        Apply location selection - NOW MUCH SIMPLER!
         """
-        if self.lat_range is None and self.lon_range is None:
-            # FIX: Handle string location names by converting to integer indices
-            if isinstance(self.sel, str):
-                # Get mapping from location coordinate attributes
-                mapping = ds.location.attrs.get('mapping', {})
-                if mapping:
-                    # Reverse mapping: name -> index
-                    reverse_map = {v: k for k, v in mapping.items()}
-                    if self.sel in reverse_map:
-                        # Use integer index instead
-                        return ds.sel(location=reverse_map[self.sel])
-                    else:
-                        # Location name not found
-                        return ds.isel(location=slice(0, 0))
-            
-            elif isinstance(self.sel, (list, tuple)) and all(isinstance(s, str) for s in self.sel):
-                # Handle list of location names
-                mapping = ds.location.attrs.get('mapping', {})
-                if mapping:
-                    reverse_map = {v: k for k, v in mapping.items()}
-                    indices = [reverse_map[name] for name in self.sel if name in reverse_map]
-                    if indices:
-                        return ds.sel(location=indices)
-                    else:
-                        return ds.isel(location=slice(0, 0))
-            
-            # Default behavior for integer indices
-            return super().apply(ds)
-
-        # Geographic query logic (unchanged)
+        # Geographic bounding box selection
+        if self.lat_range is not None or self.lon_range is not None:
+            return self._apply_bbox(ds)
+        
+        # ✨ STRING SELECTION JUST WORKS!
+        # Base class handles str, list[str], int, slice automatically
+        return super().apply(ds)
+    
+    def _apply_bbox(self, ds: xr.Dataset) -> xr.Dataset:
+        """Apply geographic bounding box filter."""
         dataset_crs = ds.attrs.get('crs')
         if dataset_crs and dataset_crs != self.crs:
             warnings.warn(
                 f"Query CRS ('{self.crs}') does not match dataset CRS ('{dataset_crs}'). "
-                "Results may be inaccurate. Consider reprojecting your data."
+                "Results may be inaccurate."
             )
 
         mask = True
         if self.lat_range:
             if 'latitude' not in ds.coords:
-                raise ValueError("Dataset must have 'latitude' coordinates for geographic selection.")
+                raise ValueError("Dataset must have 'latitude' coordinates")
             mask &= (ds.latitude >= self.lat_range[0]) & (ds.latitude <= self.lat_range[1])
         
         if self.lon_range:
             if 'longitude' not in ds.coords:
-                raise ValueError("Dataset must have 'longitude' coordinates for geographic selection.")
+                raise ValueError("Dataset must have 'longitude' coordinates")
             mask &= (ds.longitude >= self.lon_range[0]) & (ds.longitude <= self.lon_range[1])
 
         return ds.sel(location=mask)

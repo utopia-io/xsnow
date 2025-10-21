@@ -186,7 +186,7 @@ def test_prescan_accuracy_real_data(real_gridded_dir):
         for slope_idx in range(ds.sizes.get('slope', 1)):
             for time_idx in range(ds.sizes['time']):
                 # Select one specific location, slope, and time
-                profile = ds.sel(location=loc_idx).isel(slope=slope_idx, time=time_idx)
+                profile = ds.isel(location=loc_idx, slope=slope_idx, time=time_idx)
                 
                 # Count non-NaN layers
                 non_nan_count = (~np.isnan(profile['height'].values)).sum()

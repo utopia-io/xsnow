@@ -172,15 +172,7 @@ def single_real_pro(sample_pro_file, tmp_path) -> Path:
 # ============================================================================
 
 class SyntheticProGenerator:
-    """
-    Factory for generating synthetic .pro files with specific characteristics.
-    
-    **Use ONLY for edge cases that cannot be tested with real data:**
-    - Corrupted/malformed files
-    - Extreme values
-    - Specific error conditions
-    - Negative test cases
-    """
+    """Factory for generating synthetic .pro files."""
     
     @staticmethod
     def basic(
@@ -210,16 +202,11 @@ Altitude= 2500
     
     @staticmethod
     def with_soil_layers(tmp_path: Path, n_snow: int = 3, n_soil: int = 2) -> Path:
-        """
-        Generate profile with soil layers at bottom.
-        
-        Soil layers identified by grain types 81 (rock) and 82 (mineral).
-        """
+        """Generate profile with soil layers at bottom."""
         total = n_snow + n_soil
         heights = ','.join(str(0.1 * i) for i in range(1, total + 1))
         densities = ','.join(str(100 + i * 50) for i in range(total))
         
-        # FIX: Generate correct number of soil grain types
         snow_types = ['200'] * n_snow
         soil_types = []
         for i in range(n_soil):
@@ -239,8 +226,6 @@ StationName= WITH_SOIL
         filepath.write_text(content)
         return filepath
     
-    # Add this method to the SyntheticProGenerator class in conftest.py
-
     @staticmethod
     def with_surface_hoar(
         tmp_path: Path, 
@@ -249,61 +234,35 @@ StationName= WITH_SOIL
         sh_grain_size: float = 0.5,
         sh_density: float = 100.0
     ) -> Path:
-        """
-        Generate profile with surface hoar data.
-        
-        The SH_at_surface parameter (0514) contains:
-        - Element 0: Flag (1.0 if SH present, 0.0 otherwise)
-        - Element 1: Grain size (mm)
-        - Element 2: Density (kg/m³)
-        
-        Args:
-            tmp_path: Directory to write file to
-            station_name: Station name
-            has_sh: Whether surface hoar is present
-            sh_grain_size: Surface hoar grain size in mm
-            sh_density: Surface hoar density in kg/m³
-        """
-        # Base snow layers
+        """Generate profile with surface hoar data."""
         n_layers = 3
         heights = ','.join(str(0.1 * i) for i in range(1, n_layers + 1))
         densities = ','.join(str(100 * i) for i in range(1, n_layers + 1))
         grain_types = ','.join(['200'] * n_layers)
         
-        # Surface hoar data: flag, grain_size, density
         sh_flag = 1.0 if has_sh else 0.0
         sh_data = f"{sh_flag},{sh_grain_size},{sh_density}"
         
         content = f"""[STATION_PARAMETERS]
-    StationName= {station_name}
-    Latitude= 46.5
-    Longitude= 10.5
-    Altitude= 2500
+StationName= {station_name}
+Latitude= 46.5
+Longitude= 10.5
+Altitude= 2500
 
-    [DATA]
-    0500,01.01.2025 12:00:00
-    0501,{n_layers},{heights}
-    0502,{n_layers},{densities}
-    0513,{n_layers},{grain_types}
-    0514,3,{sh_data}
-    """
+[DATA]
+0500,01.01.2025 12:00:00
+0501,{n_layers},{heights}
+0502,{n_layers},{densities}
+0513,{n_layers},{grain_types}
+0514,3,{sh_data}
+"""
         filepath = tmp_path / f"{station_name}.pro"
         filepath.write_text(content)
         return filepath
     
     @staticmethod
     def corrupted(tmp_path: Path, corruption_type: str = "malformed_data") -> Path:
-        """
-        Generate intentionally corrupted files for error handling tests.
-        
-        Args:
-            corruption_type: One of:
-                - "malformed_data": Invalid data format
-                - "empty": Completely empty file
-                - "no_data_section": Missing [DATA] section
-                - "invalid_timestamp": Malformed timestamp
-                - "missing_headers": Incomplete station parameters
-        """
+        """Generate intentionally corrupted files."""
         if corruption_type == "malformed_data":
             content = """[STATION_PARAMETERS]
 StationName= CORRUPTED
@@ -329,6 +288,7 @@ StationName= BAD_TIME
 """
         elif corruption_type == "missing_headers":
             content = """[STATION_PARAMETERS]
+StationName= MISSING_HEADERS
 [DATA]
 0500,01.01.2025 12:00:00
 0501,2,0.1,0.2
@@ -336,8 +296,7 @@ StationName= BAD_TIME
         else:
             raise ValueError(f"Unknown corruption type: {corruption_type}")
         
-        # Ensure tmp_path is a directory, not a file path
-        if tmp_path.suffix:  # Has file extension
+        if tmp_path.suffix:
             tmp_path = tmp_path.parent
         
         filepath = tmp_path / f"corrupted_{corruption_type}.pro"
@@ -346,10 +305,7 @@ StationName= BAD_TIME
     
     @staticmethod
     def empty_profiles(tmp_path: Path, n_profiles: int = 3) -> Path:
-        """
-        Generate file with profiles that have no snow (height=0).
-        Tests handling of profiles with snow-free ground.
-        """
+        """Generate file with profiles that have no snow."""
         profiles = []
         for i in range(n_profiles):
             date = pd.Timestamp('2025-01-01') + pd.Timedelta(days=i)
@@ -369,10 +325,7 @@ StationName= EMPTY_PROFILES
     
     @staticmethod
     def varying_layers(tmp_path: Path, layer_counts: list = None) -> Path:
-        """
-        Generate file with profiles having different layer counts.
-        Tests padding and max_layers detection.
-        """
+        """Generate file with profiles having different layer counts."""
         if layer_counts is None:
             layer_counts = [2, 5, 3, 8, 4]
         
@@ -401,11 +354,10 @@ StationName= VARYING_LAYERS
         n_stations: int = 3,
         n_profiles_each: int = 2
     ) -> Path:
-        """
-        Generate multiple station files in a directory.
-        Tests multi-file processing and merging.
-        """
+        """Generate multiple station files in a directory."""
         for i in range(n_stations):
+            station_name = f"STATION_{i:03d}"  # NEW: Consistent naming
+            
             profiles = []
             for j in range(n_profiles_each):
                 date = pd.Timestamp('2025-01-01') + pd.Timedelta(days=j)
@@ -414,7 +366,7 @@ StationName= VARYING_LAYERS
 0502,2,{100 + i * 10},{200 + i * 10}""")
             
             content = f"""[STATION_PARAMETERS]
-StationName= STATION_{i}
+StationName= {station_name}
 Latitude= {46.0 + i * 0.1}
 Longitude= {10.0 + i * 0.1}
 Altitude= {2000 + i * 100}
@@ -422,16 +374,13 @@ Altitude= {2000 + i * 100}
 [DATA]
 {chr(10).join(profiles)}
 """
-            (tmp_path / f"station_{i}.pro").write_text(content)
+            (tmp_path / f"{station_name}.pro").write_text(content)
         
         return tmp_path
     
     @staticmethod
     def extreme_layers(tmp_path: Path, n_layers: int = 500) -> Path:
-        """
-        Generate profile with extreme layer count for stress testing.
-        Tests memory efficiency and performance limits.
-        """
+        """Generate profile with extreme layer count."""
         heights = ','.join(str(0.01 * i) for i in range(1, n_layers + 1))
         densities = ','.join(str(100 + i) for i in range(n_layers))
         
@@ -449,10 +398,7 @@ StationName= EXTREME_LAYERS
     
     @staticmethod
     def multi_slope(tmp_path: Path, station_name: str, slopes: list = None) -> Path:
-        """
-        Generate multiple .pro files for same station with different slopes.
-        Tests slope dimension handling and merging.
-        """
+        """Generate multiple .pro files for same station with different slopes."""
         if slopes is None:
             slopes = [0, 15, 30, 45]
         
@@ -474,7 +420,6 @@ SlopeAzi= 180
             (tmp_path / filename).write_text(content)
         
         return tmp_path
-
 
 class SyntheticSmetGenerator:
     """Factory for generating synthetic SMET files."""
@@ -548,7 +493,7 @@ def snow_profile_xr_dataset():
                        np.array([[[100, 200, 300], [110, 210, 310]]]))
         },
         coords={
-            'location': [0],
+            'location': ['TestStation'],  # ✨ CHANGED: String instead of [0]
             'time': pd.date_range('2025-01-01', periods=2, freq='D'),
             'layer': [0, 1, 2],
             'latitude': ('location', [46.5]),
@@ -556,7 +501,6 @@ def snow_profile_xr_dataset():
             'altitude': ('location', [2500.0])
         }
     )
-    ds.location.attrs['mapping'] = {0: 'TestStation'}
     return ds
 
 

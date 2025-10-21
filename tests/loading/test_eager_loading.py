@@ -78,8 +78,8 @@ class TestEagerWithFilters:
         ds_all = read(data_dir, lazy=False)
         
         # Get location mapping to select specific station
-        location_names = list(ds_all.location.attrs['mapping'].values())
-        target_station = location_names[0]
+        location_names = list(ds_all.location.values)
+        target_station = str(location_names[0])
         
         location_selector = LocationSelector(sel=target_station)
         ds_filtered = read(data_dir, location=location_selector, lazy=False)
@@ -267,3 +267,18 @@ class TestEagerVaryingLayerCounts:
         
         assert ds is not None
         assert ds.sizes['layer'] == 10  # max across all files
+        
+
+@pytest.mark.synthetic
+class TestEagerLoadingWithStringCoords:
+    """Test eager loading produces string coordinates."""
+    
+    def test_eager_mode_creates_string_coords(self, synthetic_pro, tmp_path):
+        """Test eager loading creates string location coordinates."""
+        from xsnow import read
+        
+        data_dir = synthetic_pro.multi_station(tmp_path, n_stations=5)
+        ds = read(data_dir, lazy=False)
+        
+        assert ds.data.location.dtype.kind in ('U', 'S', 'O')
+        assert 'mapping' not in ds.data.location.attrs

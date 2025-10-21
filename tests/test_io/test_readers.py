@@ -185,30 +185,30 @@ def test_read_with_time_selector(real_file_subset):
 
 
 @pytest.mark.real_data
-def test_read_with_location_selector_by_name(gridded_pros_dir):
+def test_read_with_location_selector_by_name(real_file_subset):
     """
-    Test reading with LocationSelector by station name.
+    Test location filtering by station name using LocationSelector.
+    
+    Updated: Now works directly with string-based location coordinates.
     """
-    # First get all locations
-    ds_all = read(gridded_pros_dir)
+    # Read all data
+    ds_all = read(real_file_subset)
     
-    if ds_all.sizes['location'] < 1:
-        pytest.skip("No locations available")
-    
-    # Get first location name
-    location_map = ds_all.location.attrs.get('mapping', {})
-    if not location_map:
-        pytest.skip("No location mapping available")
-    
-    first_loc_name = location_map[0]
+    # Get first location name directly from coordinate
+    first_location = str(ds_all.location.values[0])
     
     # Read with location filter
-    loc_sel = LocationSelector(sel=first_loc_name)
-    ds_filtered = read(gridded_pros_dir, location=loc_sel)
+    from xsnow.selectors import LocationSelector
+    loc_filter = LocationSelector(sel=first_location)
+    ds_filtered = read(real_file_subset, location=loc_filter)
     
-    assert ds_filtered is not None
-    # Location dimension should be squeezed
-    assert 'location' not in ds_filtered.dims or ds_filtered.sizes['location'] == 1
+    # Should have only the selected location
+    if 'location' in ds_filtered.sizes:
+        assert ds_filtered.sizes['location'] == 1
+        assert str(ds_filtered.location.values[0]) == first_location
+    else:
+        # Location dimension was squeezed
+        assert str(ds_filtered.location.values) == first_location
 
 
 @pytest.mark.real_data
@@ -519,14 +519,33 @@ def test_read_returns_xsnowdataset_instance(sample_pro_file):
 @pytest.mark.real_data
 def test_read_preserves_location_mapping(real_file_subset):
     """
-    Regression: Location mapping should be preserved.
+    Test: Location coordinate should be meaningful string values.
+    
+    Updated from legacy behavior: Previously used integer indices with a 
+    'mapping' attribute. Now uses string station names directly as coordinate
+    values, which is more intuitive and follows xarray best practices.
     """
     ds = read(real_file_subset)
     
-    assert 'mapping' in ds.location.attrs
-    mapping = ds.location.attrs['mapping']
-    assert isinstance(mapping, dict)
-    assert len(mapping) == ds.sizes['location']
+    # Verify location is a string-based coordinate
+    assert 'location' in ds.coords
+    
+    # Location values should be strings (station names)
+    location_values = ds.location.values
+    assert location_values.dtype.kind in ('U', 'S', 'O')  # Unicode, bytes, or object (strings)
+    
+    # Should have at least one location
+    assert len(location_values) > 0
+    
+    # Each location should be a non-empty string
+    for loc in location_values:
+        loc_str = str(loc)
+        assert loc_str  # Not empty
+        assert loc_str != 'nan'  # Not a placeholder
+    
+    # The old 'mapping' attribute is no longer needed since
+    # location values are already meaningful strings
+    # (this is the intentional new behavior)
 
 
 @pytest.mark.real_data
@@ -539,6 +558,41 @@ def test_read_maintains_cf_compliance(real_file_subset):
     assert 'Conventions' in ds.data.attrs
     assert 'CF' in ds.data.attrs['Conventions']
 
-
+@pytest.mark.synthetic
+class TestStringCoordinateReading:
+    """Test that readers create string location coordinates."""
+    
+    def test_single_file_has_string_location(self, synthetic_pro, tmp_path):
+        """Test reading single .pro creates string location."""
+        from xsnow import read
+        
+        filepath = synthetic_pro.basic(tmp_path, station_name='VIR1A', n_layers=3)
+        ds = read(filepath)
+        
+        # Location should be string type
+        assert ds.data.location.dtype.kind in ('U', 'S', 'O')
+        assert ds.data.location.values[0] == 'VIR1A'
+    
+    def test_multiple_files_have_string_locations(self, synthetic_pro, tmp_path):
+        """Test multiple files create string location coords."""
+        from xsnow import read
+        
+        data_dir = synthetic_pro.multi_station(tmp_path, n_stations=3)
+        ds = read(data_dir, lazy=False)
+        
+        # All locations should be strings
+        assert ds.data.location.dtype.kind in ('U', 'S', 'O')
+        assert all(isinstance(str(loc), str) for loc in ds.data.location.values)
+    
+    def test_no_mapping_attribute(self, synthetic_pro, tmp_path):
+        """Test that mapping attribute is not present."""
+        from xsnow import read
+        
+        filepath = synthetic_pro.basic(tmp_path, station_name='TEST', n_layers=3)
+        ds = read(filepath)
+        
+        # Should NOT have mapping attribute
+        assert 'mapping' not in ds.data.location.attrs
+        
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

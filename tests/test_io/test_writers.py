@@ -81,29 +81,38 @@ def test_to_netcdf_roundtrip(real_file_subset, tmp_path, compare_datasets):
     # Should be identical (within floating point tolerance)
     compare_datasets(ds_original, ds_loaded, rtol=1e-6)
 
+def _normalize_location_string(loc):
+    """Helper to normalize location values that may be bytes or strings."""
+    if isinstance(loc, bytes):
+        return loc.decode('utf-8')
+    return str(loc)
+
 
 @pytest.mark.real_data
 def test_to_netcdf_location_mapping(real_file_subset, tmp_path):
     """
-    Test that location mapping is correctly saved and restored.
+    Test that location coordinate values are correctly saved and restored.
     
-    Location mapping converts integer indices to station names.
+    Updated: Now tests string-based coordinate preservation instead of
+    the legacy integer-index + mapping approach.
     """
     ds_original = read(real_file_subset)
     
-    # Get original mapping
-    original_mapping = ds_original.location.attrs.get('mapping')
-    assert original_mapping is not None
+    # Get original location values (strings)
+    original_locations = [_normalize_location_string(loc) for loc in ds_original.location.values]
+    assert len(original_locations) > 0
     
     # Save and reload
-    nc_file = tmp_path / "with_mapping.nc"
+    nc_file = tmp_path / "with_locations.nc"
     ds_original.to_netcdf(nc_file)
     ds_loaded = read(nc_file)
     
-    # Mapping should be preserved
-    loaded_mapping = ds_loaded.location.attrs.get('mapping')
-    assert loaded_mapping == original_mapping
-
+    # Location values should be preserved
+    loaded_locations = [_normalize_location_string(loc) for loc in ds_loaded.location.values]
+    
+    # Should have same locations
+    assert len(loaded_locations) == len(original_locations)
+    assert loaded_locations == original_locations
 
 @pytest.mark.synthetic
 @pytest.mark.edge_case
@@ -222,7 +231,8 @@ def test_to_smet_basic(real_file_subset, tmp_path):
     
     # Select single location
     if ds.sizes['location'] > 1:
-        ds = ds.sel(location=0)
+        first_location = str(ds.data.location.values[0])
+        ds = ds.sel(location=first_location)
     
     output_file = tmp_path / "output.smet"
     ds.to_smet(output_file)
@@ -275,7 +285,8 @@ def test_to_smet_only_exports_time_series(real_file_subset, tmp_path):
     
     # Select single location
     if ds.sizes['location'] > 1:
-        ds = ds.sel(location=0)
+        first_location = str(ds.data.location.values[0])
+        ds = ds.sel(location=first_location)
     
     output_file = tmp_path / "timeseries.smet"
     ds.to_smet(output_file)
@@ -327,7 +338,9 @@ def test_convert_netcdf_to_pro(real_file_subset, tmp_path):
     
     # Convert back to .pro (single location)
     if ds_from_nc.sizes['location'] > 1:
-        ds_from_nc = ds_from_nc.sel(location=0)
+        first_location = str(ds_from_nc.data.location.values[0])
+        ds_from_nc = ds_from_nc.sel(location=first_location)
+
     
     pro_file = tmp_path / "from_nc.pro"
     ds_from_nc.to_pro(pro_file)
@@ -448,7 +461,8 @@ def test_netcdf_vs_pro_write_speed(real_file_subset, tmp_path, timer):
     
     # .pro write (single location)
     if ds.sizes['location'] > 1:
-        ds_single = ds.sel(location=0)
+        first_location = str(ds.data.location.values[0])
+        ds_single = ds.sel(location=first_location)
     else:
         ds_single = ds
     
@@ -518,6 +532,61 @@ def test_to_crocus_placeholder():
     """Placeholder for future to_crocus implementation."""
     pass
 
+@pytest.mark.synthetic
+class TestNetCDFStringEncoding:
+    """Test NetCDF encoding of string coordinates."""
+    
+    def test_save_and_load_string_coords(self, synthetic_pro, tmp_path):
+        """Test round-trip save/load preserves string coords."""
+        from xsnow import read
+        
+        filepath = synthetic_pro.basic(tmp_path, station_name='TEST_STATION', n_layers=3)
+        ds = read(filepath)
+        
+        # Save to NetCDF
+        nc_path = tmp_path / "test.nc"
+        ds.to_netcdf(nc_path)
+        
+        # Load back
+        ds_loaded = read(nc_path)
+        
+        # Verify location dtype is string-like
+        assert ds_loaded.data.location.dtype.kind in ('U', 'S', 'O')
+        
+        # Get location value and normalize (may be bytes from NetCDF)
+        loaded_str = _normalize_location_string(ds_loaded.data.location.values[0])
+        
+        assert loaded_str == 'TEST_STATION'
+    
+    def test_long_station_names(self, tmp_path):
+        """Test that long station names are preserved."""
+        from xsnow import read
+        
+        long_name = "Very_Long_Station_Name_With_Many_Characters"
+        
+        content = f"""[STATION_PARAMETERS]
+StationName= {long_name}
+
+[DATA]
+0500,01.01.2025 12:00:00
+0501,2,0.1,0.2
+0502,2,100,200
+"""
+        filepath = tmp_path / "test.pro"
+        filepath.write_text(content)
+        
+        ds = read(filepath)
+        nc_path = tmp_path / "test.nc"
+        ds.to_netcdf(nc_path)
+        
+        ds_loaded = read(nc_path)
+        
+        # Get locations and normalize
+        original = _normalize_location_string(ds.data.location.values[0])
+        loaded = _normalize_location_string(ds_loaded.data.location.values[0])
+        
+        # Should be preserved (up to 64 chars)
+        assert original[:64] == loaded[:64]
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

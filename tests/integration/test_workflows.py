@@ -347,3 +347,66 @@ class TestErrorRecoveryWorkflows:
         nc_file = tmp_path / "minimal.nc"
         ds.to_netcdf(nc_file)
         assert nc_file.exists()
+        
+def _normalize_location_string(loc):
+    """Helper to normalize location values that may be bytes or strings."""
+    if isinstance(loc, bytes):
+        return loc.decode('utf-8')
+    return str(loc)
+
+@pytest.mark.synthetic
+class TestStringCoordinateWorkflow:
+    """End-to-end workflow with string coordinates."""
+    
+    def test_complete_workflow(self, synthetic_pro, tmp_path):
+        """Test parse -> select -> save -> load workflow."""
+        from xsnow import read
+        import xarray as xr
+        
+        # 1. Create and read data
+        data_dir = synthetic_pro.multi_station(tmp_path, n_stations=3, n_profiles_each=5)
+        ds = read(data_dir, lazy=False)
+        
+        # 2. Verify string coords
+        assert ds.data.location.dtype.kind in ('U', 'S', 'O')
+        
+        # 3. Select by name
+        first_station = _normalize_location_string(ds.data.location.values[0])
+        ds_filtered = ds.sel(location=first_station)
+        filtered_loc = _normalize_location_string(ds_filtered.location.values)
+        assert filtered_loc == first_station
+        
+        # 4. Save and reload
+        nc_path = tmp_path / "workflow.nc"
+        ds.to_netcdf(nc_path)
+        ds_loaded = read(nc_path)
+        
+        # 5. Verify preserved - normalize both for comparison
+        original_locs = [_normalize_location_string(loc) for loc in ds.data.location.values]
+        loaded_locs = [_normalize_location_string(loc) for loc in ds_loaded.data.location.values]
+        assert original_locs == loaded_locs
+    
+    def test_concat_different_batches(self, synthetic_pro, tmp_path):
+        """Test concatenating datasets from different batches."""
+        from xsnow import read
+        import xarray as xr
+        
+        # Create two batches
+        dir1 = tmp_path / "batch1"
+        dir2 = tmp_path / "batch2"
+        dir1.mkdir()
+        dir2.mkdir()
+        
+        synthetic_pro.basic(dir1, station_name='STATION_A', n_layers=3)
+        synthetic_pro.basic(dir2, station_name='STATION_B', n_layers=3)
+        
+        ds1 = read(dir1)
+        ds2 = read(dir2)
+        
+        # Concatenate - should work seamlessly
+        combined = xr.concat([ds1.data, ds2.data], dim='location')
+        
+        assert combined.sizes['location'] == 2
+        locations = [_normalize_location_string(loc) for loc in combined.location.values]
+        assert 'STATION_A' in locations
+        assert 'STATION_B' in locations
