@@ -1,15 +1,31 @@
 format: jb-book
 root: index
-chapters:
-  - file: tutorials/01-installation
-  - file: api/modules
-    title: API reference
-    sections:
-      - file: api/xsnow.xsnow_io
-      - file: api/xsnow.dataset
-      - file: api/xsnow.accessors
-      - file: api/xsnow.selectors
-      - file: api/xsnow.registry
-      - file: api/xsnow.plugin
-      - file: api/xsnow.extensions
-      - file: api/xsnow.utils
+parts:
+  - caption: "Overview"
+    chapters:
+      # - file: index
+      - file: tutorials/01-installation
+
+  - caption: "Tutorials: xsnow"
+    chapters:
+      - file: tutorials/04-01-reading_writing
+      - file: tutorials/04-02-subsetting_filtering
+
+  - caption: "API reference"
+    chapters:
+      - file: api/index
+        sections:
+          - file: api/_generated/xsnow.xsnow_io
+          - file: api/_generated/xsnow.core
+          - file: api/_generated/xsnow.sample_data
+          - file: api/_generated/xsnow.accessors
+          - file: api/_generated/xsnow.selectors
+          - file: api/_generated/xsnow.registry
+          - file: api/_generated/xsnow.plugin
+          - file: api/_generated/xsnow.utils
+          - file: api/_generated/xsnow.graincode_converter
+      
+      - file: api/extensions/index
+        sections:
+          - file: api/_generated/xsnow.extensions.classification
+

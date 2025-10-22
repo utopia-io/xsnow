@@ -637,8 +637,8 @@ def _read_pro_raw(
     
     in_header, in_data = False, False
 
-    start_ts = pd.to_datetime(datetime_start) if datetime_start else None
-    end_ts = pd.to_datetime(datetime_end) if datetime_end else None
+    start_ts = pd.to_datetime(datetime_start, format='mixed') if datetime_start else None
+    end_ts = pd.to_datetime(datetime_end, format='mixed') if datetime_end else None
 
     # --- HELPER FUNCTIONS ---
     def _process_and_append_profile(profile_data: Dict):
@@ -1104,9 +1104,9 @@ def read_smet(
     df = df.set_index('timestamp')
 
     if datetime_start:
-        df = df[df.index >= pd.to_datetime(datetime_start)]
+        df = df[df.index >= pd.to_datetime(datetime_start, format='mixed')]
     if datetime_end:
-        df = df[df.index <= pd.to_datetime(datetime_end)]
+        df = df[df.index <= pd.to_datetime(datetime_end, format='mixed')]
         
     if df.empty:
         return None
