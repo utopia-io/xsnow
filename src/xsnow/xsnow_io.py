@@ -133,9 +133,11 @@ def read(
     # --- Step 2: Resolve file paths ---
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
-            ds = xr.open_dataset(source)
-            
-            # FIX: Decode bytes to strings for string-based coordinates
+            # Using context managers to ensure file is properly closed
+            with xr.open_dataset(source) as ds:
+                ds = ds.load()
+
+            # Decode bytes to strings for string-based coordinates
             for coord_name in ('location', 'realization'):
                 if coord_name in ds.coords:
                     coord_data = ds[coord_name]
