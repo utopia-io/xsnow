@@ -867,8 +867,16 @@ def _create_pro_dataset(
             'latitude': ('location', [float(metadata.get('latitude', np.nan))]),
             'longitude': ('location', [float(metadata.get('longitude', np.nan))]),
             'altitude': ('location', [float(metadata.get('altitude', np.nan))]),
-            'slope_inclination': ('slope', [float(metadata.get('slopeAngle', np.nan))]),
-            'slope_azimuth': ('slope', [float(metadata.get('slopeAzi', np.nan))])
+            'inclination': ('slope', [
+                int(round(float(metadata.get('slopeAngle', np.nan))))
+                if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
+                else np.nan
+            ]),
+            'azimuth': ('slope', [
+                int(round(float(metadata.get('slopeAzi', np.nan))))
+                if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
+                else np.nan
+            ])
         }
     )
 
@@ -1158,10 +1166,10 @@ def read_smet(
             'altitude': ('location', [float(header.get('altitude', np.nan))]),
         })
     
-    if 'slope_inclination' not in ds.coords:
+    if 'inclination' not in ds.coords:
         ds = ds.assign_coords({
-            'slope_inclination': ('slope', [np.nan]),
-            'slope_azimuth': ('slope', [np.nan])
+            'inclination': ('slope', [np.nan]),
+            'azimuth': ('slope', [np.nan])
         })
 
     return ds
@@ -1275,7 +1283,7 @@ def _merge_and_finalize(
         combined_profiles_ds = None
         if profile_dsets:
             if len(profile_dsets) > 1:
-                profile_dsets.sort(key=lambda ds: ds.slope_inclination.values[0])
+                profile_dsets.sort(key=lambda ds: ds.inclination.values[0])
                 combined_profiles_ds = xr.concat(profile_dsets, dim='slope', join='outer', coords='minimal')
                 combined_profiles_ds['slope'] = np.arange(combined_profiles_ds.sizes['slope'])
             else:
@@ -1664,18 +1672,18 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
         f.write(f"Altitude= {single_loc_ds.altitude.item():.0f}\n")
         
         # Get slope angle value
-        if 'slope_inclination' in single_loc_ds.coords:
-            slope_val = float(single_loc_ds.slope_inclination.values.item() if single_loc_ds.slope_inclination.size == 1 else 0.0)
-        else:
-            slope_val = 0.0
-        f.write(f"SlopeAngle= {slope_val:.1f}\n")
+        try:
+            slope_val = int(round(single_loc_ds.inclination.values.item()))
+        except (AttributeError, ValueError):
+            slope_val = -999
+        f.write(f"SlopeAngle= {slope_val:.0f}\n")
         
-        # Handle slope_azimuth
-        if 'slope_azimuth' in single_loc_ds.coords:
-            azimuth = float(single_loc_ds.slope_azimuth.values.item() if single_loc_ds.slope_azimuth.size == 1 else 0.0)
-        else:
-            azimuth = 0.0
-        f.write(f"SlopeAzi= {azimuth:.1f}\n")
+        # Handle slope azimuth
+        try:
+            azimuth = int(round(single_loc_ds.azimuth.values.item()))
+        except (AttributeError, ValueError):
+            azimuth = -999
+        f.write(f"SlopeAzi= {azimuth:.0f}\n")
         
         f.write("[DATA]\n")
 

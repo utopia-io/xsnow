@@ -440,7 +440,7 @@ def test_read_with_slope_selector(multi_slope_directory):
     assert 'slope' in ds_single.coords
     assert int(ds_single.slope) == 0
     # Verify we got the correct slope by checking the associated inclination coordinate
-    assert np.isclose(ds_single.slope_inclination.item(), 15.0)
+    assert np.isclose(ds_single.inclination.item(), 15.0)
 
     # Test selecting a slice of slopes
     slope_selector_slice = SlopeSelector(sel=slice(1)) # Selects index 0
@@ -448,7 +448,7 @@ def test_read_with_slope_selector(multi_slope_directory):
     
     assert ds_slice is not None
     assert ds_slice.sizes['slope'] == 1
-    assert np.isclose(ds_slice.slope_inclination.item(), 15.0)
+    assert np.isclose(ds_slice.inclination.item(), 15.0)
     
     # Test selecting an out-of-bounds index, which should be empty
     slope_selector_empty = SlopeSelector(sel=99)

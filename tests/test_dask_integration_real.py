@@ -356,11 +356,11 @@ def test_slope_dimension_real_data(real_gridded_dir):
     
     print(f"\nSlope dimension:")
     print(f"  Number of slopes: {ds.sizes.get('slope', 'N/A')}")
-    print(f"  Slope inclinations: {ds.slope_inclination.values}")
+    print(f"  Slope inclinations: {ds.inclination.values}")
     
     # Verify slope inclinations are reasonable (0-90 degrees)
-    if 'slope_inclination' in ds.coords:
-        slopes = ds.slope_inclination.values
+    if 'inclination' in ds.coords:
+        slopes = ds.inclination.values
         valid_slopes = slopes[~np.isnan(slopes)]
         if len(valid_slopes) > 0:
             assert np.all((valid_slopes >= 0) & (valid_slopes <= 90))
