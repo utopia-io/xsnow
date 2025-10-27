@@ -123,7 +123,7 @@ def read(
         >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
     """
 # --- Step 1: Setup Logger and CPU count ---
-    if logger is None:
+    if logger is None or logger is True:
         logger = logging.getLogger(__name__)
 
     if n_cpus_use is None:
@@ -171,16 +171,16 @@ def read(
     if lazy is None:
         total_files = len(pro_files) + len(smet_files)
         lazy = total_files > 10
-        logger.info(f"Auto-detected lazy={lazy} for {total_files} files")
+        logger.debug(f"Auto-detected lazy={lazy} for {total_files} files")
 
     # --- Step 4: Read and process data files ---
     datetime_start, datetime_end = (time.sel.start, time.sel.stop) if time and isinstance(time.sel, slice) else (None, None)
     
     if lazy:
-        logger.info("Using lazy loading with Dask")
+        # logger.info("Using lazy loading with Dask")
         pro_datasets = _read_pro_files_lazy(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
     else:
-        logger.info("Using eager loading with multiprocessing")
+        # logger.info("Using eager loading with multiprocessing")
         pro_datasets = _read_pro_files_eager(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
     
     smet_datasets = _read_smet_files(smet_files, datetime_start, datetime_end, logger)
@@ -229,7 +229,7 @@ def _read_pro_files_eager(
     remove_soil = parser_kwargs.get('remove_soil', True)
     
     if max_layers_arg == 'auto':
-        logger.info(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
+        logger.debug(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
         
         if n_cpus_use > 1 and len(pro_files) > 1:
             # Parallel pre-scan
@@ -246,12 +246,12 @@ def _read_pro_files_eager(
             layer_counts = [_scan_pro_for_max_layers(fp, add_sh, remove_soil) for fp in pro_files]
         
         max_layers_to_use = max(layer_counts) if layer_counts else 200
-        logger.info(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
+        logger.debug(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
     else:
         max_layers_to_use = int(max_layers_arg)
     
     # --- Stage 2: Parallel Loading with Direct Multiprocessing ---
-    logger.info(f"Loading {len(pro_files)} files eagerly with {n_cpus_use} workers...")
+    logger.info(f"Loading {len(pro_files)} datasets eagerly with {n_cpus_use} workers...")
     
     if n_cpus_use > 1 and len(pro_files) > 1:
         # Parallel processing
@@ -275,7 +275,7 @@ def _read_pro_files_eager(
     
     # Filter out None results
     final_datasets = [ds for ds in datasets if ds is not None]
-    logger.info(f"Successfully loaded {len(final_datasets)} datasets")
+    logger.debug(f"Successfully assembled {len(final_datasets)} datasets")
     
     return final_datasets
 
@@ -367,7 +367,7 @@ def _read_pro_files_lazy(
     remove_soil = parser_kwargs.get('remove_soil', True)
     
     if max_layers_arg == 'auto':
-        logger.info(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
+        logger.debug(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
         use_parallel = n_cpus_use > 1 and len(pro_files) > 1
         layer_counts = []
         if use_parallel:
@@ -388,12 +388,12 @@ def _read_pro_files_lazy(
             layer_counts = [_scan_pro_for_max_layers(fp, add_sh, remove_soil) for fp in pro_files]
         
         max_layers_to_use = max(layer_counts) if layer_counts else 200
-        logger.info(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
+        logger.debug(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
     else:
         max_layers_to_use = int(max_layers_arg)
                 
     # --- Stage 2: Build and Compute Dask Graph ---
-    logger.info("Building Dask graph for lazy dataset creation...")
+    # logger.info("Building Dask graph for lazy dataset creation...")
     lazy_datasets = [
         _create_dataset_from_pro_file(
             fp, max_layers_to_use, datetime_start, datetime_end, logger, parser_kwargs
@@ -403,12 +403,12 @@ def _read_pro_files_lazy(
     if not lazy_datasets:
         return []
     
-    logger.info(f"Computing {len(lazy_datasets)} tasks in parallel using Dask...")
+    logger.info(f"Loading {len(lazy_datasets)} datasets lazily using Dask and {n_cpus_use} workers...")
     pro_datasets = list(compute(*lazy_datasets, scheduler='processes', num_workers=n_cpus_use))
     
     # Filter out None results from files that had no valid data
     final_datasets = [ds for ds in pro_datasets if ds is not None]
-    logger.info(f"Successfully created {len(final_datasets)} datasets.")
+    logger.debug(f"Successfully assembled {len(final_datasets)} datasets.")
     
     return final_datasets
 
@@ -1548,7 +1548,7 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
                     "complevel": 4
                 }
                 
-                logger.info(f"Encoding {coord_name} as S{max_len}")    
+                logger.debug(f"Encoding {coord_name} as S{max_len}")
     ds_to_save.to_netcdf(path, **kwargs)
     logging.info(f"Dataset successfully saved to {path}")
 
