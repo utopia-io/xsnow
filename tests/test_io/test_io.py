@@ -422,8 +422,10 @@ def test_read_pro_with_soil_removal(tmp_path, pro_data_with_soil):
     # Read with soil removal disabled
     ds_with_soil = read(pro_file, remove_soil=False)
     assert ds_with_soil.sizes['layer'] == 4 # All layers should be present
-    
-def test_read_with_slope_selector(multi_slope_directory):
+
+
+
+def test_read_with_slope_selector(multi_slope_directory, compare_datasets):
     """
     Tests that passing a SlopeSelector to read() correctly filters the
     dataset by the slope's integer index.
@@ -442,6 +444,10 @@ def test_read_with_slope_selector(multi_slope_directory):
     # Verify we got the correct slope by checking the associated inclination coordinate
     assert np.isclose(ds_single.inclination.item(), 15.0)
 
+    # Repeat with SlopeLike input
+    ds_single2 = read(multi_slope_directory, slope=0)
+    compare_datasets(ds_single, ds_single2)
+
     # Test selecting a slice of slopes
     slope_selector_slice = SlopeSelector(sel=slice(1)) # Selects index 0
     ds_slice = read(multi_slope_directory, slope=slope_selector_slice)
@@ -449,6 +455,10 @@ def test_read_with_slope_selector(multi_slope_directory):
     assert ds_slice is not None
     assert ds_slice.sizes['slope'] == 1
     assert np.isclose(ds_slice.inclination.item(), 15.0)
+
+    # Repeat with SlopeLike input
+    ds_slice2 = read(multi_slope_directory, slope={"inclination": 15})
+    compare_datasets(ds_slice, ds_slice2)
     
     # Test selecting an out-of-bounds index, which should be empty
     slope_selector_empty = SlopeSelector(sel=99)
@@ -458,7 +468,7 @@ def test_read_with_slope_selector(multi_slope_directory):
     assert ds_empty is not None and ds_empty.sizes['slope'] == 0
 
 
-def test_read_with_realization_selector(multi_slope_directory):
+def test_read_with_realization_selector(multi_slope_directory, compare_datasets):
     """
     Tests that passing a RealizationSelector to read() correctly filters the
     dataset. Since .pro files are read as realization 0, this tests
@@ -473,6 +483,10 @@ def test_read_with_realization_selector(multi_slope_directory):
     assert 'realization' in ds_present.coords
     assert int(ds_present.realization) == 0
     assert ds_present.realization.item() == 0
+
+    # Repeat with RealizationLike input
+    ds_present2 = read(multi_slope_directory, realization=0)
+    compare_datasets(ds_present, ds_present2)
 
     # Test selecting a non-existent realization, which should be empty
     realization_selector_absent = RealizationSelector(sel=99)

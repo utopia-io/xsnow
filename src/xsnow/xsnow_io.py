@@ -30,7 +30,7 @@ import sys
 import logging
 import multiprocessing
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Union, Tuple, Sequence
+from typing import Dict, Optional, List, Any, Union, Tuple, Sequence, Mapping
 import concurrent.futures
 
 import numpy as np
@@ -67,16 +67,38 @@ HEADER_MAP = {
     'StationName=': 'stationName'
 }
 
+# --- Selector Types ---
+IndexLike = Union[int, slice, Sequence[int]]
+
+TimeIndexScalar = Union[str, pd.Timestamp, np.datetime64]
+TimeIndexSeq    = Sequence[TimeIndexScalar]
+TimeSlice       = slice
+TimeLike = Union["TimeSelector", TimeIndexScalar, TimeSlice, TimeIndexSeq]
+
+LocationIndexScalar = str
+LocationIndexSeq    = Sequence[LocationIndexScalar]
+# - NOTE: bbox args (lat_range/lon_range/crs) cannot be expressed
+#   positionally here, so callers that want bbox still need to pass
+#   an actual LocationSelector(...)
+LocationLike = Union["LocationSelector", LocationIndexScalar, LocationIndexSeq]
+
+SlopeIndexLike = Union[int, slice, Sequence[int], xr.DataArray]  # xr <-> boolean mask
+SlopeQueryMapping = Mapping[str, Any]  # e.g., {"inclination": 30, "azimuth": 180}
+SlopeLike = Union["SlopeSelector", SlopeIndexLike, SlopeQueryMapping]
+
+RealIndexLike = Union[int, str, slice, Sequence[int], Sequence[str]]
+RealizationLike = Union["RealizationSelector", RealIndexLike]
+
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
 # --------------------------------------------------------------------------- #
 
 def read(
     source: Union[str, List[str], Path, List[Path]],
-    time: Optional[TimeSelector] = None,
-    location: Optional[LocationSelector] = None,
-    slope: Optional[SlopeSelector] = None,
-    realization: Optional[RealizationSelector] = None,
+    time: Optional[TimeLike] = None,
+    location: Optional[LocationLike] = None,
+    slope: Optional[SlopeLike] = None,
+    realization: Optional[RealizationLike] = None,
     lazy: Optional[bool] = None,
     n_cpus_use: Optional[int] = None,
     logger: Optional[logging.Logger] = None,
@@ -122,13 +144,18 @@ def read(
         >>> # Force eager loading for quick access
         >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
     """
-# --- Step 1: Setup Logger and CPU count ---
+# --- Step 1: Setup ---
     if logger is None or logger is True:
         logger = logging.getLogger(__name__)
 
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
         n_cpus_use = min(32, cpu_count - 1) if cpu_count and cpu_count > 1 else 1
+
+    time_sel        = _coerce_time(time)
+    location_sel    = _coerce_location(location)
+    slope_sel       = _coerce_slope(slope)
+    realization_sel = _coerce_realization(realization)
     
     # --- Step 2: Resolve file paths ---
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
@@ -174,7 +201,8 @@ def read(
         logger.debug(f"Auto-detected lazy={lazy} for {total_files} files")
 
     # --- Step 4: Read and process data files ---
-    datetime_start, datetime_end = (time.sel.start, time.sel.stop) if time and isinstance(time.sel, slice) else (None, None)
+    # TODO: The datetime_start *_end parsing results in nan for inclination and azimuth!
+    datetime_start, datetime_end = (time_sel.sel.start, time_sel.sel.stop) if time_sel and isinstance(time_sel.sel, slice) else (None, None)
     
     if lazy:
         # logger.info("Using lazy loading with Dask")
@@ -187,7 +215,7 @@ def read(
 
     # --- Step 5: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
-    return _merge_and_finalize(all_datasets, time, location, slope, realization)
+    return _merge_and_finalize(all_datasets, time_sel, location_sel, slope_sel, realization_sel)
 
 
 # --------------------------------------------------------------------------- #
@@ -1330,6 +1358,27 @@ def _merge_and_finalize(
     final_dataset = xsnowDataset(final_xr_dataset)
     
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
+
+
+def _coerce_time(sel: TimeLike) -> Optional[TimeSelector]:
+    if sel is None or isinstance(sel, TimeSelector):
+        return sel
+    return TimeSelector(sel=sel)
+
+def _coerce_location(sel: LocationLike) -> Optional[LocationSelector]:
+    if sel is None or isinstance(sel, LocationSelector):
+        return sel
+    return LocationSelector(sel=sel)
+
+def _coerce_slope(sel: SlopeLike) -> Optional[SlopeSelector]:
+    if sel is None or isinstance(sel, SlopeSelector):
+        return sel
+    return SlopeSelector(sel=sel)
+
+def _coerce_realization(sel: RealizationLike) -> Optional[RealizationSelector]:
+    if sel is None or isinstance(sel, RealizationSelector):
+        return sel
+    return RealizationSelector(sel=sel)
 
 # --------------------------------------------------------------------------- #
 #                           WRITE FUNCTIONS                                   #
