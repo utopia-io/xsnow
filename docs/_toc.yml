@@ -3,13 +3,27 @@ root: index
 parts:
   - caption: "Overview"
     chapters:
-      # - file: index
-      - file: tutorials/01-installation
+      # - file: index  # not allowed to list index twice
+      - file: tutorials/installation
 
   - caption: "Tutorials: xsnow"
     chapters:
-      - file: tutorials/04-01-reading_writing
-      - file: tutorials/04-02-subsetting_filtering
+      - file: tutorials/getting_started
+      - file: tutorials/reading_writing
+      - file: tutorials/subsetting_filtering
+      - file: tutorials/data_manipulation
+      - file: tutorials/tabular_inspection
+      - file: tutorials/simple_plots
+      - file: tutorials/timezones
+      - file: tutorials/gtypes_labels
+      - file: tutorials/lazy_analysis
+
+  - caption: "Tutorials: xsnow extensions"
+    chapters:
+      - file: tutorials/extensions/application_scenarios
+      - file: tutorials/extensions/scenario1
+      - file: tutorials/extensions/scenario2
+      - file: tutorials/extensions/scenario3
 
   - caption: "API reference"
     chapters:
