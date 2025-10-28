@@ -5,6 +5,7 @@ parts:
     chapters:
       # - file: index  # not allowed to list index twice
       - file: tutorials/installation
+      - file: tutorials/contributing2xsnow
 
   - caption: "Tutorials: xsnow"
     chapters:
