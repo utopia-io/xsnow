@@ -1,5 +1,4 @@
 # xsnow documentation
-
 Welcome to the **Tutorials** and the **API reference** for xsnow and its extension strategy.
 
 ## Background

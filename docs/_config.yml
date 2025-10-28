@@ -1,5 +1,5 @@
 # docs/_config.yml
-title: xsnow documentation
+title: xsnow
 author: avacollabra.org
 only_build_toc_files: true
 
@@ -19,7 +19,7 @@ sphinx:
   # Put pure Sphinx config here
   config:
     project: xsnow
-    html_title: xsnow documentation
+    html_title: xsnow
     copyright: "2025 xsnow contributors"
     html_theme: sphinx_book_theme
     html_theme_options:
