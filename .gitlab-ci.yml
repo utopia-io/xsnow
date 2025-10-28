@@ -149,23 +149,33 @@ docs-stable:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: on_success
   script:
-    # 0. Figure out version string via setuptools-scm
+
+    # 1. Figure out version string via setuptools-scm
     - export XSNOW_VERSION=$(python -c "import xsnow; print(xsnow.__version__)")
     - export DOC_LABEL="stable (${XSNOW_VERSION})"
 
-    # 1. Inject DOC_LABEL
+    # 2. Inject DOC_LABEL
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/index.md
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/_config.yml || true
 
-    # 2. Build docs
-    - sphinx-apidoc -f -e -o docs/api src/xsnow
+    # 3. Generate API docs into docs/api/_generated (match local Makefile)
+    - echo "Generating API docs…"
+    - rm -rf docs/api/_generated || true
+    - mkdir -p docs/api/_generated
+    - sphinx-apidoc -f -e -o docs/api/_generated src/xsnow
+
+    # 4. Clean up the first-line titles for readability (match local Makefile)
+    - sed -i '1s/^xsnow\.extensions\.//' docs/api/_generated/*.rst || true
+    - sed -i '1s/^xsnow\.//' docs/api/_generated/*.rst || true
+
+    # 5. Build docs
     - jupyter-book build docs
 
-    # 3. Copy to /stable/
+    # 6. Copy to /stable/
     - mkdir -p public/stable
     - cp -r docs/_build/html/* public/stable/
 
-    # 4. Create root index.html with fallback logic
+    # 7. Create root index.html with fallback logic
     - |
       mkdir -p public
       if [ -d public/stable ]; then
@@ -198,7 +208,7 @@ docs-stable:
           > public/index.html
       fi
 
-    # 5. Create /versionpicker/ listing what's actually present
+    # 8. Create /versionpicker/ listing what's actually present
     - |
       mkdir -p public/versionpicker
       {
@@ -231,26 +241,36 @@ docs-dev:
   <<: *default-docs
   rules:
     - if: $CI_COMMIT_BRANCH == "dev"
-      when: always             # <-- run even if tests failed
-  allow_failure: true          # <-- don't block pipeline if this fails
+      when: always
+  allow_failure: true
   script:
-    # 0. Figure out version label from setuptools-scm
+    # 0. Clean up old 'latest'
+    - rm -rf public/latest || true
+
+    # 1. Version label
     - export XSNOW_VERSION=$(python -c "import xsnow; print(xsnow.__version__)")
     - export DOC_LABEL="dev (${XSNOW_VERSION})"
-
-    # 1. Inject DOC_LABEL
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/index.md
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/_config.yml || true
 
-    # 2. Build docs (even if code's a bit broken, build might still succeed)
-    - sphinx-apidoc -f -e -o docs/api src/xsnow
+    # 2. Generate API docs into docs/api/_generated
+    - echo "Generating API docs…"
+    - rm -rf docs/api/_generated || true
+    - mkdir -p docs/api/_generated
+    - sphinx-apidoc -f -e -o docs/api/_generated src/xsnow
+
+    # 3. Clean up headers like you do locally
+    - sed -i '1s/^xsnow\.extensions\.//' docs/api/_generated/*.rst || true
+    - sed -i '1s/^xsnow\.//' docs/api/_generated/*.rst || true
+
+    # 4. Build docs (best effort on dev)
     - jupyter-book build docs || true
 
-    # 3. Copy to /dev/ (only if build produced output)
+    # 5. Copy to /dev/
     - mkdir -p public/dev
     - if [ -d docs/_build/html ]; then cp -r docs/_build/html/* public/dev/; fi
 
-    # 4. Create root index.html with fallback logic
+    # 6. Fallback index.html + versionpicker (unchanged from current)
     - |
       mkdir -p public
       if [ -d public/stable ]; then
@@ -283,7 +303,6 @@ docs-dev:
           > public/index.html
       fi
 
-    # 5. Create /versionpicker/ listing what's actually present
     - |
       mkdir -p public/versionpicker
       {
@@ -318,22 +337,32 @@ docs-tagged:
     - if: $CI_COMMIT_TAG
       when: on_success          # only publish tagged docs if pipeline is green
   script:
-    # 0. Use the tag literally, e.g. v1.2.3
+
+    # 1. Use the tag literally, e.g. v1.2.3
     - export DOC_LABEL="${CI_COMMIT_TAG}"
 
-    # 1. Inject DOC_LABEL
+    # 2. Inject DOC_LABEL into docs/index.md and (optionally) _config.yml
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/index.md
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/_config.yml || true
 
-    # 2. Build docs
-    - sphinx-apidoc -f -e -o docs/api src/xsnow
+    # 3. Generate API docs into docs/api/_generated (match local Makefile)
+    - echo "Generating API docs…"
+    - rm -rf docs/api/_generated || true
+    - mkdir -p docs/api/_generated
+    - sphinx-apidoc -f -e -o docs/api/_generated src/xsnow
+
+    # 4. Clean up the first-line titles for readability (match local Makefile sed)
+    - sed -i '1s/^xsnow\.extensions\.//' docs/api/_generated/*.rst || true
+    - sed -i '1s/^xsnow\.//' docs/api/_generated/*.rst || true
+
+    # 5. Build docs
     - jupyter-book build docs
 
-    # 3. Copy to /<tag>/
+    # 6. Copy to /<tag>/ in public
     - mkdir -p "public/${CI_COMMIT_TAG}"
     - cp -r docs/_build/html/* "public/${CI_COMMIT_TAG}/"
 
-    # 4. Create root index.html with fallback logic
+    # 7. Create root index.html with fallback logic (prefer stable, then dev, else fallback)
     - |
       mkdir -p public
       if [ -d public/stable ]; then
@@ -366,7 +395,7 @@ docs-tagged:
           > public/index.html
       fi
 
-    # 5. Create /versionpicker/ listing what's actually present
+    # 8. Create /versionpicker/ listing what's actually present
     - |
       mkdir -p public/versionpicker
       {
