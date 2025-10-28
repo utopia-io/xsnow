@@ -69,7 +69,7 @@ tests-cpu:
   stage: standard-install
   script:
     - pip install -e ".[testing]"
-    - pytest -q --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml --cov=xsnow --cov-report=xml
+    - pytest -q --maxfail=3 --disable-warnings --junitxml=pytest-junit.xml --cov=xsnow --cov-report=xml
   artifacts:
     when: always
     expire_in: 7 days
@@ -100,7 +100,7 @@ tests-gpu:
     policy: pull-push
   script:
     - python3 -m pip install -e ".[gpu,testing]"
-    - pytest -q -m "not slow" --maxfail=1 --disable-warnings --junitxml=pytest-gpu.xml
+    - pytest -q -m "not slow" --maxfail=3 --disable-warnings --junitxml=pytest-gpu.xml
   artifacts:
     when: always
     expire_in: 7 days
@@ -159,7 +159,7 @@ docs-stable:
 
     # 2. Build docs
     - sphinx-apidoc -f -e -o docs/api src/xsnow
-    - jupyter-book build docs --path-output docs/_build
+    - jupyter-book build docs
 
     # 3. Copy to /stable/
     - mkdir -p public/stable
@@ -169,36 +169,33 @@ docs-stable:
     - |
       mkdir -p public
       if [ -d public/stable ]; then
-        # Redirect to stable
-        cat > public/index.html <<'HTML'
-        <!doctype html>
-        <meta charset="utf-8">
-        <meta http-equiv="refresh" content="0; url=./stable/">
-        <link rel="canonical" href="./stable/">
-        <title>Redirecting…</title>
-        <p>Redirecting to <a href="./stable/">stable</a> docs…</p>
-        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
-        HTML
+        printf '%s\n' \
+          '<!doctype html>' \
+          '<meta charset="utf-8">' \
+          '<meta http-equiv="refresh" content="0; url=./stable/">' \
+          '<link rel="canonical" href="./stable/">' \
+          '<title>Redirecting…</title>' \
+          '<p>Redirecting to <a href="./stable/">stable</a> docs…</p>' \
+          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
+          > public/index.html
       elif [ -d public/dev ]; then
-        # No stable yet, but dev exists: redirect to dev
-        cat > public/index.html <<'HTML'
-        <!doctype html>
-        <meta charset="utf-8">
-        <meta http-equiv="refresh" content="0; url=./dev/">
-        <link rel="canonical" href="./dev/">
-        <title>Redirecting…</title>
-        <p>Redirecting to <a href="./dev/">dev</a> docs…</p>
-        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
-        HTML
+        printf '%s\n' \
+          '<!doctype html>' \
+          '<meta charset="utf-8">' \
+          '<meta http-equiv="refresh" content="0; url=./dev/">' \
+          '<link rel="canonical" href="./dev/">' \
+          '<title>Redirecting…</title>' \
+          '<p>Redirecting to <a href="./dev/">dev</a> docs…</p>' \
+          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
+          > public/index.html
       else
-        # Last-resort fallback page (nothing built yet)
-        cat > public/index.html <<'HTML'
-        <!doctype html>
-        <meta charset="utf-8">
-        <title>xsnow documentation</title>
-        <h1>xsnow documentation</h1>
-        <p>No built documentation folders are currently available.</p>
-        HTML
+        printf '%s\n' \
+          '<!doctype html>' \
+          '<meta charset="utf-8">' \
+          '<title>xsnow documentation</title>' \
+          '<h1>xsnow documentation</h1>' \
+          '<p>No built documentation folders are currently available.</p>' \
+          > public/index.html
       fi
 
     # 5. Create /versionpicker/ listing what's actually present
@@ -247,7 +244,7 @@ docs-dev:
 
     # 2. Build docs (even if code's a bit broken, build might still succeed)
     - sphinx-apidoc -f -e -o docs/api src/xsnow
-    - jupyter-book build docs --path-output docs/_build || true
+    - jupyter-book build docs || true
 
     # 3. Copy to /dev/ (only if build produced output)
     - mkdir -p public/dev
@@ -257,36 +254,33 @@ docs-dev:
     - |
       mkdir -p public
       if [ -d public/stable ]; then
-        # Redirect to stable
-        cat > public/index.html <<'HTML'
-        <!doctype html>
-        <meta charset="utf-8">
-        <meta http-equiv="refresh" content="0; url=./stable/">
-        <link rel="canonical" href="./stable/">
-        <title>Redirecting…</title>
-        <p>Redirecting to <a href="./stable/">stable</a> docs…</p>
-        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
-        HTML
+        printf '%s\n' \
+          '<!doctype html>' \
+          '<meta charset="utf-8">' \
+          '<meta http-equiv="refresh" content="0; url=./stable/">' \
+          '<link rel="canonical" href="./stable/">' \
+          '<title>Redirecting…</title>' \
+          '<p>Redirecting to <a href="./stable/">stable</a> docs…</p>' \
+          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
+          > public/index.html
       elif [ -d public/dev ]; then
-        # No stable yet, but dev exists: redirect to dev
-        cat > public/index.html <<'HTML'
-        <!doctype html>
-        <meta charset="utf-8">
-        <meta http-equiv="refresh" content="0; url=./dev/">
-        <link rel="canonical" href="./dev/">
-        <title>Redirecting…</title>
-        <p>Redirecting to <a href="./dev/">dev</a> docs…</p>
-        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
-        HTML
+        printf '%s\n' \
+          '<!doctype html>' \
+          '<meta charset="utf-8">' \
+          '<meta http-equiv="refresh" content="0; url=./dev/">' \
+          '<link rel="canonical" href="./dev/">' \
+          '<title>Redirecting…</title>' \
+          '<p>Redirecting to <a href="./dev/">dev</a> docs…</p>' \
+          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
+          > public/index.html
       else
-        # Last-resort fallback page (nothing built yet)
-        cat > public/index.html <<'HTML'
-        <!doctype html>
-        <meta charset="utf-8">
-        <title>xsnow documentation</title>
-        <h1>xsnow documentation</h1>
-        <p>No built documentation folders are currently available.</p>
-        HTML
+        printf '%s\n' \
+          '<!doctype html>' \
+          '<meta charset="utf-8">' \
+          '<title>xsnow documentation</title>' \
+          '<h1>xsnow documentation</h1>' \
+          '<p>No built documentation folders are currently available.</p>' \
+          > public/index.html
       fi
 
     # 5. Create /versionpicker/ listing what's actually present
@@ -333,7 +327,7 @@ docs-tagged:
 
     # 2. Build docs
     - sphinx-apidoc -f -e -o docs/api src/xsnow
-    - jupyter-book build docs --path-output docs/_build
+    - jupyter-book build docs
 
     # 3. Copy to /<tag>/
     - mkdir -p "public/${CI_COMMIT_TAG}"
@@ -343,36 +337,33 @@ docs-tagged:
     - |
       mkdir -p public
       if [ -d public/stable ]; then
-        # Redirect to stable
-        cat > public/index.html <<'HTML'
-        <!doctype html>
-        <meta charset="utf-8">
-        <meta http-equiv="refresh" content="0; url=./stable/">
-        <link rel="canonical" href="./stable/">
-        <title>Redirecting…</title>
-        <p>Redirecting to <a href="./stable/">stable</a> docs…</p>
-        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
-        HTML
+        printf '%s\n' \
+          '<!doctype html>' \
+          '<meta charset="utf-8">' \
+          '<meta http-equiv="refresh" content="0; url=./stable/">' \
+          '<link rel="canonical" href="./stable/">' \
+          '<title>Redirecting…</title>' \
+          '<p>Redirecting to <a href="./stable/">stable</a> docs…</p>' \
+          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
+          > public/index.html
       elif [ -d public/dev ]; then
-        # No stable yet, but dev exists: redirect to dev
-        cat > public/index.html <<'HTML'
-        <!doctype html>
-        <meta charset="utf-8">
-        <meta http-equiv="refresh" content="0; url=./dev/">
-        <link rel="canonical" href="./dev/">
-        <title>Redirecting…</title>
-        <p>Redirecting to <a href="./dev/">dev</a> docs…</p>
-        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
-        HTML
+        printf '%s\n' \
+          '<!doctype html>' \
+          '<meta charset="utf-8">' \
+          '<meta http-equiv="refresh" content="0; url=./dev/">' \
+          '<link rel="canonical" href="./dev/">' \
+          '<title>Redirecting…</title>' \
+          '<p>Redirecting to <a href="./dev/">dev</a> docs…</p>' \
+          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
+          > public/index.html
       else
-        # Last-resort fallback page (nothing built yet)
-        cat > public/index.html <<'HTML'
-        <!doctype html>
-        <meta charset="utf-8">
-        <title>xsnow documentation</title>
-        <h1>xsnow documentation</h1>
-        <p>No built documentation folders are currently available.</p>
-        HTML
+        printf '%s\n' \
+          '<!doctype html>' \
+          '<meta charset="utf-8">' \
+          '<title>xsnow documentation</title>' \
+          '<h1>xsnow documentation</h1>' \
+          '<p>No built documentation folders are currently available.</p>' \
+          > public/index.html
       fi
 
     # 5. Create /versionpicker/ listing what's actually present
