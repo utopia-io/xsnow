@@ -153,11 +153,11 @@ docs-stable:
     - export XSNOW_VERSION=$(python -c "import xsnow; print(xsnow.__version__)")
     - export DOC_LABEL="stable (${XSNOW_VERSION})"
 
-    # 1. Inject DOC_LABEL into docs/index.md and (optionally) _config.yml
+    # 1. Inject DOC_LABEL
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/index.md
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/_config.yml || true
 
-    # 2. Generate API docs + build
+    # 2. Build docs
     - sphinx-apidoc -f -e -o docs/api src/xsnow
     - jupyter-book build docs --path-output docs/_build
 
@@ -165,20 +165,43 @@ docs-stable:
     - mkdir -p public/stable
     - cp -r docs/_build/html/* public/stable/
 
-    # 4. Generate redirect root index.html -> /stable/
+    # 4. Create root index.html with fallback logic
     - |
       mkdir -p public
-      cat > public/index.html <<'HTML'
-      <!doctype html>
-      <meta charset="utf-8">
-      <meta http-equiv="refresh" content="0; url=./stable/">
-      <link rel="canonical" href="./stable/">
-      <title>Redirecting…</title>
-      <p>Redirecting to <a href="./stable/">stable</a> docs…</p>
-      <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
-      HTML
+      if [ -d public/stable ]; then
+        # Redirect to stable
+        cat > public/index.html <<'HTML'
+        <!doctype html>
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="0; url=./stable/">
+        <link rel="canonical" href="./stable/">
+        <title>Redirecting…</title>
+        <p>Redirecting to <a href="./stable/">stable</a> docs…</p>
+        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
+        HTML
+      elif [ -d public/dev ]; then
+        # No stable yet, but dev exists: redirect to dev
+        cat > public/index.html <<'HTML'
+        <!doctype html>
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="0; url=./dev/">
+        <link rel="canonical" href="./dev/">
+        <title>Redirecting…</title>
+        <p>Redirecting to <a href="./dev/">dev</a> docs…</p>
+        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
+        HTML
+      else
+        # Last-resort fallback page (nothing built yet)
+        cat > public/index.html <<'HTML'
+        <!doctype html>
+        <meta charset="utf-8">
+        <title>xsnow documentation</title>
+        <h1>xsnow documentation</h1>
+        <p>No built documentation folders are currently available.</p>
+        HTML
+      fi
 
-    # 5. Generate /versionpicker/ page from current public/* directories
+    # 5. Create /versionpicker/ listing what's actually present
     - |
       mkdir -p public/versionpicker
       {
@@ -186,15 +209,12 @@ docs-stable:
         echo '<title>xsnow documentation versions</title>';
         echo '<h1>xsnow documentation versions</h1>';
         echo '<ul>';
-        # stable first (if present)
         if [ -d public/stable ]; then
           echo '  <li><a href="../stable/">stable</a> (default)</li>';
         fi
-        # dev next
         if [ -d public/dev ]; then
           echo '  <li><a href="../dev/">dev</a> (bleeding edge)</li>';
         fi
-        # then any other dirs (tags like v1.2.3)
         for d in public/*/ ; do
           bn=$(basename "$d" /)
           if [ "$bn" != "stable" ] && [ "$bn" != "dev" ] && [ "$bn" != "versionpicker" ]; then
@@ -202,7 +222,8 @@ docs-stable:
           fi
         done
         echo '</ul>';
-        echo '<p>Tip: You can also directly visit /stable/, /dev/, or /vX.Y.Z/.</p>';
+        echo '<p>Tip: You can directly visit /stable/, /dev/, or /vX.Y.Z/ (tagged releases).';
+        echo ' During early development, /dev/ may be the only one available.</p>';
       } > public/versionpicker/index.html
 
 
@@ -213,7 +234,8 @@ docs-dev:
   <<: *default-docs
   rules:
     - if: $CI_COMMIT_BRANCH == "dev"
-      when: on_success
+      when: always             # <-- run even if tests failed
+  allow_failure: true          # <-- don't block pipeline if this fails
   script:
     # 0. Figure out version label from setuptools-scm
     - export XSNOW_VERSION=$(python -c "import xsnow; print(xsnow.__version__)")
@@ -223,28 +245,51 @@ docs-dev:
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/index.md
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/_config.yml || true
 
-    # 2. Build docs
+    # 2. Build docs (even if code's a bit broken, build might still succeed)
     - sphinx-apidoc -f -e -o docs/api src/xsnow
-    - jupyter-book build docs --path-output docs/_build
+    - jupyter-book build docs --path-output docs/_build || true
 
-    # 3. Copy to /dev/
+    # 3. Copy to /dev/ (only if build produced output)
     - mkdir -p public/dev
-    - cp -r docs/_build/html/* public/dev/
+    - if [ -d docs/_build/html ]; then cp -r docs/_build/html/* public/dev/; fi
 
-    # 4. Generate redirect /index.html -> /stable/
+    # 4. Create root index.html with fallback logic
     - |
       mkdir -p public
-      cat > public/index.html <<'HTML'
-      <!doctype html>
-      <meta charset="utf-8">
-      <meta http-equiv="refresh" content="0; url=./stable/">
-      <link rel="canonical" href="./stable/">
-      <title>Redirecting…</title>
-      <p>Redirecting to <a href="./stable/">stable</a> docs…</p>
-      <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
-      HTML
+      if [ -d public/stable ]; then
+        # Redirect to stable
+        cat > public/index.html <<'HTML'
+        <!doctype html>
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="0; url=./stable/">
+        <link rel="canonical" href="./stable/">
+        <title>Redirecting…</title>
+        <p>Redirecting to <a href="./stable/">stable</a> docs…</p>
+        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
+        HTML
+      elif [ -d public/dev ]; then
+        # No stable yet, but dev exists: redirect to dev
+        cat > public/index.html <<'HTML'
+        <!doctype html>
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="0; url=./dev/">
+        <link rel="canonical" href="./dev/">
+        <title>Redirecting…</title>
+        <p>Redirecting to <a href="./dev/">dev</a> docs…</p>
+        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
+        HTML
+      else
+        # Last-resort fallback page (nothing built yet)
+        cat > public/index.html <<'HTML'
+        <!doctype html>
+        <meta charset="utf-8">
+        <title>xsnow documentation</title>
+        <h1>xsnow documentation</h1>
+        <p>No built documentation folders are currently available.</p>
+        HTML
+      fi
 
-    # 5. Generate /versionpicker/ page
+    # 5. Create /versionpicker/ listing what's actually present
     - |
       mkdir -p public/versionpicker
       {
@@ -265,7 +310,8 @@ docs-dev:
           fi
         done
         echo '</ul>';
-        echo '<p>Tip: You can also directly visit /stable/, /dev/, or /vX.Y.Z/.</p>';
+        echo '<p>Tip: You can directly visit /stable/, /dev/, or /vX.Y.Z/ (tagged releases).';
+        echo ' During early development, /dev/ may be the only one available.</p>';
       } > public/versionpicker/index.html
 
 
@@ -276,9 +322,9 @@ docs-tagged:
   <<: *default-docs
   rules:
     - if: $CI_COMMIT_TAG
-      when: on_success
+      when: on_success          # only publish tagged docs if pipeline is green
   script:
-    # 0. For releases, we just use the tag literally
+    # 0. Use the tag literally, e.g. v1.2.3
     - export DOC_LABEL="${CI_COMMIT_TAG}"
 
     # 1. Inject DOC_LABEL
@@ -293,20 +339,43 @@ docs-tagged:
     - mkdir -p "public/${CI_COMMIT_TAG}"
     - cp -r docs/_build/html/* "public/${CI_COMMIT_TAG}/"
 
-    # 4. Generate redirect /index.html -> /stable/
+    # 4. Create root index.html with fallback logic
     - |
       mkdir -p public
-      cat > public/index.html <<'HTML'
-      <!doctype html>
-      <meta charset="utf-8">
-      <meta http-equiv="refresh" content="0; url=./stable/">
-      <link rel="canonical" href="./stable/">
-      <title>Redirecting…</title>
-      <p>Redirecting to <a href="./stable/">stable</a> docs…</p>
-      <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
-      HTML
+      if [ -d public/stable ]; then
+        # Redirect to stable
+        cat > public/index.html <<'HTML'
+        <!doctype html>
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="0; url=./stable/">
+        <link rel="canonical" href="./stable/">
+        <title>Redirecting…</title>
+        <p>Redirecting to <a href="./stable/">stable</a> docs…</p>
+        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
+        HTML
+      elif [ -d public/dev ]; then
+        # No stable yet, but dev exists: redirect to dev
+        cat > public/index.html <<'HTML'
+        <!doctype html>
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="0; url=./dev/">
+        <link rel="canonical" href="./dev/">
+        <title>Redirecting…</title>
+        <p>Redirecting to <a href="./dev/">dev</a> docs…</p>
+        <p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>
+        HTML
+      else
+        # Last-resort fallback page (nothing built yet)
+        cat > public/index.html <<'HTML'
+        <!doctype html>
+        <meta charset="utf-8">
+        <title>xsnow documentation</title>
+        <h1>xsnow documentation</h1>
+        <p>No built documentation folders are currently available.</p>
+        HTML
+      fi
 
-    # 5. Generate /versionpicker/ page based on current folders under public/
+    # 5. Create /versionpicker/ listing what's actually present
     - |
       mkdir -p public/versionpicker
       {
@@ -327,7 +396,8 @@ docs-tagged:
           fi
         done
         echo '</ul>';
-        echo '<p>Tip: You can also directly visit /stable/, /dev/, or /vX.Y.Z/.</p>';
+        echo '<p>Tip: You can directly visit /stable/, /dev/, or /vX.Y.Z/ (tagged releases).';
+        echo ' During early development, /dev/ may be the only one available.</p>';
       } > public/versionpicker/index.html
 
 
@@ -347,10 +417,11 @@ pages:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: on_success
     - if: $CI_COMMIT_BRANCH == "dev"
-      when: on_success
+      when: always  # publish even on failure (docs-dev allowed to fail gracefully)
     - if: $CI_COMMIT_TAG
       when: on_success
     - when: never
+  allow_failure: true  # helpful for dev
   script:
     - echo "Publishing GitLab Pages artifacts"
   artifacts:
