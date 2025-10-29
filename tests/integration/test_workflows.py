@@ -410,3 +410,266 @@ class TestStringCoordinateWorkflow:
         locations = [_normalize_location_string(loc) for loc in combined.location.values]
         assert 'STATION_A' in locations
         assert 'STATION_B' in locations
+
+
+@pytest.mark.synthetic
+class TestSlopeCoordinateBugFixes:
+    """Tests for slope coordinate preservation bug fixes.
+    
+    These tests verify the fixes for issues where slope_inclination and 
+    slope_azimuth coordinates become NaN after operations like time slicing,
+    multi-location loading, and update operations.
+    
+    Reference: bug_analysis_and_fix.md
+    """
+    
+    def test_time_slice_preserves_slope_coords(self, synthetic_pro, tmp_path):
+        """Test that time slicing preserves slope coordinates.
+        
+        Bug: slope_inclination and slope_azimuth became NaN after time slice.
+        Root cause: coords='minimal' in concat operations.
+        Fix: Changed to coords='all'.
+        """
+        # Create data with valid slope coordinates
+        filepath = synthetic_pro.varying_layers(
+            tmp_path,
+            layer_counts=[3, 3, 3, 3, 3]
+        )
+        
+        # Load data
+        ds = read(tmp_path, lazy=False)
+        
+        # Verify slope coordinates exist and are valid initially
+        assert 'slope_inclination' in ds.data.coords
+        assert 'slope_azimuth' in ds.data.coords
+        initial_incl = float(ds.data.slope_inclination.values.flat[0])
+        initial_azi = float(ds.data.slope_azimuth.values.flat[0])
+        assert not np.isnan(initial_incl), "Initial slope_inclination should not be NaN"
+        assert not np.isnan(initial_azi), "Initial slope_azimuth should not be NaN"
+        
+        # Perform time slice
+        times = pd.to_datetime(ds.data.time.values)
+        mid_time = times[2]
+        ds_sliced = ds.sel(time=slice(None, mid_time.isoformat()))
+        
+        # BUG CHECK: Slope coordinates should still be valid after slice
+        assert 'slope_inclination' in ds_sliced.data.coords
+        assert 'slope_azimuth' in ds_sliced.data.coords
+        sliced_incl = float(ds_sliced.data.slope_inclination.values.flat[0])
+        sliced_azi = float(ds_sliced.data.slope_azimuth.values.flat[0])
+        assert not np.isnan(sliced_incl), "Slope_inclination became NaN after time slice!"
+        assert not np.isnan(sliced_azi), "Slope_azimuth became NaN after time slice!"
+        # Values should be preserved (whatever they are)
+        assert sliced_incl == initial_incl, f"Slope changed from {initial_incl} to {sliced_incl}"
+        assert sliced_azi == initial_azi, f"Azimuth changed from {initial_azi} to {sliced_azi}"
+    
+    def test_multi_location_preserves_individual_slope_coords(self, synthetic_pro, tmp_path):
+        """Test that multi-location datasets preserve slope coordinates.
+        
+        Bug: coords='minimal' with compat='override' kept only the first location's
+        slope values, applying them to all locations or dropping them.
+        Fix: Changed to coords='all' to broadcast properly.
+        """
+        # Create multiple stations
+        data_dir = synthetic_pro.multi_station(
+            tmp_path,
+            n_stations=3,
+            n_profiles_each=5
+        )
+        
+        # Load all stations together
+        ds = read(tmp_path, lazy=False)
+        
+        assert ds.sizes['location'] == 3
+        
+        # Each location should have valid slope coordinates (not NaN)
+        for loc in ds.location.values:
+            loc_ds = ds.sel(location=loc)
+            
+            assert 'slope_inclination' in loc_ds.coords
+            assert 'slope_azimuth' in loc_ds.coords
+            
+            incl = float(loc_ds.slope_inclination.values.flat[0])
+            azi = float(loc_ds.slope_azimuth.values.flat[0])
+            
+            # BUG CHECK: Coordinates should not be NaN
+            assert not np.isnan(incl), f"{loc}: slope_inclination is NaN"
+            assert not np.isnan(azi), f"{loc}: slope_azimuth is NaN"
+    
+    def test_update_preserves_slope_coords(self, synthetic_pro, tmp_path):
+        """Test that update() method preserves slope coordinates.
+        
+        Bug: coords='minimal' in concat operations within update() caused
+        slope coordinates to be dropped or become NaN.
+        Fix: Changed to coords='all' in all concat operations.
+        """
+        archive_dir = tmp_path / "archive"
+        archive_dir.mkdir()
+        
+        # Create initial data with valid slope coordinates
+        synthetic_pro.varying_layers(
+            archive_dir,
+            layer_counts=[3, 3, 3]
+        )
+        
+        # Initial load and cache
+        cache_file = tmp_path / "cache.nc"
+        ds_initial = read(archive_dir, lazy=False)
+        
+        # Verify initial slope coords are valid
+        initial_incl = float(ds_initial.data.slope_inclination.values.flat[0])
+        initial_azi = float(ds_initial.data.slope_azimuth.values.flat[0])
+        assert not np.isnan(initial_incl), "Initial slope should not be NaN"
+        assert not np.isnan(initial_azi), "Initial azimuth should not be NaN"
+        
+        ds_initial.to_netcdf(cache_file)
+        
+        # Add new data (this will create a file with more timestamps)
+        synthetic_pro.varying_layers(
+            archive_dir,
+            layer_counts=[3, 3, 3, 3]  # One more timestamp
+        )
+        
+        # Load cached data
+        ds_cached = read(cache_file)
+        
+        # Update with new data
+        ds_updated = ds_cached.update(archive_dir)
+        
+        # BUG CHECK: Slope coordinates should still be valid after update
+        assert 'slope_inclination' in ds_updated.data.coords
+        assert 'slope_azimuth' in ds_updated.data.coords
+        
+        updated_incl = float(ds_updated.data.slope_inclination.values.flat[0])
+        updated_azi = float(ds_updated.data.slope_azimuth.values.flat[0])
+        
+        assert not np.isnan(updated_incl), "Slope_inclination became NaN after update!"
+        assert not np.isnan(updated_azi), "Slope_azimuth became NaN after update!"
+        # Values should be preserved
+        assert updated_incl == initial_incl, f"Slope changed from {initial_incl} to {updated_incl}"
+        assert updated_azi == initial_azi, f"Azimuth changed from {initial_azi} to {updated_azi}"
+    
+    def test_mixed_pro_smet_slope_coords(self, synthetic_pro, synthetic_smet, tmp_path):
+        """Test that PRO slope coords take precedence over SMET NaN values.
+        
+        Bug: When SMET files (with NaN slope coords) were merged before PRO files,
+        NaN values persisted due to compat='override' keeping first dataset's values.
+        Fix: Ensured PRO data is always merged first.
+        """
+        station_name = "MIXED_STATION"
+        
+        # Create PRO file with valid slope coordinates (directly in tmp_path)
+        synthetic_pro.basic(
+            tmp_path,
+            station_name=station_name,
+            n_layers=3
+        )
+        
+        # Create SMET file (which would have NaN slope coords by default)
+        synthetic_smet.basic(
+            tmp_path,
+            station_name=station_name
+        )
+        
+        # Load both together - SMET files should not overwrite valid PRO slope coords
+        ds = read(tmp_path, lazy=False)
+        
+        # BUG CHECK: Slope coords should come from PRO file, not NaN from SMET
+        assert 'slope_inclination' in ds.data.coords
+        assert 'slope_azimuth' in ds.data.coords
+        
+        incl = float(ds.data.slope_inclination.values.flat[0])
+        azi = float(ds.data.slope_azimuth.values.flat[0])
+        
+        assert not np.isnan(incl), "Slope_inclination is NaN - SMET NaN overwrote PRO value!"
+        assert not np.isnan(azi), "Slope_azimuth is NaN - SMET NaN overwrote PRO value!"
+    
+    def test_multi_location_update_preserves_coords(self, synthetic_pro, tmp_path):
+        """Test that updating multi-location datasets preserves slope coords for all locations.
+        
+        This tests the combination of multi-location handling and update operations.
+        """
+        archive_dir = tmp_path / "archive"
+        archive_dir.mkdir()
+        
+        # Create two stations
+        data_dir = synthetic_pro.multi_station(
+            archive_dir,
+            n_stations=2,
+            n_profiles_each=3
+        )
+        
+        # Initial load
+        ds_initial = read(archive_dir, lazy=False)
+        
+        # Store initial slope values for each location
+        initial_slopes = {}
+        for loc in ds_initial.location.values:
+            loc_ds = ds_initial.sel(location=loc)
+            initial_slopes[str(loc)] = (
+                float(loc_ds.slope_inclination.values.flat[0]),
+                float(loc_ds.slope_azimuth.values.flat[0])
+            )
+        
+        # Cache it
+        cache_file = tmp_path / "multi_cache.nc"
+        ds_initial.to_netcdf(cache_file)
+        
+        # Add more data to the archive
+        data_dir = synthetic_pro.multi_station(
+            archive_dir,
+            n_stations=2,
+            n_profiles_each=5  # More profiles
+        )
+        
+        # Load and update
+        ds_cached = read(cache_file)
+        ds_updated = ds_cached.update(archive_dir)
+        
+        # BUG CHECK: Each location should still have valid slope coords
+        for loc in ds_updated.location.values:
+            loc_key = str(loc)
+            loc_ds = ds_updated.sel(location=loc)
+            
+            incl = float(loc_ds.slope_inclination.values.flat[0])
+            azi = float(loc_ds.slope_azimuth.values.flat[0])
+            
+            assert not np.isnan(incl), f"{loc}: slope_inclination is NaN after update"
+            assert not np.isnan(azi), f"{loc}: slope_azimuth is NaN after update"
+            
+            # Values should be preserved
+            if loc_key in initial_slopes:
+                initial_incl, initial_azi = initial_slopes[loc_key]
+                assert incl == initial_incl, f"{loc}: slope changed after update"
+                assert azi == initial_azi, f"{loc}: azimuth changed after update"
+    
+    def test_smet_only_slope_coords(self, synthetic_smet, tmp_path):
+        """Test behavior when only SMET files are loaded (no PRO files).
+        
+        When only SMET files exist, slope coords may be NaN or come from header.
+        This test documents expected behavior.
+        """
+        # Create SMET-only data
+        synthetic_smet.basic(tmp_path, station_name="SMET_ONLY")
+        
+        # Load data
+        ds = read(tmp_path, lazy=False)
+        
+        # Slope coordinates should exist (even if NaN)
+        assert 'slope_inclination' in ds.data.coords
+        assert 'slope_azimuth' in ds.data.coords
+        
+        # For SMET-only files, slope coords may be NaN or from header
+        # This is expected behavior - just verify coordinates exist
+        incl_array = ds.data.slope_inclination.values
+        azi_array = ds.data.slope_azimuth.values
+        
+        # Extract scalar value
+        incl = float(incl_array.flat[0])
+        azi = float(azi_array.flat[0])
+        
+        # Document: SMET files may have NaN slopes if not in header
+        # This is acceptable - the bug is when valid PRO slopes become NaN
+        # Just verify we can extract numeric values (even if NaN)
+        assert isinstance(incl, (int, float, np.floating))
+        assert isinstance(azi, (int, float, np.floating))
