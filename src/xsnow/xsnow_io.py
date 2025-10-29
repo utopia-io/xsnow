@@ -110,7 +110,7 @@ def read(
         lazy: If True, use Dask for lazy, memory-efficient loading (good for
             large datasets). If False, load all data eagerly into memory with
             parallel processing (good for small to medium datasets). If None
-            (default), auto-detect based on file count (>10 files uses lazy).
+            (default), auto-detect based on file count (sweet spot to be determined).
         n_cpus_use: The number of CPU cores to use. If not provided, defaults
             to min(32, total_cores - 1), with a minimum of 1.
         logger: An optional, pre-configured logger instance.
@@ -127,7 +127,7 @@ def read(
         or `None` if no valid data files are found.
 
     Examples:
-        >>> # Auto-detect (lazy for >10 files, eager for <=10)
+        >>> # Auto-detect (lazy for many files, eager for few)
         >>> ds = read("data/")
         
         >>> # Force lazy loading for large datasets
@@ -168,8 +168,8 @@ def read(
             
             # DEBUG: Check slope coordinates after loading
             if 'inclination' in ds.coords:
-                logger.info(f"DEBUG read NetCDF: inclination values AFTER load = {ds.inclination.values}")
-                logger.info(f"DEBUG read NetCDF: inclination dims = {ds.inclination.dims}")
+                logger.debug(f"read NetCDF: inclination values AFTER load = {ds.inclination.values}")
+                logger.debug(f"read NetCDF: inclination dims = {ds.inclination.dims}")
             
             return xsnowDataset(ds)
         except Exception as e:
@@ -194,7 +194,7 @@ def read(
     # --- Step 3: Auto-detect lazy mode if not specified ---
     if lazy is None:
         total_files = len(pro_files) + len(smet_files)
-        lazy = total_files > 10
+        lazy = total_files > 500
         logger.debug(f"Auto-detected lazy={lazy} for {total_files} files")
 
     # --- Step 4: Read and process data files ---
@@ -1490,8 +1490,8 @@ def _merge_and_finalize(
     
     # DEBUG: Check slope coordinates after merge
     if 'inclination' in final_dataset.data.coords:
-        logger.info(f"DEBUG _merge_and_finalize: inclination values = {final_dataset.data.inclination.values}")
-        logger.info(f"DEBUG _merge_and_finalize: inclination dims = {final_dataset.data.inclination.dims}")
+        logger.debug(f"_merge_and_finalize: inclination values = {final_dataset.data.inclination.values}")
+        logger.debug(f"_merge_and_finalize: inclination dims = {final_dataset.data.inclination.dims}")
     
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
 
