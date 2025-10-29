@@ -1735,8 +1735,8 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     
     # DEBUG: Check slope coordinates before saving
     if 'inclination' in ds_to_save.coords:
-        logger.info(f"DEBUG to_netcdf: inclination values BEFORE save = {ds_to_save.inclination.values}")
-        logger.info(f"DEBUG to_netcdf: inclination dims = {ds_to_save.inclination.dims}")
+        logger.debug(f"to_netcdf: inclination values BEFORE save = {ds_to_save.inclination.values}")
+        logger.debug(f"to_netcdf: inclination dims = {ds_to_save.inclination.dims}")
     
     # ENCODE STRING COORDINATES FOR NETCDF
     for coord_name in ("location", "realization"):
