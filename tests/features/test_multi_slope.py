@@ -31,9 +31,9 @@ class TestMultiSlopeDetection:
         
         ds = read(data_dir, lazy=False)
         
-        # Check slope_inclination coordinate
-        if 'slope_inclination' in ds.data.coords:
-            slope_angles = ds.data['slope_inclination'].values
+        # Check inclination coordinate
+        if 'inclination' in ds.data.coords:
+            slope_angles = ds.data['inclination'].values
             
             # Should have all the slope angles
             for expected_slope in slopes:
@@ -86,8 +86,8 @@ class TestMultiSlopeMerging:
         
         ds = read(data_dir, lazy=False)
         
-        if 'slope_inclination' in ds.data.coords:
-            slope_angles = ds.data['slope_inclination'].values
+        if 'inclination' in ds.data.coords:
+            slope_angles = ds.data['inclination'].values
             valid_angles = slope_angles[~np.isnan(slope_angles)]
             
             # Should be sorted
@@ -286,8 +286,8 @@ StationName= NO_SLOPE
         
         # Should still work, assume flat
         assert ds is not None
-        if 'slope_inclination' in ds.data.coords:
-            slope_angle = ds.data['slope_inclination'].values[0]
+        if 'inclination' in ds.data.coords:
+            slope_angle = ds.data['inclination'].values[0]
             # Should be NaN or 0
             assert np.isnan(slope_angle) or slope_angle == 0
     
@@ -391,7 +391,7 @@ class TestRealMultiSlopeData:
         assert ds.sizes['slope'] > 1
         
         # Should have slope metadata
-        assert 'slope_inclination' in ds.data.coords
+        assert 'inclination' in ds.data.coords
         
         # Each slope should have data
         if 'height' in ds.data:

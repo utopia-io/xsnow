@@ -30,7 +30,7 @@ import sys
 import logging
 import multiprocessing
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Union, Tuple, Sequence
+from typing import Dict, Optional, List, Any, Union, Tuple, Sequence, Mapping
 import concurrent.futures
 
 
@@ -69,6 +69,28 @@ HEADER_MAP = {
     'StationName=': 'stationName'
 }
 
+# --- Selector Types ---
+IndexLike = Union[int, slice, Sequence[int]]
+
+TimeIndexScalar = Union[str, pd.Timestamp, np.datetime64]
+TimeIndexSeq    = Sequence[TimeIndexScalar]
+TimeSlice       = slice
+TimeLike = Union["TimeSelector", TimeIndexScalar, TimeSlice, TimeIndexSeq]
+
+LocationIndexScalar = str
+LocationIndexSeq    = Sequence[LocationIndexScalar]
+# - NOTE: bbox args (lat_range/lon_range/crs) cannot be expressed
+#   positionally here, so callers that want bbox still need to pass
+#   an actual LocationSelector(...)
+LocationLike = Union["LocationSelector", LocationIndexScalar, LocationIndexSeq]
+
+SlopeIndexLike = Union[int, slice, Sequence[int], xr.DataArray]  # xr <-> boolean mask
+SlopeQueryMapping = Mapping[str, Any]  # e.g., {"inclination": 30, "azimuth": 180}
+SlopeLike = Union["SlopeSelector", SlopeIndexLike, SlopeQueryMapping]
+
+RealIndexLike = Union[int, str, slice, Sequence[int], Sequence[str]]
+RealizationLike = Union["RealizationSelector", RealIndexLike]
+
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
 # --------------------------------------------------------------------------- #
@@ -97,6 +119,9 @@ def read(
         source: The data source. Can be a path to a single file (e.g.,
             '.pro', '.smet', '.nc'), a directory containing data files, or a
             list of file paths.
+        recursive: If True, search subdirectories recursively for .pro and .smet
+            files when source is a directory. Default is False for backward
+            compatibility and to avoid accidentally including unwanted files.
         time: A `TimeSelector` object for filtering data by time.
         location: A `LocationSelector` object for filtering by station ID.
         slope: A `SlopeSelector` for filtering by slope angle.
@@ -130,13 +155,18 @@ def read(
         >>> # Force eager loading for quick access
         >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
     """
-# --- Step 1: Setup Logger and CPU count ---
-    if logger is None:
+# --- Step 1: Setup ---
+    if logger is None or logger is True:
         logger = logging.getLogger(__name__)
 
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
         n_cpus_use = min(32, cpu_count - 1) if cpu_count and cpu_count > 1 else 1
+
+    time_sel        = _coerce_time(time)
+    location_sel    = _coerce_location(location)
+    slope_sel       = _coerce_slope(slope)
+    realization_sel = _coerce_realization(realization)
     
     # --- Step 2: Resolve file paths ---
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
@@ -167,7 +197,7 @@ def read(
     
     # Continue with normal .pro/.smet file processing
     try:
-        pro_files, smet_files = _resolve_filepaths(source)
+        pro_files, smet_files = _resolve_filepaths(source, recursive)
     except (FileNotFoundError, TypeError) as e:
         logger.error(e)
         return None
@@ -184,10 +214,11 @@ def read(
     if lazy is None:
         total_files = len(pro_files) + len(smet_files)
         lazy = total_files > 10
-        logger.info(f"Auto-detected lazy={lazy} for {total_files} files")
+        logger.debug(f"Auto-detected lazy={lazy} for {total_files} files")
 
     # --- Step 4: Read and process data files ---
-    datetime_start, datetime_end = (time.sel.start, time.sel.stop) if time and isinstance(time.sel, slice) else (None, None)
+    # TODO: The datetime_start *_end parsing results in nan for inclination and azimuth!
+    datetime_start, datetime_end = (time_sel.sel.start, time_sel.sel.stop) if time_sel and isinstance(time_sel.sel, slice) else (None, None)
     
     if lazy:
         chunks = chunks or {'time': 100, 'layer': -1}
@@ -198,14 +229,14 @@ def read(
         logger.info("Using lazy loading with Dask")
         pro_datasets = _read_pro_files_lazy(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
     else:
-        logger.info("Using eager loading with multiprocessing")
+        # logger.info("Using eager loading with multiprocessing")
         pro_datasets = _read_pro_files_eager(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
     
     smet_datasets = _read_smet_files(smet_files, datetime_start, datetime_end, logger)
 
     # --- Step 5: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
-    return _merge_and_finalize(all_datasets, time, location, slope, realization)
+    return _merge_and_finalize(all_datasets, time_sel, location_sel, slope_sel, realization_sel)
 
 
 # --------------------------------------------------------------------------- #
@@ -247,7 +278,7 @@ def _read_pro_files_eager(
     remove_soil = parser_kwargs.get('remove_soil', True)
     
     if max_layers_arg == 'auto':
-        logger.info(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
+        logger.debug(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
         
         if n_cpus_use > 1 and len(pro_files) > 1:
             # Parallel pre-scan
@@ -264,12 +295,12 @@ def _read_pro_files_eager(
             layer_counts = [_scan_pro_for_max_layers(fp, add_sh, remove_soil) for fp in pro_files]
         
         max_layers_to_use = max(layer_counts) if layer_counts else 200
-        logger.info(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
+        logger.debug(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
     else:
         max_layers_to_use = int(max_layers_arg)
     
     # --- Stage 2: Parallel Loading with Direct Multiprocessing ---
-    logger.info(f"Loading {len(pro_files)} files eagerly with {n_cpus_use} workers...")
+    logger.info(f"Loading {len(pro_files)} datasets eagerly with {n_cpus_use} workers...")
     
     if n_cpus_use > 1 and len(pro_files) > 1:
         # Parallel processing
@@ -293,7 +324,7 @@ def _read_pro_files_eager(
     
     # Filter out None results
     final_datasets = [ds for ds in datasets if ds is not None]
-    logger.info(f"Successfully loaded {len(final_datasets)} datasets")
+    logger.debug(f"Successfully assembled {len(final_datasets)} datasets")
     
     return final_datasets
 
@@ -395,7 +426,7 @@ def _read_pro_files_lazy(
     remove_soil = parser_kwargs.get('remove_soil', True)
     
     if max_layers_arg == 'auto':
-        logger.info(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
+        logger.debug(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
         use_parallel = n_cpus_use > 1 and len(pro_files) > 1
         layer_counts = []
         if use_parallel:
@@ -416,7 +447,7 @@ def _read_pro_files_lazy(
             layer_counts = [_scan_pro_for_max_layers(fp, add_sh, remove_soil) for fp in pro_files]
         
         max_layers_to_use = max(layer_counts) if layer_counts else 200
-        logger.info(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
+        logger.debug(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
     else:
         max_layers_to_use = int(max_layers_arg)
     
@@ -957,8 +988,16 @@ def _create_pro_dataset(
             'latitude': ('location', [float(metadata.get('latitude', np.nan))]),
             'longitude': ('location', [float(metadata.get('longitude', np.nan))]),
             'altitude': ('location', [float(metadata.get('altitude', np.nan))]),
-            'slope_inclination': ('slope', [float(metadata.get('slopeAngle', np.nan))]),
-            'slope_azimuth': ('slope', [float(metadata.get('slopeAzi', np.nan))])
+            'slope_inclination': ('slope', [
+                int(round(float(metadata.get('slopeAngle', np.nan))))
+                if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
+                else np.nan
+            ]),
+            'slope_azimuth': ('slope', [
+                int(round(float(metadata.get('slopeAzi', np.nan))))
+                if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
+                else np.nan
+            ])
         }
     )
 
@@ -1390,7 +1429,16 @@ def _merge_and_finalize(
         combined_profiles_ds = None
         if profile_dsets:
             if len(profile_dsets) > 1:
-                profile_dsets.sort(key=lambda ds: ds.slope_inclination.values[0])
+                # Sort by slope_inclination if it exists, otherwise use 0 as default
+                def get_slope_key(ds):
+                    if 'slope_inclination' in ds.coords:
+                        return ds.coords['slope_inclination'].values[0]
+                    elif 'slope_inclination' in ds.data_vars:
+                        return ds['slope_inclination'].values[0]
+                    else:
+                        return 0.0  # Default value if slope_inclination doesn't exist
+                
+                profile_dsets.sort(key=get_slope_key)
                 
                 # CRITICAL FIX: Save location-level coordinates before slope concat
                 # These coordinates (lat/lon/alt) should NOT vary with slope dimension
@@ -1465,6 +1513,27 @@ def _merge_and_finalize(
         logger.info(f"DEBUG _merge_and_finalize: slope_inclination dims = {final_dataset.data.slope_inclination.dims}")
     
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
+
+
+def _coerce_time(sel: Optional[TimeLike]) -> Optional[TimeSelector]:
+    if sel is None or isinstance(sel, TimeSelector):
+        return sel
+    return TimeSelector(sel=sel)
+
+def _coerce_location(sel: Optional[LocationLike]) -> Optional[LocationSelector]:
+    if sel is None or isinstance(sel, LocationSelector):
+        return sel
+    return LocationSelector(sel=sel)
+
+def _coerce_slope(sel: Optional[SlopeLike]) -> Optional[SlopeSelector]:
+    if sel is None or isinstance(sel, SlopeSelector):
+        return sel
+    return SlopeSelector(sel=sel)
+
+def _coerce_realization(sel: Optional[RealizationLike]) -> Optional[RealizationSelector]:
+    if sel is None or isinstance(sel, RealizationSelector):
+        return sel
+    return RealizationSelector(sel=sel)
 
 # --------------------------------------------------------------------------- #
 #                           WRITE FUNCTIONS                                   #
@@ -1710,7 +1779,7 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
                     "complevel": 4
                 }
                 
-                logger.info(f"Encoding {coord_name} as S{max_len}")    
+                logger.debug(f"Encoding {coord_name} as S{max_len}")
     ds_to_save.to_netcdf(path, **kwargs)
     logging.info(f"Dataset successfully saved to {path}")
 
@@ -1831,18 +1900,18 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
         f.write(f"Altitude= {single_loc_ds.altitude.item():.0f}\n")
         
         # Get slope angle value
-        if 'slope_inclination' in single_loc_ds.coords:
-            slope_val = float(single_loc_ds.slope_inclination.values.item() if single_loc_ds.slope_inclination.size == 1 else 0.0)
-        else:
-            slope_val = 0.0
-        f.write(f"SlopeAngle= {slope_val:.1f}\n")
+        try:
+            slope_val = int(round(single_loc_ds.slope_inclination.values.item()))
+        except (AttributeError, ValueError):
+            slope_val = -999
+        f.write(f"SlopeAngle= {slope_val:.0f}\n")
         
-        # Handle slope_azimuth
-        if 'slope_azimuth' in single_loc_ds.coords:
-            azimuth = float(single_loc_ds.slope_azimuth.values.item() if single_loc_ds.slope_azimuth.size == 1 else 0.0)
-        else:
-            azimuth = 0.0
-        f.write(f"SlopeAzi= {azimuth:.1f}\n")
+        # Handle slope azimuth
+        try:
+            azimuth = int(round(single_loc_ds.slope_azimuth.values.item()))
+        except (AttributeError, ValueError):
+            azimuth = -999
+        f.write(f"SlopeAzi= {azimuth:.0f}\n")
         
         f.write("[DATA]\n")
 

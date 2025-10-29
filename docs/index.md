@@ -1,6 +1,17 @@
 # xsnow documentation
-
 Welcome to the **Tutorials** and the **API reference** for xsnow and its extension strategy.
+
+```{admonition} Version: ENV_DOC_VERSION
+:class: note
+
+This documentation website refers to xsnow ENV_DOC_VERSION.  
+To explore other versions, replace the URL part `/stable/` with a tag of your interest (e.g., `/dev/`, `/v0.0.1/`, etc). Alternatively, visit [xsnow.avacollabra.org/versionpicker/](https://xsnow.avacollabra.org/versionpicker/).
+```
+
+```{warning}
+
+This version represents an early prototype of xsnow. The user API may still change until the first major release planned for Spring/Summer 2026.
+```
 
 ## Background
 
