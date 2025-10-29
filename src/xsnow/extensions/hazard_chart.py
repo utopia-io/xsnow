@@ -1,3 +1,28 @@
+"""
+Summary
+-------
+Compute and plot hazard charts from xsnowDataset
+
+This extension module serves as a template for demonstrating how to develop an extension to xsnow
+that implements completely new functionality and adds a new dimension to the xsnowDataset class.
+This coincides with *application scenario 2* from the xsnow extension framework. 
+
+As demonstrated in this module, the class definition of such an extension uses the xsnow 
+``DatasetDecorator`` class, which entirely handles the class configuration. A user can simply 
+create their own extension class by subclassing the `DatasetDecorator` and implementing class
+methods or module-level helper functions.
+
+Warnings
+--------
+This extension is still work-in-progress. While the status quo is sufficient for demonstrating
+how to create an extension to satisfy application scenario 2, it is not entirely useful yet
+in terms of its snow and avalanche related content.
+
+It will be updated to be generic and user-friendly.
+"""
+# Author(s): Florian Herla
+# License: https://gitlab.com/avacollabra/postprocessing/xsnow/-/raw/main/LICENSE?ref_type=heads
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -8,12 +33,11 @@ import xarray as xr
 
 from xsnow import DatasetDecorator
 
-"""
-TODO:
- * fix z minus issues
- * create axes limits per stability index
- * add timeseries plot
-"""
+
+# TODO:
+#  * fix z minus issues
+#  * create axes limits per stability index
+#  * add timeseries plot
 
 
 # ---------------------------------------------------------------------
