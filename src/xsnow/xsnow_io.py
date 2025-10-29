@@ -44,7 +44,10 @@ import dask.array as da
 # Import from the package's modules
 from .registry import registry
 from .core import xsnowDataset
-from .selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
+from .selectors import (
+    TimeSelector, LocationSelector, SlopeSelector, RealizationSelector,
+    TimeLike, LocationLike, SlopeLike, RealizationLike
+)
 from .plugin import register_xsnowDataset_method
 
 # Configure a basic logger for this module
@@ -68,28 +71,6 @@ HEADER_MAP = {
     'SlopeAzi=': 'slopeAzi',
     'StationName=': 'stationName'
 }
-
-# --- Selector Types ---
-IndexLike = Union[int, slice, Sequence[int]]
-
-TimeIndexScalar = Union[str, pd.Timestamp, np.datetime64]
-TimeIndexSeq    = Sequence[TimeIndexScalar]
-TimeSlice       = slice
-TimeLike = Union["TimeSelector", TimeIndexScalar, TimeSlice, TimeIndexSeq]
-
-LocationIndexScalar = str
-LocationIndexSeq    = Sequence[LocationIndexScalar]
-# - NOTE: bbox args (lat_range/lon_range/crs) cannot be expressed
-#   positionally here, so callers that want bbox still need to pass
-#   an actual LocationSelector(...)
-LocationLike = Union["LocationSelector", LocationIndexScalar, LocationIndexSeq]
-
-SlopeIndexLike = Union[int, slice, Sequence[int], xr.DataArray]  # xr <-> boolean mask
-SlopeQueryMapping = Mapping[str, Any]  # e.g., {"inclination": 30, "azimuth": 180}
-SlopeLike = Union["SlopeSelector", SlopeIndexLike, SlopeQueryMapping]
-
-RealIndexLike = Union[int, str, slice, Sequence[int], Sequence[str]]
-RealizationLike = Union["RealizationSelector", RealIndexLike]
 
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
