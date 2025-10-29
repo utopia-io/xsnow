@@ -40,11 +40,33 @@ print(subset_by_id)
 print(subset_by_bbox)
 """
 
-from typing import Any, Union, Sequence, Optional, Tuple
+from typing import Any, Union, Sequence, Optional, Tuple, Mapping
 import pandas as pd
 import xarray as xr
 import warnings
 import numpy as np
+
+IndexLike = Union[int, slice, Sequence[int]]
+
+TimeIndexScalar = Union[str, pd.Timestamp, np.datetime64]
+TimeIndexSeq    = Sequence[TimeIndexScalar]
+TimeSlice       = slice
+TimeLike = Union["TimeSelector", TimeIndexScalar, TimeSlice, TimeIndexSeq]
+
+LocationIndexScalar = str
+LocationIndexSeq    = Sequence[LocationIndexScalar]
+# - NOTE: bbox args (lat_range/lon_range/crs) cannot be expressed
+#   positionally here, so callers that want bbox still need to pass
+#   an actual LocationSelector(...)
+LocationLike = Union["LocationSelector", LocationIndexScalar, LocationIndexSeq]
+
+SlopeIndexLike = Union[int, slice, Sequence[int], xr.DataArray]  # xr <-> boolean mask
+SlopeQueryMapping = Mapping[str, Any]  # e.g., {"inclination": 30, "azimuth": 180}
+SlopeLike = Union["SlopeSelector", SlopeIndexLike, SlopeQueryMapping]
+
+RealIndexLike = Union[int, str, slice, Sequence[int], Sequence[str]]
+RealizationLike = Union["RealizationSelector", RealIndexLike]
+
 
 class Selector:
     """
@@ -72,10 +94,26 @@ class Selector:
         Returns:
             xr.Dataset: The subsetted dataset.
         """
-        
         s = self.sel
         if s is None:
             return ds
+
+        # Convert numpy datetime64 to pandas Timestamp
+        if isinstance(s, np.datetime64):
+            s = pd.Timestamp(s)
+        elif isinstance(s, slice):
+            start = s.start
+            stop = s.stop
+            step = s.step
+            
+            # Convert numpy datetime64 to pandas Timestamp
+            if start is not None and isinstance(start, np.datetime64):
+                start = pd.Timestamp(start)
+            if stop is not None and isinstance(stop, np.datetime64):
+                stop = pd.Timestamp(stop)
+            
+            # Reconstruct slice with converted values
+            s = slice(start, stop, step)
 
         # Boolean mask or DataArray: always label-based
         if isinstance(s, (xr.DataArray, xr.Dataset)) or (
@@ -84,12 +122,11 @@ class Selector:
         ):
             return ds.sel({self.dim: s})
 
-        # If slice of strings or datetimes => sel
-        if isinstance(s, slice) and (
-            isinstance(s.start, (str, pd.Timestamp)) or
-            isinstance(s.stop,  (str, pd.Timestamp))
-        ):
-            return ds.sel({self.dim: s})
+        # If slice with any datetime-like values => sel
+        if isinstance(s, slice):
+            if (s.start is not None and isinstance(s.start, (str, pd.Timestamp))) or \
+            (s.stop is not None and isinstance(s.stop, (str, pd.Timestamp))):
+                return ds.sel({self.dim: s})
 
         # If datetime, string, or a list of those => sel
         if isinstance(s, (str, pd.Timestamp)) or (
@@ -102,14 +139,12 @@ class Selector:
         try:
             return ds.isel({self.dim: s})
         except IndexError:
-            # If the index is out of bounds, return an empty dataset
-            # by selecting a zero-length slice of the dimension.
             return ds.isel({self.dim: slice(0, 0)})
 
 
 class TimeSelector(Selector):
     """A selector specifically for the 'time' dimension."""
-    def __init__(self, sel: Union[str, pd.Timestamp, slice, Sequence[pd.Timestamp]]):
+    def __init__(self, sel: Union[TimeIndexScalar, TimeSlice, TimeIndexSeq]):
         super().__init__("time", sel)
 
 
@@ -132,45 +167,108 @@ class LocationSelector(Selector):
 
     def apply(self, ds: xr.Dataset) -> xr.Dataset:
         """
-        Applies the location selection.
-
-        If lat_range or lon_range are provided, it performs a geographic
-        query. Otherwise, it falls back to the default ID-based selection.
+        Apply location selection - NOW MUCH SIMPLER!
         """
-        if self.lat_range is None and self.lon_range is None:
-            # If no geographic range is given, use the default behavior
-            return super().apply(ds)
-
-        # Check for CRS consistency
+        # Geographic bounding box selection
+        if self.lat_range is not None or self.lon_range is not None:
+            return self._apply_bbox(ds)
+        
+        # ✨ STRING SELECTION JUST WORKS!
+        # Base class handles str, list[str], int, slice automatically
+        return super().apply(ds)
+    
+    def _apply_bbox(self, ds: xr.Dataset) -> xr.Dataset:
+        """Apply geographic bounding box filter."""
         dataset_crs = ds.attrs.get('crs')
         if dataset_crs and dataset_crs != self.crs:
             warnings.warn(
                 f"Query CRS ('{self.crs}') does not match dataset CRS ('{dataset_crs}'). "
-                "Results may be inaccurate. Consider reprojecting your data."
+                "Results may be inaccurate."
             )
 
-        # Build a boolean mask for the geographic query
         mask = True
         if self.lat_range:
             if 'latitude' not in ds.coords:
-                raise ValueError("Dataset must have 'latitude' coordinates for geographic selection.")
+                raise ValueError("Dataset must have 'latitude' coordinates")
             mask &= (ds.latitude >= self.lat_range[0]) & (ds.latitude <= self.lat_range[1])
         
         if self.lon_range:
             if 'longitude' not in ds.coords:
-                raise ValueError("Dataset must have 'longitude' coordinates for geographic selection.")
+                raise ValueError("Dataset must have 'longitude' coordinates")
             mask &= (ds.longitude >= self.lon_range[0]) & (ds.longitude <= self.lon_range[1])
 
         return ds.sel(location=mask)
 
 
 class SlopeSelector(Selector):
-    """A selector specifically for the 'slope' dimension."""
-    def __init__(self, sel: Union[int, Sequence[int], slice, xr.DataArray]):
+    """
+    Selector for the 'slope' dimension.
+
+    Supports:
+    - int / list[int] / slice / xr.DataArray (existing positional/boolean logic)
+    - dict query like {'inclination': 30, 'azimuth': 180} to match slope
+      metadata coords/vars.
+    """
+    def __init__(self, sel: Union[SlopeIndexLike, SlopeQueryMapping]):
         super().__init__("slope", sel)
+
+    def apply(self, ds: xr.Dataset) -> xr.Dataset:
+        s = self.sel
+
+        # Case 1: dict-style metadata query for slope properties
+        if isinstance(s, dict):
+            # Build a cumulative mask over the slope dimension
+            # Start with all True
+            if "slope" not in ds.dims:
+                raise ValueError("Dataset has no 'slope' dimension")
+
+            mask = xr.DataArray(
+                np.ones(ds.sizes["slope"], dtype=bool),
+                dims=("slope",),
+            )
+
+            for key, expected in s.items():
+                # Look up candidate array (coord or data var)
+                if key in ds.coords:
+                    arr = ds.coords[key]
+                elif key in ds:
+                    arr = ds[key]
+                else:
+                    raise ValueError(
+                        f"SlopeSelector: cannot filter by '{key}'; "
+                        f"not found in dataset coords or variables."
+                    )
+
+                if "slope" not in arr.dims:
+                    raise ValueError(
+                        f"SlopeSelector: field '{key}' is not defined per-slope "
+                        f"(dims={arr.dims})"
+                    )
+
+                cond = (arr == expected)
+                # align to slope dim just in case of broadcasting
+                cond = cond.broadcast_like(mask)
+                mask = mask & cond
+
+            # Check if anything matched
+            if not bool(mask.any()):
+                # No slope satisfies all criteria. HARD FAIL.
+                criteria = ", ".join(f"{k} == {v}" for k, v in s.items())
+                raise ValueError(
+                    f"No slope matches criteria: {criteria}"
+                )
+
+            # Convert boolean mask -> integer indices
+            # (This avoids the ambiguity of .sel on integer coords.)
+            matching_idx = np.nonzero(mask.values)[0]
+
+            return ds.isel(slope=matching_idx)
+
+        # Case 2: everything else (ints, slices, xr.DataArray, etc.)
+        return super().apply(ds)
 
 
 class RealizationSelector(Selector):
     """A selector specifically for the 'realization' dimension."""
-    def __init__(self, sel: Union[int, Sequence[int], slice]):
+    def __init__(self, sel: RealIndexLike):
         super().__init__("realization", sel)
