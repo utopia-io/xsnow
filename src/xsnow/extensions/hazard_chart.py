@@ -3,13 +3,13 @@ Summary
 -------
 Compute and plot hazard charts from xsnowDataset
 
-This extension module serves as a template for demonstrating how to develop an extension to xsnow
+This extension module serves as a **template for demonstrating how to develop an extension** to xsnow
 that implements completely new functionality and adds a new dimension to the xsnowDataset class.
-This coincides with *application scenario 2* from the xsnow extension framework. 
+This coincides with **application scenario 2** from the xsnow extension framework. 
 
 As demonstrated in this module, the class definition of such an extension uses the xsnow 
 ``DatasetDecorator`` class, which entirely handles the class configuration. A user can simply 
-create their own extension class by subclassing the `DatasetDecorator` and implementing class
+**create their own extension class by subclassing the DatasetDecorator** and implementing class
 methods or module-level helper functions.
 
 Warnings
@@ -18,7 +18,7 @@ This extension is still work-in-progress. While the status quo is sufficient for
 how to create an extension to satisfy application scenario 2, it is not entirely useful yet
 in terms of its snow and avalanche related content.
 
-It will be updated to be generic and user-friendly.
+It will be updated to be generic and user-friendly, and to document the class and functions meaningfully.
 """
 # Author(s): Florian Herla
 # License: https://gitlab.com/avacollabra/postprocessing/xsnow/-/raw/main/LICENSE?ref_type=heads
