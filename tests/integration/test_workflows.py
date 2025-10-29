@@ -416,8 +416,8 @@ class TestStringCoordinateWorkflow:
 class TestSlopeCoordinateBugFixes:
     """Tests for slope coordinate preservation bug fixes.
     
-    These tests verify the fixes for issues where slope_inclination and 
-    slope_azimuth coordinates become NaN after operations like time slicing,
+    These tests verify the fixes for issues where inclination and 
+    azimuth coordinates become NaN after operations like time slicing,
     multi-location loading, and update operations.
     
     Reference: bug_analysis_and_fix.md
@@ -426,7 +426,7 @@ class TestSlopeCoordinateBugFixes:
     def test_time_slice_preserves_slope_coords(self, synthetic_pro, tmp_path):
         """Test that time slicing preserves slope coordinates.
         
-        Bug: slope_inclination and slope_azimuth became NaN after time slice.
+        Bug: inclination and azimuth became NaN after time slice.
         Root cause: coords='minimal' in concat operations.
         Fix: Changed to coords='all'.
         """
@@ -440,12 +440,12 @@ class TestSlopeCoordinateBugFixes:
         ds = read(tmp_path, lazy=False)
         
         # Verify slope coordinates exist and are valid initially
-        assert 'slope_inclination' in ds.data.coords
-        assert 'slope_azimuth' in ds.data.coords
-        initial_incl = float(ds.data.slope_inclination.values.flat[0])
-        initial_azi = float(ds.data.slope_azimuth.values.flat[0])
-        assert not np.isnan(initial_incl), "Initial slope_inclination should not be NaN"
-        assert not np.isnan(initial_azi), "Initial slope_azimuth should not be NaN"
+        assert 'inclination' in ds.data.coords
+        assert 'azimuth' in ds.data.coords
+        initial_incl = float(ds.data.inclination.values.flat[0])
+        initial_azi = float(ds.data.azimuth.values.flat[0])
+        assert not np.isnan(initial_incl), "Initial inclination should not be NaN"
+        assert not np.isnan(initial_azi), "Initial azimuth should not be NaN"
         
         # Perform time slice
         times = pd.to_datetime(ds.data.time.values)
@@ -453,12 +453,12 @@ class TestSlopeCoordinateBugFixes:
         ds_sliced = ds.sel(time=slice(None, mid_time.isoformat()))
         
         # BUG CHECK: Slope coordinates should still be valid after slice
-        assert 'slope_inclination' in ds_sliced.data.coords
-        assert 'slope_azimuth' in ds_sliced.data.coords
-        sliced_incl = float(ds_sliced.data.slope_inclination.values.flat[0])
-        sliced_azi = float(ds_sliced.data.slope_azimuth.values.flat[0])
-        assert not np.isnan(sliced_incl), "Slope_inclination became NaN after time slice!"
-        assert not np.isnan(sliced_azi), "Slope_azimuth became NaN after time slice!"
+        assert 'inclination' in ds_sliced.data.coords
+        assert 'azimuth' in ds_sliced.data.coords
+        sliced_incl = float(ds_sliced.data.inclination.values.flat[0])
+        sliced_azi = float(ds_sliced.data.azimuth.values.flat[0])
+        assert not np.isnan(sliced_incl), "inclination became NaN after time slice!"
+        assert not np.isnan(sliced_azi), "azimuth became NaN after time slice!"
         # Values should be preserved (whatever they are)
         assert sliced_incl == initial_incl, f"Slope changed from {initial_incl} to {sliced_incl}"
         assert sliced_azi == initial_azi, f"Azimuth changed from {initial_azi} to {sliced_azi}"
@@ -486,15 +486,15 @@ class TestSlopeCoordinateBugFixes:
         for loc in ds.location.values:
             loc_ds = ds.sel(location=loc)
             
-            assert 'slope_inclination' in loc_ds.coords
-            assert 'slope_azimuth' in loc_ds.coords
+            assert 'inclination' in loc_ds.coords
+            assert 'azimuth' in loc_ds.coords
             
-            incl = float(loc_ds.slope_inclination.values.flat[0])
-            azi = float(loc_ds.slope_azimuth.values.flat[0])
+            incl = float(loc_ds.inclination.values.flat[0])
+            azi = float(loc_ds.azimuth.values.flat[0])
             
             # BUG CHECK: Coordinates should not be NaN
-            assert not np.isnan(incl), f"{loc}: slope_inclination is NaN"
-            assert not np.isnan(azi), f"{loc}: slope_azimuth is NaN"
+            assert not np.isnan(incl), f"{loc}: inclination is NaN"
+            assert not np.isnan(azi), f"{loc}: azimuth is NaN"
     
     def test_update_preserves_slope_coords(self, synthetic_pro, tmp_path):
         """Test that update() method preserves slope coordinates.
@@ -517,8 +517,8 @@ class TestSlopeCoordinateBugFixes:
         ds_initial = read(archive_dir, lazy=False)
         
         # Verify initial slope coords are valid
-        initial_incl = float(ds_initial.data.slope_inclination.values.flat[0])
-        initial_azi = float(ds_initial.data.slope_azimuth.values.flat[0])
+        initial_incl = float(ds_initial.data.inclination.values.flat[0])
+        initial_azi = float(ds_initial.data.azimuth.values.flat[0])
         assert not np.isnan(initial_incl), "Initial slope should not be NaN"
         assert not np.isnan(initial_azi), "Initial azimuth should not be NaN"
         
@@ -537,14 +537,14 @@ class TestSlopeCoordinateBugFixes:
         ds_updated = ds_cached.update(archive_dir)
         
         # BUG CHECK: Slope coordinates should still be valid after update
-        assert 'slope_inclination' in ds_updated.data.coords
-        assert 'slope_azimuth' in ds_updated.data.coords
+        assert 'inclination' in ds_updated.data.coords
+        assert 'azimuth' in ds_updated.data.coords
         
-        updated_incl = float(ds_updated.data.slope_inclination.values.flat[0])
-        updated_azi = float(ds_updated.data.slope_azimuth.values.flat[0])
+        updated_incl = float(ds_updated.data.inclination.values.flat[0])
+        updated_azi = float(ds_updated.data.azimuth.values.flat[0])
         
-        assert not np.isnan(updated_incl), "Slope_inclination became NaN after update!"
-        assert not np.isnan(updated_azi), "Slope_azimuth became NaN after update!"
+        assert not np.isnan(updated_incl), "inclination became NaN after update!"
+        assert not np.isnan(updated_azi), "azimuth became NaN after update!"
         # Values should be preserved
         assert updated_incl == initial_incl, f"Slope changed from {initial_incl} to {updated_incl}"
         assert updated_azi == initial_azi, f"Azimuth changed from {initial_azi} to {updated_azi}"
@@ -575,14 +575,14 @@ class TestSlopeCoordinateBugFixes:
         ds = read(tmp_path, lazy=False)
         
         # BUG CHECK: Slope coords should come from PRO file, not NaN from SMET
-        assert 'slope_inclination' in ds.data.coords
-        assert 'slope_azimuth' in ds.data.coords
+        assert 'inclination' in ds.data.coords
+        assert 'azimuth' in ds.data.coords
         
-        incl = float(ds.data.slope_inclination.values.flat[0])
-        azi = float(ds.data.slope_azimuth.values.flat[0])
+        incl = float(ds.data.inclination.values.flat[0])
+        azi = float(ds.data.azimuth.values.flat[0])
         
-        assert not np.isnan(incl), "Slope_inclination is NaN - SMET NaN overwrote PRO value!"
-        assert not np.isnan(azi), "Slope_azimuth is NaN - SMET NaN overwrote PRO value!"
+        assert not np.isnan(incl), "inclination is NaN - SMET NaN overwrote PRO value!"
+        assert not np.isnan(azi), "azimuth is NaN - SMET NaN overwrote PRO value!"
     
     def test_multi_location_update_preserves_coords(self, synthetic_pro, tmp_path):
         """Test that updating multi-location datasets preserves slope coords for all locations.
@@ -607,8 +607,8 @@ class TestSlopeCoordinateBugFixes:
         for loc in ds_initial.location.values:
             loc_ds = ds_initial.sel(location=loc)
             initial_slopes[str(loc)] = (
-                float(loc_ds.slope_inclination.values.flat[0]),
-                float(loc_ds.slope_azimuth.values.flat[0])
+                float(loc_ds.inclination.values.flat[0]),
+                float(loc_ds.azimuth.values.flat[0])
             )
         
         # Cache it
@@ -631,11 +631,11 @@ class TestSlopeCoordinateBugFixes:
             loc_key = str(loc)
             loc_ds = ds_updated.sel(location=loc)
             
-            incl = float(loc_ds.slope_inclination.values.flat[0])
-            azi = float(loc_ds.slope_azimuth.values.flat[0])
+            incl = float(loc_ds.inclination.values.flat[0])
+            azi = float(loc_ds.azimuth.values.flat[0])
             
-            assert not np.isnan(incl), f"{loc}: slope_inclination is NaN after update"
-            assert not np.isnan(azi), f"{loc}: slope_azimuth is NaN after update"
+            assert not np.isnan(incl), f"{loc}: inclination is NaN after update"
+            assert not np.isnan(azi), f"{loc}: azimuth is NaN after update"
             
             # Values should be preserved
             if loc_key in initial_slopes:
@@ -656,13 +656,13 @@ class TestSlopeCoordinateBugFixes:
         ds = read(tmp_path, lazy=False)
         
         # Slope coordinates should exist (even if NaN)
-        assert 'slope_inclination' in ds.data.coords
-        assert 'slope_azimuth' in ds.data.coords
+        assert 'inclination' in ds.data.coords
+        assert 'azimuth' in ds.data.coords
         
         # For SMET-only files, slope coords may be NaN or from header
         # This is expected behavior - just verify coordinates exist
-        incl_array = ds.data.slope_inclination.values
-        azi_array = ds.data.slope_azimuth.values
+        incl_array = ds.data.inclination.values
+        azi_array = ds.data.azimuth.values
         
         # Extract scalar value
         incl = float(incl_array.flat[0])
