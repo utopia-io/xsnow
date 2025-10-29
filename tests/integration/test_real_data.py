@@ -163,8 +163,8 @@ class TestRealDataMultiSlope:
             assert ds.sizes['slope'] > 1, "Expected multiple slopes in gridded data"
             
             # Check slope metadata
-            assert 'inclination' in ds.data.coords
-            slope_angles = ds.data['inclination'].values
+            assert 'slope_inclination' in ds.data.coords
+            slope_angles = ds.data['slope_inclination'].values
             
             # Should have different slope angles
             unique_slopes = np.unique(slope_angles[~np.isnan(slope_angles)])
