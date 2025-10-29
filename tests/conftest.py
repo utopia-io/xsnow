@@ -190,6 +190,8 @@ StationName= {station_name}
 Latitude= 46.5
 Longitude= 10.5
 Altitude= 2500
+SlopeAngle= 35
+SlopeAzi= 180
 
 [DATA]
 0500,{timestamp}
@@ -215,6 +217,8 @@ Altitude= 2500
         
         content = f"""[STATION_PARAMETERS]
 StationName= WITH_SOIL
+SlopeAngle= 35
+SlopeAzi= 180
 
 [DATA]
 0500,01.01.2025 12:00:00
@@ -248,6 +252,8 @@ StationName= {station_name}
 Latitude= 46.5
 Longitude= 10.5
 Altitude= 2500
+SlopeAngle= 35
+SlopeAzi= 180
 
 [DATA]
 0500,01.01.2025 12:00:00
@@ -339,6 +345,8 @@ StationName= EMPTY_PROFILES
 0502,{n_layers},{densities}""")
         
         content = f"""[STATION_PARAMETERS]
+SlopeAngle=35
+SlopeAzi=180
 StationName= VARYING_LAYERS
 
 [DATA]
@@ -365,11 +373,17 @@ StationName= VARYING_LAYERS
 0501,2,0.1,0.2
 0502,2,{100 + i * 10},{200 + i * 10}""")
             
+            # Add unique slope values for each station
+            slope_angle = 30 + i * 5  # Station 0: 30°, Station 1: 35°, etc.
+            slope_azi = 180 + i * 10   # Station 0: 180°, Station 1: 190°, etc.
+            
             content = f"""[STATION_PARAMETERS]
 StationName= {station_name}
 Latitude= {46.0 + i * 0.1}
 Longitude= {10.0 + i * 0.1}
 Altitude= {2000 + i * 100}
+SlopeAngle= {slope_angle}
+SlopeAzi= {slope_azi}
 
 [DATA]
 {chr(10).join(profiles)}
@@ -385,6 +399,8 @@ Altitude= {2000 + i * 100}
         densities = ','.join(str(100 + i) for i in range(n_layers))
         
         content = f"""[STATION_PARAMETERS]
+slopeAngle=35
+SlopeAzi=180
 StationName= EXTREME_LAYERS
 
 [DATA]
@@ -442,6 +458,7 @@ class SyntheticSmetGenerator:
             data_lines.append(f"{ts.isoformat()} {ta:.2f} {rh:.2f}")
         
         content = f"""SMET 1.1 ASCII
+
 [HEADER]
 station_name = {station_name}
 latitude = 46.5
@@ -449,6 +466,7 @@ longitude = 10.5
 altitude = 2500
 nodata = -999
 fields = timestamp TA RH
+
 [DATA]
 {chr(10).join(data_lines)}
 """
@@ -731,4 +749,4 @@ if __name__ == "__main__":
         path = TESTDATA_DIR / subdir
         if path.exists():
             count = len(list(path.glob("*")))
-            print(f"  {subdir:20s}: {count} files")
+            print(f"  {subdir:20s}: {count} files") 

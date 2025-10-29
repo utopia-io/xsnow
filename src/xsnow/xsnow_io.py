@@ -30,14 +30,16 @@ import sys
 import logging
 import multiprocessing
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Union, Tuple, Sequence
+from typing import Dict, Optional, List, Any, Union, Tuple, Sequence, Mapping
 import concurrent.futures
+
 
 import numpy as np
 import pandas as pd
 import xarray as xr
 from dask.base import compute
 from dask.delayed import delayed
+import dask.array as da
 
 # Import from the package's modules
 from .registry import registry
@@ -67,12 +69,35 @@ HEADER_MAP = {
     'StationName=': 'stationName'
 }
 
+# --- Selector Types ---
+IndexLike = Union[int, slice, Sequence[int]]
+
+TimeIndexScalar = Union[str, pd.Timestamp, np.datetime64]
+TimeIndexSeq    = Sequence[TimeIndexScalar]
+TimeSlice       = slice
+TimeLike = Union["TimeSelector", TimeIndexScalar, TimeSlice, TimeIndexSeq]
+
+LocationIndexScalar = str
+LocationIndexSeq    = Sequence[LocationIndexScalar]
+# - NOTE: bbox args (lat_range/lon_range/crs) cannot be expressed
+#   positionally here, so callers that want bbox still need to pass
+#   an actual LocationSelector(...)
+LocationLike = Union["LocationSelector", LocationIndexScalar, LocationIndexSeq]
+
+SlopeIndexLike = Union[int, slice, Sequence[int], xr.DataArray]  # xr <-> boolean mask
+SlopeQueryMapping = Mapping[str, Any]  # e.g., {"inclination": 30, "azimuth": 180}
+SlopeLike = Union["SlopeSelector", SlopeIndexLike, SlopeQueryMapping]
+
+RealIndexLike = Union[int, str, slice, Sequence[int], Sequence[str]]
+RealizationLike = Union["RealizationSelector", RealIndexLike]
+
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
 # --------------------------------------------------------------------------- #
 
 def read(
     source: Union[str, List[str], Path, List[Path]],
+    recursive: bool = False, 
     time: Optional[TimeSelector] = None,
     location: Optional[LocationSelector] = None,
     slope: Optional[SlopeSelector] = None,
@@ -80,6 +105,7 @@ def read(
     lazy: Optional[bool] = None,
     n_cpus_use: Optional[int] = None,
     logger: Optional[logging.Logger] = None,
+    chunks: Optional[Dict[str, int]] = None,
     **parser_kwargs: Any
 ) -> Optional[xsnowDataset]:
     """
@@ -93,6 +119,9 @@ def read(
         source: The data source. Can be a path to a single file (e.g.,
             '.pro', '.smet', '.nc'), a directory containing data files, or a
             list of file paths.
+        recursive: If True, search subdirectories recursively for .pro and .smet
+            files when source is a directory. Default is False for backward
+            compatibility and to avoid accidentally including unwanted files.
         time: A `TimeSelector` object for filtering data by time.
         location: A `LocationSelector` object for filtering by station ID.
         slope: A `SlopeSelector` for filtering by slope angle.
@@ -104,6 +133,10 @@ def read(
         n_cpus_use: The number of CPU cores to use. If not provided, defaults
             to min(32, total_cores - 1), with a minimum of 1.
         logger: An optional, pre-configured logger instance.
+        chunks: Chunk sizes for dask arrays when lazy=True.       
+                Dict with keys 'time' and 'layer'.                  
+                Default: {'time': 100, 'layer': -1}                
+                Example: {'time': 50, 'layer': 100}                
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions, such as `max_layers='auto'`, `remove_soil=True`,
             `add_surface_sh_as_layer=True`.
@@ -122,13 +155,18 @@ def read(
         >>> # Force eager loading for quick access
         >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
     """
-# --- Step 1: Setup Logger and CPU count ---
-    if logger is None:
+# --- Step 1: Setup ---
+    if logger is None or logger is True:
         logger = logging.getLogger(__name__)
 
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
         n_cpus_use = min(32, cpu_count - 1) if cpu_count and cpu_count > 1 else 1
+
+    time_sel        = _coerce_time(time)
+    location_sel    = _coerce_location(location)
+    slope_sel       = _coerce_slope(slope)
+    realization_sel = _coerce_realization(realization)
     
     # --- Step 2: Resolve file paths ---
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
@@ -147,6 +185,11 @@ def read(
                                         for val in coord_data.values]
                         ds[coord_name] = (coord_data.dims, decoded_values)
             
+            # DEBUG: Check slope coordinates after loading
+            if 'slope_inclination' in ds.coords:
+                logger.info(f"DEBUG read NetCDF: slope_inclination values AFTER load = {ds.slope_inclination.values}")
+                logger.info(f"DEBUG read NetCDF: slope_inclination dims = {ds.slope_inclination.dims}")
+            
             return xsnowDataset(ds)
         except Exception as e:
             logger.warning(f"Failed to read NetCDF file {source}: {e}")
@@ -154,7 +197,7 @@ def read(
     
     # Continue with normal .pro/.smet file processing
     try:
-        pro_files, smet_files = _resolve_filepaths(source)
+        pro_files, smet_files = _resolve_filepaths(source, recursive)
     except (FileNotFoundError, TypeError) as e:
         logger.error(e)
         return None
@@ -171,23 +214,29 @@ def read(
     if lazy is None:
         total_files = len(pro_files) + len(smet_files)
         lazy = total_files > 10
-        logger.info(f"Auto-detected lazy={lazy} for {total_files} files")
+        logger.debug(f"Auto-detected lazy={lazy} for {total_files} files")
 
     # --- Step 4: Read and process data files ---
-    datetime_start, datetime_end = (time.sel.start, time.sel.stop) if time and isinstance(time.sel, slice) else (None, None)
+    # TODO: The datetime_start *_end parsing results in nan for inclination and azimuth!
+    datetime_start, datetime_end = (time_sel.sel.start, time_sel.sel.stop) if time_sel and isinstance(time_sel.sel, slice) else (None, None)
     
     if lazy:
+        chunks = chunks or {'time': 100, 'layer': -1}
+
+        parser_kwargs['use_dask'] = lazy      # ← Set the flag
+        parser_kwargs['chunks'] = chunks      # ← Set the chunks
+
         logger.info("Using lazy loading with Dask")
         pro_datasets = _read_pro_files_lazy(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
     else:
-        logger.info("Using eager loading with multiprocessing")
+        # logger.info("Using eager loading with multiprocessing")
         pro_datasets = _read_pro_files_eager(pro_files, datetime_start, datetime_end, n_cpus_use, logger, parser_kwargs)
     
     smet_datasets = _read_smet_files(smet_files, datetime_start, datetime_end, logger)
 
     # --- Step 5: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
-    return _merge_and_finalize(all_datasets, time, location, slope, realization)
+    return _merge_and_finalize(all_datasets, time_sel, location_sel, slope_sel, realization_sel)
 
 
 # --------------------------------------------------------------------------- #
@@ -229,7 +278,7 @@ def _read_pro_files_eager(
     remove_soil = parser_kwargs.get('remove_soil', True)
     
     if max_layers_arg == 'auto':
-        logger.info(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
+        logger.debug(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
         
         if n_cpus_use > 1 and len(pro_files) > 1:
             # Parallel pre-scan
@@ -246,12 +295,12 @@ def _read_pro_files_eager(
             layer_counts = [_scan_pro_for_max_layers(fp, add_sh, remove_soil) for fp in pro_files]
         
         max_layers_to_use = max(layer_counts) if layer_counts else 200
-        logger.info(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
+        logger.debug(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
     else:
         max_layers_to_use = int(max_layers_arg)
     
     # --- Stage 2: Parallel Loading with Direct Multiprocessing ---
-    logger.info(f"Loading {len(pro_files)} files eagerly with {n_cpus_use} workers...")
+    logger.info(f"Loading {len(pro_files)} datasets eagerly with {n_cpus_use} workers...")
     
     if n_cpus_use > 1 and len(pro_files) > 1:
         # Parallel processing
@@ -275,7 +324,7 @@ def _read_pro_files_eager(
     
     # Filter out None results
     final_datasets = [ds for ds in datasets if ds is not None]
-    logger.info(f"Successfully loaded {len(final_datasets)} datasets")
+    logger.debug(f"Successfully assembled {len(final_datasets)} datasets")
     
     return final_datasets
 
@@ -335,14 +384,15 @@ def _read_pro_files_lazy(
     parser_kwargs: Dict
 ) -> List[xr.Dataset]:
     """
-    Parses and creates datasets from .pro files using a Dask-based workflow.
-
-    This function orchestrates a scalable, two-stage process:
-    1.  A fast, parallel pre-scan of all files to determine the maximum number
-        of layers required for padding the final dataset.
-    2.  Construction of a Dask computation graph where each task lazily reads
-        one .pro file and converts it into an xarray.Dataset.
-    3.  Execution of the Dask graph to compute all datasets in parallel.
+    Parses and creates datasets from .pro files with optional lazy loading.
+    
+    Behavior depends on the 'use_dask' flag in parser_kwargs:
+    - If use_dask=True: Returns datasets backed by dask arrays (truly lazy).
+      Data is not computed until user explicitly calls .compute() or .load().
+      Suitable for datasets larger than RAM.
+    - If use_dask=False: Uses Dask for parallel file processing, then calls
+      compute() to create numpy-backed datasets. Faster for small datasets
+      that fit in memory.
 
     Args:
         pro_files: A list of file paths to .pro files.
@@ -350,15 +400,24 @@ def _read_pro_files_lazy(
         datetime_end: An optional end timestamp for filtering.
         n_cpus_use: The number of CPU cores to use for parallel processing.
         logger: A configured logger instance.
-        parser_kwargs: Additional keyword arguments for the parser.
+        parser_kwargs: Additional keyword arguments for the parser, including:
+            - 'use_dask' (bool): Whether to create dask arrays (lazy) or numpy arrays (eager)
+            - 'chunks' (dict): Chunk sizes if use_dask=True, e.g., {'time': 100, 'layer': -1}
+            - 'max_layers': Max layers to pad to
+            - 'remove_soil' (bool): Remove soil layers
+            - 'add_surface_sh_as_layer' (bool): Add surface hoar as layer
 
     Returns:
-        A list of xarray.Dataset objects, one for each successfully
-        processed .pro file.
+        A list of xarray.Dataset objects. If use_dask=True, these contain
+        dask arrays and are truly lazy. If use_dask=False, these contain
+        numpy arrays and data is already loaded in memory.
     """
     if not pro_files:
         return []
 
+    # Extract use_dask flag - default to True since this function is meant to be lazy
+    use_dask = parser_kwargs.get('use_dask', True)
+    
     # --- Stage 1: Parallel Pre-scan for Max Layers ---
     max_layers_arg = parser_kwargs.get('max_layers', 'auto')
     
@@ -367,11 +426,11 @@ def _read_pro_files_lazy(
     remove_soil = parser_kwargs.get('remove_soil', True)
     
     if max_layers_arg == 'auto':
-        logger.info(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
+        logger.debug(f"Pre-scanning {len(pro_files)} .pro files to determine max layer dimension...")
         use_parallel = n_cpus_use > 1 and len(pro_files) > 1
         layer_counts = []
         if use_parallel:
-            # CHANGE: Use 'spawn' context to avoid fork() deprecation warning
+            # Use 'spawn' context to avoid fork() deprecation warning
             import multiprocessing
             ctx = multiprocessing.get_context('spawn')
             
@@ -388,29 +447,71 @@ def _read_pro_files_lazy(
             layer_counts = [_scan_pro_for_max_layers(fp, add_sh, remove_soil) for fp in pro_files]
         
         max_layers_to_use = max(layer_counts) if layer_counts else 200
-        logger.info(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
+        logger.debug(f"Pre-scan complete. Max layers found: {max_layers_to_use}")
     else:
         max_layers_to_use = int(max_layers_arg)
+    
+    # --- Stage 2: Create Datasets ---
+    if use_dask:
+        # TRUE LAZY MODE: Create datasets with dask arrays (no compute!)
+        logger.info("Creating lazy datasets backed by dask arrays...")
+        logger.info("Data will NOT be computed until explicitly requested by user")
+        
+        final_datasets = []
+        chunks = parser_kwargs.get('chunks', {'time': 100, 'layer': -1})
+        
+        for fp in pro_files:
+            try:
+                # Parse raw data (metadata and structure - small, can be eager)
+                metadata, profiles = _read_pro_raw(
+                    fp,
+                    datetime_start=datetime_start,
+                    datetime_end=datetime_end,
+                    code_map=CODE_TO_NAME_MAP,
+                    logger=logger,
+                    remove_soil=remove_soil,
+                    add_surface_sh_as_layer=add_sh
+                )
                 
-    # --- Stage 2: Build and Compute Dask Graph ---
-    logger.info("Building Dask graph for lazy dataset creation...")
-    lazy_datasets = [
-        _create_dataset_from_pro_file(
-            fp, max_layers_to_use, datetime_start, datetime_end, logger, parser_kwargs
-        ) for fp in pro_files
-    ]
+                if profiles:
+                    # Create dataset with dask arrays (lazy!)
+                    ds = _create_pro_dataset(
+                        metadata, 
+                        profiles, 
+                        max_layers_to_use, 
+                        add_sh,
+                        use_dask=True,  # Create dask arrays
+                        chunks=chunks
+                    )
+                    if ds is not None:
+                        final_datasets.append(ds)
+                        
+            except Exception as e:
+                logger.warning(f"Failed to process {fp.name}: {e}")
+        
+        logger.info(f"Created {len(final_datasets)} lazy datasets (data NOT yet loaded into memory)")
+        return final_datasets
+        
+    else:
+        # PARALLEL PROCESSING MODE: Use Dask for parallelization, compute immediately
+        logger.info("Building Dask graph for parallel dataset creation...")
+        lazy_datasets = [
+            _create_dataset_from_pro_file(
+                fp, max_layers_to_use, datetime_start, datetime_end, logger, parser_kwargs
+            ) for fp in pro_files
+        ]
 
-    if not lazy_datasets:
-        return []
-    
-    logger.info(f"Computing {len(lazy_datasets)} tasks in parallel using Dask...")
-    pro_datasets = list(compute(*lazy_datasets, scheduler='processes', num_workers=n_cpus_use))
-    
-    # Filter out None results from files that had no valid data
-    final_datasets = [ds for ds in pro_datasets if ds is not None]
-    logger.info(f"Successfully created {len(final_datasets)} datasets.")
-    
-    return final_datasets
+        if not lazy_datasets:
+            return []
+        
+        logger.info(f"Computing {len(lazy_datasets)} tasks in parallel using Dask...")
+        pro_datasets = list(compute(*lazy_datasets, scheduler='processes', num_workers=n_cpus_use))
+        
+        # Filter out None results from files that had no valid data
+        final_datasets = [ds for ds in pro_datasets if ds is not None]
+        logger.info(f"Successfully created {len(final_datasets)} datasets (data loaded into memory).")
+        
+        return final_datasets
 
 @delayed
 def _create_dataset_from_pro_file(
@@ -757,11 +858,20 @@ def _read_pro_raw(
 
     return metadata, temp_profiles
 
+def _create_array(shape, fill_value, dtype, use_dask=False, chunks=None):
+    """Helper to create either numpy or dask array."""
+    if use_dask:
+        return da.full(shape, fill_value, dtype=dtype, chunks=chunks)
+    else:
+        return np.full(shape, fill_value, dtype=dtype)
+
 def _create_pro_dataset(
     metadata: Dict,
     profiles: List[Dict],
     max_layers: int,
-    add_surface_sh_as_layer: bool = True
+    add_surface_sh_as_layer: bool = True,
+    use_dask: bool = False,
+    chunks: Dict[str, int] | None = None
 ) -> Optional[xr.Dataset]:
     """Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
 
@@ -801,6 +911,8 @@ def _create_pro_dataset(
     if not profiles:
         return None
 
+    chunks = chunks or {'time': 100, 'layer': -1}
+        
     timestamps = pd.to_datetime([p['timestamp'] for p in profiles], format='%d.%m.%Y %H:%M:%S')
     
     all_params = sorted({
@@ -809,9 +921,18 @@ def _create_pro_dataset(
     })
 
     data_vars = {}
+    
     for param in all_params:
         shape = (1, len(profiles), 1, 1, max_layers)
-        arr = np.full(shape, np.nan, dtype=np.float32)
+        
+        # Determine chunks
+        chunk_spec = None
+        if use_dask:
+            chunk_spec = (1, chunks['time'], 1, 1, chunks['layer'])
+        
+        # Single line - same for both modes!
+        arr = _create_array(shape, np.nan, np.float32, use_dask, chunk_spec)
+        
         data_vars[param] = (("location", "time", "slope", "realization", "layer"), arr)
 
     for i, profile in enumerate(profiles):
@@ -867,8 +988,16 @@ def _create_pro_dataset(
             'latitude': ('location', [float(metadata.get('latitude', np.nan))]),
             'longitude': ('location', [float(metadata.get('longitude', np.nan))]),
             'altitude': ('location', [float(metadata.get('altitude', np.nan))]),
-            'slope_inclination': ('slope', [float(metadata.get('slopeAngle', np.nan))]),
-            'slope_azimuth': ('slope', [float(metadata.get('slopeAzi', np.nan))])
+            'slope_inclination': ('slope', [
+                int(round(float(metadata.get('slopeAngle', np.nan))))
+                if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
+                else np.nan
+            ]),
+            'slope_azimuth': ('slope', [
+                int(round(float(metadata.get('slopeAzi', np.nan))))
+                if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
+                else np.nan
+            ])
         }
     )
 
@@ -889,6 +1018,8 @@ def _create_pro_dataset(
             ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
 
     return ds
+
+
 
 # --------------------------------------------------------------------------- #
 #                  PRE-SCAN HELPER FUNCTIONS FOR .PRO FILES                   #
@@ -1158,15 +1289,36 @@ def read_smet(
             'altitude': ('location', [float(header.get('altitude', np.nan))]),
         })
     
+    # FIXED: Try to get slope values from SMET header before defaulting to NaN
+    # This prevents unnecessary NaN assignments when slope metadata is available
     if 'slope_inclination' not in ds.coords:
+        # Try to get slope angle from various possible header keys
+        slope_incl = header.get('SlopeAngle', header.get('slopeAngle', 
+                    header.get('slope_angle', header.get('SlopeAzi='))))
+        slope_azi = header.get('SlopeAzi', header.get('slopeAzi', 
+                    header.get('slope_azi', header.get('SlopeAzi='))))
+        
+        # Convert to float, defaulting to NaN if not available or invalid
+        try:
+            slope_incl = float(slope_incl) if slope_incl is not None else np.nan
+        except (ValueError, TypeError):
+            slope_incl = np.nan
+            
+        try:
+            slope_azi = float(slope_azi) if slope_azi is not None else np.nan
+        except (ValueError, TypeError):
+            slope_azi = np.nan
+        
         ds = ds.assign_coords({
-            'slope_inclination': ('slope', [np.nan]),
-            'slope_azimuth': ('slope', [np.nan])
+            'slope_inclination': ('slope', [slope_incl]),
+            'slope_azimuth': ('slope', [slope_azi])
         })
 
     return ds
 
-def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]]) -> Tuple[List[Path], List[Path]]:
+def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]],
+                       recursive: bool = False
+) -> Tuple[List[Path], List[Path]]:
     """
     Resolves the source argument into separate lists of .pro and .smet files.
 
@@ -1196,8 +1348,10 @@ def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]]) -> 
             continue
         
         if p.is_dir():
-            resolved_files.extend(p.glob('*.pro'))
-            resolved_files.extend(p.glob('*.smet'))
+            pattern = '**/*.pro' if recursive else '*.pro'
+            resolved_files.extend(p.glob(pattern))
+            pattern = '**/*.smet' if recursive else '*.smet'
+            resolved_files.extend(p.glob(pattern))
         else:
             resolved_files.append(p)
 
@@ -1275,12 +1429,44 @@ def _merge_and_finalize(
         combined_profiles_ds = None
         if profile_dsets:
             if len(profile_dsets) > 1:
-                profile_dsets.sort(key=lambda ds: ds.slope_inclination.values[0])
-                combined_profiles_ds = xr.concat(profile_dsets, dim='slope', join='outer', coords='minimal')
+                # Sort by slope_inclination if it exists, otherwise use 0 as default
+                def get_slope_key(ds):
+                    if 'slope_inclination' in ds.coords:
+                        return ds.coords['slope_inclination'].values[0]
+                    elif 'slope_inclination' in ds.data_vars:
+                        return ds['slope_inclination'].values[0]
+                    else:
+                        return 0.0  # Default value if slope_inclination doesn't exist
+                
+                profile_dsets.sort(key=get_slope_key)
+                
+                # CRITICAL FIX: Save location-level coordinates before slope concat
+                # These coordinates (lat/lon/alt) should NOT vary with slope dimension
+                location_coords = {}
+                for coord_name in ['latitude', 'longitude', 'altitude', 'location']:
+                    if coord_name in profile_dsets[0].coords:
+                        location_coords[coord_name] = profile_dsets[0][coord_name]
+                
+                # Drop location-level coords before concatenating along slope
+                profile_dsets_cleaned = [
+                    ds.drop_vars([c for c in ['latitude', 'longitude', 'altitude', 'location'] if c in ds.coords],
+                                 errors='ignore')
+                    for ds in profile_dsets
+                ]
+                
+                # Concatenate along slope dimension
+                combined_profiles_ds = xr.concat(profile_dsets_cleaned, dim='slope', join='outer', coords='all')
                 combined_profiles_ds['slope'] = np.arange(combined_profiles_ds.sizes['slope'])
+                
+                # Restore location-level coordinates (without slope dimension)
+                combined_profiles_ds = combined_profiles_ds.assign_coords(location_coords)
             else:
                 combined_profiles_ds = profile_dsets[0]
 
+        # IMPORTANT: Profile datasets (from .pro files) must come FIRST in the merge list.
+        # xr.merge with compat='override' keeps the FIRST dataset's coordinate values when there are conflicts.
+        # This ensures valid slope_inclination/azimuth values from .pro files take precedence
+        # over potentially NaN values from .smet files, preventing coordinate corruption.
         all_to_merge = ([combined_profiles_ds] if combined_profiles_ds is not None else []) + timeseries_dsets
         
         if not all_to_merge: 
@@ -1302,7 +1488,7 @@ def _merge_and_finalize(
         merged_datasets,
         dim='location', 
         join='outer', 
-        coords='minimal', 
+        coords='all', 
         data_vars='all', 
         compat='override'
     )
@@ -1321,7 +1507,33 @@ def _merge_and_finalize(
 
     final_dataset = xsnowDataset(final_xr_dataset)
     
+    # DEBUG: Check slope coordinates after merge
+    if 'slope_inclination' in final_dataset.data.coords:
+        logger.info(f"DEBUG _merge_and_finalize: slope_inclination values = {final_dataset.data.slope_inclination.values}")
+        logger.info(f"DEBUG _merge_and_finalize: slope_inclination dims = {final_dataset.data.slope_inclination.dims}")
+    
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
+
+
+def _coerce_time(sel: Optional[TimeLike]) -> Optional[TimeSelector]:
+    if sel is None or isinstance(sel, TimeSelector):
+        return sel
+    return TimeSelector(sel=sel)
+
+def _coerce_location(sel: Optional[LocationLike]) -> Optional[LocationSelector]:
+    if sel is None or isinstance(sel, LocationSelector):
+        return sel
+    return LocationSelector(sel=sel)
+
+def _coerce_slope(sel: Optional[SlopeLike]) -> Optional[SlopeSelector]:
+    if sel is None or isinstance(sel, SlopeSelector):
+        return sel
+    return SlopeSelector(sel=sel)
+
+def _coerce_realization(sel: Optional[RealizationLike]) -> Optional[RealizationSelector]:
+    if sel is None or isinstance(sel, RealizationSelector):
+        return sel
+    return RealizationSelector(sel=sel)
 
 # --------------------------------------------------------------------------- #
 #                           WRITE FUNCTIONS                                   #
@@ -1426,20 +1638,34 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
                             {dim: range(max_size)}, fill_value=np.nan
                         )
             
+            # BEFORE concat: Save coordinates from existing dataset
+            slope_coords_to_preserve = {}
+            for coord_name in ['slope_inclination', 'slope_azimuth']:
+                if coord_name in existing_loc_data.coords:
+                    slope_coords_to_preserve[coord_name] = existing_loc_data[coord_name]
+            
             # Concatenate along time dimension for this location
             merged_loc = xr.concat(
                 [existing_loc_data, new_loc_data],
                 dim='time',
-                coords='minimal',
+                coords='all',
                 compat='override'
             )
             
-            # Ensure location is preserved as a coordinate
-            if 'location' not in merged_loc.dims:
-                merged_loc = merged_loc.expand_dims(location=[loc_name])
+            # AFTER concat: Restore preserved coordinates
+            if slope_coords_to_preserve:
+                merged_loc = merged_loc.assign_coords(slope_coords_to_preserve)
             
-            merged_parts.append(merged_loc)
-        
+            # Ensure location is preserved as a dimension
+            if 'location' not in merged_loc.dims:
+                # Drop location coordinate if it exists to avoid conflict
+                if 'location' in merged_loc.coords:
+                    merged_loc = merged_loc.drop_vars('location')  # ✅ Drop first
+                # Add location as a new dimension with the correct value
+                merged_loc = merged_loc.expand_dims(location=[loc_name])  # ✅ Then add
+
+            merged_parts.append(merged_loc)  
+                  
         # 2. Add locations that only exist in existing dataset
         for loc_name in only_in_existing:
             loc_data = existing_ds.data.sel(location=loc_name)
@@ -1458,7 +1684,7 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
         combined = xr.concat(
             merged_parts,
             dim='location',
-            coords='minimal',
+            coords='all',
             compat='override'
         )
         
@@ -1494,7 +1720,7 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
         combined = xr.concat(
             [existing_ds.data, new_data_obj.data],
             dim='location',
-            coords='minimal',
+            coords='all',
             compat='override'
         )
     
@@ -1526,6 +1752,11 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     # Create a copy to avoid modifying the original
     ds_to_save = ds.to_xarray().copy()
     
+    # DEBUG: Check slope coordinates before saving
+    if 'slope_inclination' in ds_to_save.coords:
+        logger.info(f"DEBUG to_netcdf: slope_inclination values BEFORE save = {ds_to_save.slope_inclination.values}")
+        logger.info(f"DEBUG to_netcdf: slope_inclination dims = {ds_to_save.slope_inclination.dims}")
+    
     # ENCODE STRING COORDINATES FOR NETCDF
     for coord_name in ("location", "realization"):
         if coord_name in ds_to_save.coords:
@@ -1548,7 +1779,7 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
                     "complevel": 4
                 }
                 
-                logger.info(f"Encoding {coord_name} as S{max_len}")    
+                logger.debug(f"Encoding {coord_name} as S{max_len}")
     ds_to_save.to_netcdf(path, **kwargs)
     logging.info(f"Dataset successfully saved to {path}")
 
@@ -1595,9 +1826,14 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
         f.write("SMET 1.1 ASCII\n")
         f.write("[HEADER]\n")
         f.write(f"station_name = {ds.location.item()}\n")
-        f.write(f"latitude = {ds.latitude.item():.4f}\n")
-        f.write(f"longitude = {ds.longitude.item():.4f}\n")
-        f.write(f"altitude = {ds.altitude.item():.0f}\n")
+        # Handle coordinates that may have extra dimensions (e.g., slope)
+        # Take the first value if there are multiple
+        lat = float(ds.latitude.values.flat[0]) if ds.latitude.size > 1 else ds.latitude.item()
+        lon = float(ds.longitude.values.flat[0]) if ds.longitude.size > 1 else ds.longitude.item()
+        alt = float(ds.altitude.values.flat[0]) if ds.altitude.size > 1 else ds.altitude.item()
+        f.write(f"latitude = {lat:.4f}\n")
+        f.write(f"longitude = {lon:.4f}\n")
+        f.write(f"altitude = {alt:.0f}\n")
         f.write("nodata = -999\n")
         fields = "timestamp " + " ".join(df.columns)
         f.write(f"fields = {fields}\n")
@@ -1664,18 +1900,18 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
         f.write(f"Altitude= {single_loc_ds.altitude.item():.0f}\n")
         
         # Get slope angle value
-        if 'slope_inclination' in single_loc_ds.coords:
-            slope_val = float(single_loc_ds.slope_inclination.values.item() if single_loc_ds.slope_inclination.size == 1 else 0.0)
-        else:
-            slope_val = 0.0
-        f.write(f"SlopeAngle= {slope_val:.1f}\n")
+        try:
+            slope_val = int(round(single_loc_ds.slope_inclination.values.item()))
+        except (AttributeError, ValueError):
+            slope_val = -999
+        f.write(f"SlopeAngle= {slope_val:.0f}\n")
         
-        # Handle slope_azimuth
-        if 'slope_azimuth' in single_loc_ds.coords:
-            azimuth = float(single_loc_ds.slope_azimuth.values.item() if single_loc_ds.slope_azimuth.size == 1 else 0.0)
-        else:
-            azimuth = 0.0
-        f.write(f"SlopeAzi= {azimuth:.1f}\n")
+        # Handle slope azimuth
+        try:
+            azimuth = int(round(single_loc_ds.slope_azimuth.values.item()))
+        except (AttributeError, ValueError):
+            azimuth = -999
+        f.write(f"SlopeAzi= {azimuth:.0f}\n")
         
         f.write("[DATA]\n")
 

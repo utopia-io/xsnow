@@ -177,10 +177,73 @@ class LocationSelector(Selector):
 
         return ds.sel(location=mask)
 
+
 class SlopeSelector(Selector):
-    """A selector specifically for the 'slope' dimension."""
-    def __init__(self, sel: Union[int, Sequence[int], slice, xr.DataArray]):
+    """
+    Selector for the 'slope' dimension.
+
+    Supports:
+    - int / list[int] / slice / xr.DataArray (existing positional/boolean logic)
+    - dict query like {'inclination': 30, 'azimuth': 180} to match slope
+      metadata coords/vars.
+    """
+    def __init__(self, sel: Union[int, Sequence[int], slice, xr.DataArray, dict]):
         super().__init__("slope", sel)
+
+    def apply(self, ds: xr.Dataset) -> xr.Dataset:
+        s = self.sel
+
+        # Case 1: dict-style metadata query for slope properties
+        if isinstance(s, dict):
+            # Build a cumulative mask over the slope dimension
+            # Start with all True
+            if "slope" not in ds.dims:
+                raise ValueError("Dataset has no 'slope' dimension")
+
+            mask = xr.DataArray(
+                np.ones(ds.sizes["slope"], dtype=bool),
+                dims=("slope",),
+            )
+
+            for key, expected in s.items():
+                # Look up candidate array (coord or data var)
+                if key in ds.coords:
+                    arr = ds.coords[key]
+                elif key in ds:
+                    arr = ds[key]
+                else:
+                    raise ValueError(
+                        f"SlopeSelector: cannot filter by '{key}'; "
+                        f"not found in dataset coords or variables."
+                    )
+
+                if "slope" not in arr.dims:
+                    raise ValueError(
+                        f"SlopeSelector: field '{key}' is not defined per-slope "
+                        f"(dims={arr.dims})"
+                    )
+
+                cond = (arr == expected)
+                # align to slope dim just in case of broadcasting
+                cond = cond.broadcast_like(mask)
+                mask = mask & cond
+
+            # Check if anything matched
+            if not bool(mask.any()):
+                # No slope satisfies all criteria. HARD FAIL.
+                criteria = ", ".join(f"{k} == {v}" for k, v in s.items())
+                raise ValueError(
+                    f"No slope matches criteria: {criteria}"
+                )
+
+            # Convert boolean mask -> integer indices
+            # (This avoids the ambiguity of .sel on integer coords.)
+            matching_idx = np.nonzero(mask.values)[0]
+
+            return ds.isel(slope=matching_idx)
+
+        # Case 2: everything else (ints, slices, xr.DataArray, etc.)
+        return super().apply(ds)
 
 
 class RealizationSelector(Selector):

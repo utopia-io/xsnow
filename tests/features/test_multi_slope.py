@@ -31,7 +31,7 @@ class TestMultiSlopeDetection:
         
         ds = read(data_dir, lazy=False)
         
-        # Check slope_inclination coordinate
+        # Check inclination coordinate
         if 'slope_inclination' in ds.data.coords:
             slope_angles = ds.data['slope_inclination'].values
             
@@ -151,7 +151,13 @@ class TestMultiSlopeSelection:
         ds = read(data_dir, lazy=False)
         
         if 'slope_inclination' in ds.data.coords:
-            # Find slope with 30 degrees
+            # Select single location first (handles both single and multi-location)
+            if ds.sizes['location'] > 1:
+                ds = ds.isel(location=0)
+            else:
+                ds = ds.squeeze('location', drop=False)
+            
+            # Now slope_inclination should be 1D
             slope_angles = ds.data['slope_inclination'].values
             idx_30 = np.where(slope_angles == 30)[0]
             
@@ -159,7 +165,9 @@ class TestMultiSlopeSelection:
                 ds_30 = ds.isel(slope=idx_30[0])
                 
                 # Verify we got the right slope
-                assert ds_30.data['slope_inclination'].values == 30
+                incl_value = float(ds_30.data['slope_inclination'].values.flat[0])
+                assert np.isclose(incl_value, 30.0), \
+                    f"Expected 30.0, got {incl_value}"
 
 
 @pytest.mark.synthetic
