@@ -44,4 +44,5 @@ parts:
         sections:
           - file: api/_generated/xsnow.extensions.classification
           - file: api/_generated/xsnow.extensions.hazard_chart
+          - file: api/_generated/xsnow.extensions.critical_crack_length
 

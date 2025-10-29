@@ -1,3 +1,23 @@
+"""
+Summary
+-------
+Classify profiles, scalars, or layers in `xsnowDataset`s
+
+This is a very generic extension that allows masking or classfiying any fields in an ``xsnowDataset``.
+The module also acts as a **template for demonstrating how to develop a very simple extension**
+that adds a few additional xsnowDataset methods. This coincides with **application scenario 1** from
+the xsnow extension framework. 
+
+In brief: To develop an additional ``xsnowDataset`` method, simply write a function that takes an
+``xsnowDataset`` as first argument, and add the following line above the function signature:  
+``@register_xsnowDataset_method``. Check out this module's source code.
+
+Note
+----
+The extension is currently missing a convenient method to classify based on spatial considerations,
+be it through a geojson file or well-known-text filter. This feature will be added soon.
+"""
+
 from __future__ import annotations
 
 import re

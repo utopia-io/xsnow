@@ -1,5 +1,5 @@
 """
-Unit tests for the caic extension.
+Unit tests for the critical crack length extension.
 
 This test suite verifies the functionality of the analysis functions,
 ensuring they work correctly with the layer-based coordinate system and are
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from xsnow import xsnowDataset
-from xsnow.extensions import caic  # all methods are now registered on xsnowDataset
+from xsnow.extensions import critical_crack_length  # all methods are now registered on xsnowDataset
 
 @pytest.fixture
 def analysis_ds():
@@ -30,20 +30,10 @@ def analysis_ds():
     xr_ds = xr.Dataset(data, coords)
     return xsnowDataset(xr_ds)
 
-def test_find_layer_by_criteria(analysis_ds):
-    """Tests filtering layers based on a string criterion."""
-    criteria = "density < 300"
-    # FIX: Call as a method on the dataset object
-    filtered_ds = analysis_ds.find_layer_by_criteria(criteria)
-
-    expected = np.array([[[150, 250, np.nan, np.nan]]])
-    actual = filtered_ds['density'].values
-    np.testing.assert_allclose(expected, actual, equal_nan=True)
-
-def test_compute_critical_cut_length(analysis_ds):
+def test_compute_critical_crack_length(analysis_ds):
     """Tests the calculation of critical cut length."""
     # FIX: Call as a method on the dataset object
-    ds_with_rc = analysis_ds.compute_critical_cut_length()
+    ds_with_rc = analysis_ds.compute_critical_crack_length()
     ds_with_rc_cpu = ds_with_rc.to_cpu()
 
     assert 'rc_flat' in ds_with_rc_cpu
