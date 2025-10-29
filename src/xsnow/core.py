@@ -466,6 +466,11 @@ class DatasetDecorator(xsnowDataset):
         # stash init args for consistent re-wrapping
         self._decorator_args   = getattr(base, "_decorator_args", (base,))
         self._decorator_kwargs = getattr(base, "_decorator_kwargs", {})
+    
+    @property
+    def base(self):
+        """Return the underlying xsnowDataset being decorated."""
+        return self._base
 
     def _rewrap(self, new_data: xr.Dataset):
         """Return a new instance of *this* decorator class around new_data."""

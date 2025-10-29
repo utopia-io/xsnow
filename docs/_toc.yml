@@ -43,4 +43,5 @@ parts:
       - file: api/extensions/index
         sections:
           - file: api/_generated/xsnow.extensions.classification
+          - file: api/_generated/xsnow.extensions.hazard_chart
 
