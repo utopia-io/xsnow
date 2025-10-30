@@ -84,6 +84,7 @@ def read(
     slope: Optional[SlopeSelector] = None,
     realization: Optional[RealizationSelector] = None,
     lazy: Optional[bool] = None,
+    lazy_threshold: int = 30,
     n_cpus_use: Optional[int] = None,
     logger: Optional[logging.Logger] = None,
     chunks: Optional[Dict[str, int]] = None,
@@ -111,6 +112,8 @@ def read(
             large datasets). If False, load all data eagerly into memory with
             parallel processing (good for small to medium datasets). If None
             (default), auto-detect based on file count (sweet spot to be determined).
+        lazy_threshold: Number of files above which lazy loading is enabled
+                       when lazy=None (auto-detect). Default: 30 files.
         n_cpus_use: The number of CPU cores to use. If not provided, defaults
             to min(32, total_cores - 1), with a minimum of 1.
         logger: An optional, pre-configured logger instance.
@@ -167,9 +170,9 @@ def read(
                         ds[coord_name] = (coord_data.dims, decoded_values)
             
             # DEBUG: Check slope coordinates after loading
-            if 'inclination' in ds.coords:
-                logger.debug(f"read NetCDF: inclination values AFTER load = {ds.inclination.values}")
-                logger.debug(f"read NetCDF: inclination dims = {ds.inclination.dims}")
+            if 'slope_inclination' in ds.coords:
+                logger.debug(f"read NetCDF: slope_inclination values AFTER load = {ds.slope_inclination.values}")
+                logger.debug(f"read NetCDF: slope_inclination dims = {ds.slope_inclination.dims}")
             
             return xsnowDataset(ds)
         except Exception as e:
@@ -194,11 +197,11 @@ def read(
     # --- Step 3: Auto-detect lazy mode if not specified ---
     if lazy is None:
         total_files = len(pro_files) + len(smet_files)
-        lazy = total_files > 500
-        logger.debug(f"Auto-detected lazy={lazy} for {total_files} files")
+        lazy = total_files > lazy_threshold
+        logger.debug(f"Auto-detected lazy={lazy} for {total_files} files (threshold={lazy_threshold})")
 
     # --- Step 4: Read and process data files ---
-    # TODO: The datetime_start *_end parsing results in nan for inclination and azimuth!
+    # TODO: The datetime_start *_end parsing results in nan for slope_inclination and slope_azimuth!
     datetime_start, datetime_end = (time_sel.sel.start, time_sel.sel.stop) if time_sel and isinstance(time_sel.sel, slice) else (None, None)
     
     if lazy:
@@ -969,12 +972,12 @@ def _create_pro_dataset(
             'latitude': ('location', [float(metadata.get('latitude', np.nan))]),
             'longitude': ('location', [float(metadata.get('longitude', np.nan))]),
             'altitude': ('location', [float(metadata.get('altitude', np.nan))]),
-            'inclination': ('slope', [
+            'slope_inclination': ('slope', [
                 int(round(float(metadata.get('slopeAngle', np.nan))))
                 if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
                 else np.nan
             ]),
-            'azimuth': ('slope', [
+            'slope_azimuth': ('slope', [
                 int(round(float(metadata.get('slopeAzi', np.nan))))
                 if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
                 else np.nan
@@ -1272,7 +1275,7 @@ def read_smet(
     
     # FIXED: Try to get slope values from SMET header before defaulting to NaN
     # This prevents unnecessary NaN assignments when slope metadata is available
-    if 'inclination' not in ds.coords:
+    if 'slope_inclination' not in ds.coords:
         # Try to get slope angle from various possible header keys
         slope_incl = header.get('SlopeAngle', header.get('slopeAngle', 
                     header.get('slope_angle', header.get('SlopeAzi='))))
@@ -1291,8 +1294,8 @@ def read_smet(
             slope_azi = np.nan
         
         ds = ds.assign_coords({
-            'inclination': ('slope', [slope_incl]),
-            'azimuth': ('slope', [slope_azi])
+            'slope_inclination': ('slope', [slope_incl]),
+            'slope_azimuth': ('slope', [slope_azi])
         })
 
     return ds
@@ -1410,14 +1413,14 @@ def _merge_and_finalize(
         combined_profiles_ds = None
         if profile_dsets:
             if len(profile_dsets) > 1:
-                # Sort by inclination if it exists, otherwise use 0 as default
+                # Sort by slope_inclination if it exists, otherwise use 0 as default
                 def get_slope_key(ds):
-                    if 'inclination' in ds.coords:
-                        return ds.coords['inclination'].values[0]
-                    elif 'inclination' in ds.data_vars:
-                        return ds['inclination'].values[0]
+                    if 'slope_inclination' in ds.coords:
+                        return ds.coords['slope_inclination'].values[0]
+                    elif 'slope_inclination' in ds.data_vars:
+                        return ds['slope_inclination'].values[0]
                     else:
-                        return 0.0  # Default value if inclination doesn't exist
+                        return 0.0  # Default value if slope_inclination doesn't exist
                 
                 profile_dsets.sort(key=get_slope_key)
                 
@@ -1446,7 +1449,7 @@ def _merge_and_finalize(
 
         # IMPORTANT: Profile datasets (from .pro files) must come FIRST in the merge list.
         # xr.merge with compat='override' keeps the FIRST dataset's coordinate values when there are conflicts.
-        # This ensures valid inclination/azimuth values from .pro files take precedence
+        # This ensures valid inclination/slope_azimuth values from .pro files take precedence
         # over potentially NaN values from .smet files, preventing coordinate corruption.
         all_to_merge = ([combined_profiles_ds] if combined_profiles_ds is not None else []) + timeseries_dsets
         
@@ -1489,9 +1492,9 @@ def _merge_and_finalize(
     final_dataset = xsnowDataset(final_xr_dataset)
     
     # DEBUG: Check slope coordinates after merge
-    if 'inclination' in final_dataset.data.coords:
-        logger.debug(f"_merge_and_finalize: inclination values = {final_dataset.data.inclination.values}")
-        logger.debug(f"_merge_and_finalize: inclination dims = {final_dataset.data.inclination.dims}")
+    if 'slope_inclination' in final_dataset.data.coords:
+        logger.debug(f"_merge_and_finalize: slope_inclination values = {final_dataset.data.slope_inclination.values}")
+        logger.debug(f"_merge_and_finalize: slope_inclination dims = {final_dataset.data.slope_inclination.dims}")
     
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
 
@@ -1621,7 +1624,7 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
             
             # BEFORE concat: Save coordinates from existing dataset
             slope_coords_to_preserve = {}
-            for coord_name in ['inclination', 'azimuth']:
+            for coord_name in ['slope_inclination', 'slope_azimuth']:
                 if coord_name in existing_loc_data.coords:
                     slope_coords_to_preserve[coord_name] = existing_loc_data[coord_name]
             
@@ -1734,9 +1737,9 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     ds_to_save = ds.to_xarray().copy()
     
     # DEBUG: Check slope coordinates before saving
-    if 'inclination' in ds_to_save.coords:
-        logger.debug(f"to_netcdf: inclination values BEFORE save = {ds_to_save.inclination.values}")
-        logger.debug(f"to_netcdf: inclination dims = {ds_to_save.inclination.dims}")
+    if 'slope_inclination' in ds_to_save.coords:
+        logger.debug(f"to_netcdf: slope_inclination values BEFORE save = {ds_to_save.slope_inclination.values}")
+        logger.debug(f"to_netcdf: slope_inclination dims = {ds_to_save.slope_inclination.dims}")
     
     # ENCODE STRING COORDINATES FOR NETCDF
     for coord_name in ("location", "realization"):
@@ -1882,14 +1885,14 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
         
         # Get slope angle value
         try:
-            slope_val = int(round(single_loc_ds.inclination.values.item()))
+            slope_val = int(round(single_loc_ds.slope_inclination.values.item()))
         except (AttributeError, ValueError):
             slope_val = -999
         f.write(f"SlopeAngle= {slope_val:.0f}\n")
         
-        # Handle slope azimuth
+        # Handle slope slope_azimuth
         try:
-            azimuth = int(round(single_loc_ds.azimuth.values.item()))
+            azimuth = int(round(single_loc_ds.slope_azimuth.values.item()))
         except (AttributeError, ValueError):
             azimuth = -999
         f.write(f"SlopeAzi= {azimuth:.0f}\n")
