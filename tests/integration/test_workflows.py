@@ -457,8 +457,8 @@ class TestSlopeCoordinateBugFixes:
         assert 'slope_azimuth' in ds_sliced.data.coords
         sliced_incl = float(ds_sliced.data.slope_inclination.values.flat[0])
         sliced_azi = float(ds_sliced.data.slope_azimuth.values.flat[0])
-        assert not np.isnan(sliced_incl), "Slope_inclination became NaN after time slice!"
-        assert not np.isnan(sliced_azi), "Slope_azimuth became NaN after time slice!"
+        assert not np.isnan(sliced_incl), "slope_inclination became NaN after time slice!"
+        assert not np.isnan(sliced_azi), "slope_azimuth became NaN after time slice!"
         # Values should be preserved (whatever they are)
         assert sliced_incl == initial_incl, f"Slope changed from {initial_incl} to {sliced_incl}"
         assert sliced_azi == initial_azi, f"Azimuth changed from {initial_azi} to {sliced_azi}"
@@ -520,7 +520,7 @@ class TestSlopeCoordinateBugFixes:
         initial_incl = float(ds_initial.data.slope_inclination.values.flat[0])
         initial_azi = float(ds_initial.data.slope_azimuth.values.flat[0])
         assert not np.isnan(initial_incl), "Initial slope should not be NaN"
-        assert not np.isnan(initial_azi), "Initial azimuth should not be NaN"
+        assert not np.isnan(initial_azi), "Initial slope_azimuth should not be NaN"
         
         ds_initial.to_netcdf(cache_file)
         
@@ -543,8 +543,8 @@ class TestSlopeCoordinateBugFixes:
         updated_incl = float(ds_updated.data.slope_inclination.values.flat[0])
         updated_azi = float(ds_updated.data.slope_azimuth.values.flat[0])
         
-        assert not np.isnan(updated_incl), "Slope_inclination became NaN after update!"
-        assert not np.isnan(updated_azi), "Slope_azimuth became NaN after update!"
+        assert not np.isnan(updated_incl), "slope_inclination became NaN after update!"
+        assert not np.isnan(updated_azi), "slope_azimuth became NaN after update!"
         # Values should be preserved
         assert updated_incl == initial_incl, f"Slope changed from {initial_incl} to {updated_incl}"
         assert updated_azi == initial_azi, f"Azimuth changed from {initial_azi} to {updated_azi}"
@@ -581,8 +581,8 @@ class TestSlopeCoordinateBugFixes:
         incl = float(ds.data.slope_inclination.values.flat[0])
         azi = float(ds.data.slope_azimuth.values.flat[0])
         
-        assert not np.isnan(incl), "Slope_inclination is NaN - SMET NaN overwrote PRO value!"
-        assert not np.isnan(azi), "Slope_azimuth is NaN - SMET NaN overwrote PRO value!"
+        assert not np.isnan(incl), "slope_inclination is NaN - SMET NaN overwrote PRO value!"
+        assert not np.isnan(azi), "slope_azimuth is NaN - SMET NaN overwrote PRO value!"
     
     def test_multi_location_update_preserves_coords(self, synthetic_pro, tmp_path):
         """Test that updating multi-location datasets preserves slope coords for all locations.
@@ -641,7 +641,7 @@ class TestSlopeCoordinateBugFixes:
             if loc_key in initial_slopes:
                 initial_incl, initial_azi = initial_slopes[loc_key]
                 assert incl == initial_incl, f"{loc}: slope changed after update"
-                assert azi == initial_azi, f"{loc}: azimuth changed after update"
+                assert azi == initial_azi, f"{loc}: slope_azimuth changed after update"
     
     def test_smet_only_slope_coords(self, synthetic_smet, tmp_path):
         """Test behavior when only SMET files are loaded (no PRO files).

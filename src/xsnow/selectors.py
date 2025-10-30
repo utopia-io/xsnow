@@ -40,11 +40,33 @@ print(subset_by_id)
 print(subset_by_bbox)
 """
 
-from typing import Any, Union, Sequence, Optional, Tuple
+from typing import Any, Union, Sequence, Optional, Tuple, Mapping
 import pandas as pd
 import xarray as xr
 import warnings
 import numpy as np
+
+IndexLike = Union[int, slice, Sequence[int]]
+
+TimeIndexScalar = Union[str, pd.Timestamp, np.datetime64]
+TimeIndexSeq    = Sequence[TimeIndexScalar]
+TimeSlice       = slice
+TimeLike = Union["TimeSelector", TimeIndexScalar, TimeSlice, TimeIndexSeq]
+
+LocationIndexScalar = str
+LocationIndexSeq    = Sequence[LocationIndexScalar]
+# - NOTE: bbox args (lat_range/lon_range/crs) cannot be expressed
+#   positionally here, so callers that want bbox still need to pass
+#   an actual LocationSelector(...)
+LocationLike = Union["LocationSelector", LocationIndexScalar, LocationIndexSeq]
+
+SlopeIndexLike = Union[int, slice, Sequence[int], xr.DataArray]  # xr <-> boolean mask
+SlopeQueryMapping = Mapping[str, Any]  # e.g., {"slope_inclination": 30, "slope_azimuth": 180}
+SlopeLike = Union["SlopeSelector", SlopeIndexLike, SlopeQueryMapping]
+
+RealIndexLike = Union[int, str, slice, Sequence[int], Sequence[str]]
+RealizationLike = Union["RealizationSelector", RealIndexLike]
+
 
 class Selector:
     """
@@ -122,7 +144,7 @@ class Selector:
 
 class TimeSelector(Selector):
     """A selector specifically for the 'time' dimension."""
-    def __init__(self, sel: Union[str, pd.Timestamp, slice, Sequence[pd.Timestamp]]):
+    def __init__(self, sel: Union[TimeIndexScalar, TimeSlice, TimeIndexSeq]):
         super().__init__("time", sel)
 
 
@@ -184,10 +206,10 @@ class SlopeSelector(Selector):
 
     Supports:
     - int / list[int] / slice / xr.DataArray (existing positional/boolean logic)
-    - dict query like {'inclination': 30, 'azimuth': 180} to match slope
+    - dict query like {'slope_inclination': 30, 'slope_azimuth': 180} to match slope
       metadata coords/vars.
     """
-    def __init__(self, sel: Union[int, Sequence[int], slice, xr.DataArray, dict]):
+    def __init__(self, sel: Union[SlopeIndexLike, SlopeQueryMapping]):
         super().__init__("slope", sel)
 
     def apply(self, ds: xr.Dataset) -> xr.Dataset:
@@ -248,5 +270,5 @@ class SlopeSelector(Selector):
 
 class RealizationSelector(Selector):
     """A selector specifically for the 'realization' dimension."""
-    def __init__(self, sel: Union[int, Sequence[int], slice]):
+    def __init__(self, sel: RealIndexLike):
         super().__init__("realization", sel)

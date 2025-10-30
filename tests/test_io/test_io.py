@@ -440,7 +440,7 @@ def test_read_with_slope_selector(multi_slope_directory, compare_datasets):
     assert 'slope' not in ds_single.dims
     assert 'slope' in ds_single.coords
     assert int(ds_single.slope) == 0
-    # Verify we got the correct slope by checking the associated inclination coordinate
+    # Verify we got the correct slope by checking the associated slope_inclination coordinate
     assert np.isclose(ds_single.slope_inclination.item(), 15.0)
 
     # Repeat with SlopeLike input
@@ -740,10 +740,10 @@ SlopeAzi= 90.0
         b_azi = float(ds_b.slope_azimuth.values.flat[0])
         
         # Verify each station has its own correct values
-        assert np.isclose(a_incl, 30.0), f"Station A inclination should be 30.0, got {a_incl}"
-        assert np.isclose(a_azi, 180.0), f"Station A azimuth should be 180.0, got {a_azi}"
-        assert np.isclose(b_incl, 25.0), f"Station B inclination should be 25.0, got {b_incl}"
-        assert np.isclose(b_azi, 90.0), f"Station B azimuth should be 90.0, got {b_azi}"
+        assert np.isclose(a_incl, 30.0), f"Station A slope_inclination should be 30.0, got {a_incl}"
+        assert np.isclose(a_azi, 180.0), f"Station A slope_azimuth should be 180.0, got {a_azi}"
+        assert np.isclose(b_incl, 25.0), f"Station B slope_inclination should be 25.0, got {b_incl}"
+        assert np.isclose(b_azi, 90.0), f"Station B slope_azimuth should be 90.0, got {b_azi}"
         
         # Test that time slicing preserves coordinates
         ds_sliced = ds.sel(time=slice('2024-01-02', '2024-01-03'))
@@ -766,8 +766,8 @@ SlopeAzi= 90.0
         assert np.isclose(b_azi_sliced, 90.0)
         
         # Most importantly: verify no NaN values
-        assert not np.isnan(a_incl_sliced), "Station A inclination became NaN after slicing"
-        assert not np.isnan(b_incl_sliced), "Station B inclination became NaN after slicing"
+        assert not np.isnan(a_incl_sliced), "Station A slope_inclination became NaN after slicing"
+        assert not np.isnan(b_incl_sliced), "Station B slope_inclination became NaN after slicing"
     
     def test_merge_order_preserves_valid_coords(self, tmp_path):
         """

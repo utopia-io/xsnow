@@ -44,7 +44,10 @@ import dask.array as da
 # Import from the package's modules
 from .registry import registry
 from .core import xsnowDataset
-from .selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
+from .selectors import (
+    TimeSelector, LocationSelector, SlopeSelector, RealizationSelector,
+    TimeLike, LocationLike, SlopeLike, RealizationLike
+)
 from .plugin import register_xsnowDataset_method
 
 # Configure a basic logger for this module
@@ -69,28 +72,6 @@ HEADER_MAP = {
     'StationName=': 'stationName'
 }
 
-# --- Selector Types ---
-IndexLike = Union[int, slice, Sequence[int]]
-
-TimeIndexScalar = Union[str, pd.Timestamp, np.datetime64]
-TimeIndexSeq    = Sequence[TimeIndexScalar]
-TimeSlice       = slice
-TimeLike = Union["TimeSelector", TimeIndexScalar, TimeSlice, TimeIndexSeq]
-
-LocationIndexScalar = str
-LocationIndexSeq    = Sequence[LocationIndexScalar]
-# - NOTE: bbox args (lat_range/lon_range/crs) cannot be expressed
-#   positionally here, so callers that want bbox still need to pass
-#   an actual LocationSelector(...)
-LocationLike = Union["LocationSelector", LocationIndexScalar, LocationIndexSeq]
-
-SlopeIndexLike = Union[int, slice, Sequence[int], xr.DataArray]  # xr <-> boolean mask
-SlopeQueryMapping = Mapping[str, Any]  # e.g., {"inclination": 30, "azimuth": 180}
-SlopeLike = Union["SlopeSelector", SlopeIndexLike, SlopeQueryMapping]
-
-RealIndexLike = Union[int, str, slice, Sequence[int], Sequence[str]]
-RealizationLike = Union["RealizationSelector", RealIndexLike]
-
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
 # --------------------------------------------------------------------------- #
@@ -103,6 +84,7 @@ def read(
     slope: Optional[SlopeSelector] = None,
     realization: Optional[RealizationSelector] = None,
     lazy: Optional[bool] = None,
+    lazy_threshold: int = 30,
     n_cpus_use: Optional[int] = None,
     logger: Optional[logging.Logger] = None,
     chunks: Optional[Dict[str, int]] = None,
@@ -129,7 +111,9 @@ def read(
         lazy: If True, use Dask for lazy, memory-efficient loading (good for
             large datasets). If False, load all data eagerly into memory with
             parallel processing (good for small to medium datasets). If None
-            (default), auto-detect based on file count (>10 files uses lazy).
+            (default), auto-detect based on file count (sweet spot to be determined).
+        lazy_threshold: Number of files above which lazy loading is enabled
+                       when lazy=None (auto-detect). Default: 30 files.
         n_cpus_use: The number of CPU cores to use. If not provided, defaults
             to min(32, total_cores - 1), with a minimum of 1.
         logger: An optional, pre-configured logger instance.
@@ -146,7 +130,7 @@ def read(
         or `None` if no valid data files are found.
 
     Examples:
-        >>> # Auto-detect (lazy for >10 files, eager for <=10)
+        >>> # Auto-detect (lazy for many files, eager for few)
         >>> ds = read("data/")
         
         >>> # Force lazy loading for large datasets
@@ -187,8 +171,8 @@ def read(
             
             # DEBUG: Check slope coordinates after loading
             if 'slope_inclination' in ds.coords:
-                logger.info(f"DEBUG read NetCDF: slope_inclination values AFTER load = {ds.slope_inclination.values}")
-                logger.info(f"DEBUG read NetCDF: slope_inclination dims = {ds.slope_inclination.dims}")
+                logger.debug(f"read NetCDF: slope_inclination values AFTER load = {ds.slope_inclination.values}")
+                logger.debug(f"read NetCDF: slope_inclination dims = {ds.slope_inclination.dims}")
             
             return xsnowDataset(ds)
         except Exception as e:
@@ -213,11 +197,11 @@ def read(
     # --- Step 3: Auto-detect lazy mode if not specified ---
     if lazy is None:
         total_files = len(pro_files) + len(smet_files)
-        lazy = total_files > 10
-        logger.debug(f"Auto-detected lazy={lazy} for {total_files} files")
+        lazy = total_files > lazy_threshold
+        logger.debug(f"Auto-detected lazy={lazy} for {total_files} files (threshold={lazy_threshold})")
 
     # --- Step 4: Read and process data files ---
-    # TODO: The datetime_start *_end parsing results in nan for inclination and azimuth!
+    # TODO: The datetime_start *_end parsing results in nan for slope_inclination and slope_azimuth!
     datetime_start, datetime_end = (time_sel.sel.start, time_sel.sel.stop) if time_sel and isinstance(time_sel.sel, slice) else (None, None)
     
     if lazy:
@@ -1465,7 +1449,7 @@ def _merge_and_finalize(
 
         # IMPORTANT: Profile datasets (from .pro files) must come FIRST in the merge list.
         # xr.merge with compat='override' keeps the FIRST dataset's coordinate values when there are conflicts.
-        # This ensures valid slope_inclination/azimuth values from .pro files take precedence
+        # This ensures valid inclination/slope_azimuth values from .pro files take precedence
         # over potentially NaN values from .smet files, preventing coordinate corruption.
         all_to_merge = ([combined_profiles_ds] if combined_profiles_ds is not None else []) + timeseries_dsets
         
@@ -1509,8 +1493,8 @@ def _merge_and_finalize(
     
     # DEBUG: Check slope coordinates after merge
     if 'slope_inclination' in final_dataset.data.coords:
-        logger.info(f"DEBUG _merge_and_finalize: slope_inclination values = {final_dataset.data.slope_inclination.values}")
-        logger.info(f"DEBUG _merge_and_finalize: slope_inclination dims = {final_dataset.data.slope_inclination.dims}")
+        logger.debug(f"_merge_and_finalize: slope_inclination values = {final_dataset.data.slope_inclination.values}")
+        logger.debug(f"_merge_and_finalize: slope_inclination dims = {final_dataset.data.slope_inclination.dims}")
     
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
 
@@ -1754,8 +1738,8 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     
     # DEBUG: Check slope coordinates before saving
     if 'slope_inclination' in ds_to_save.coords:
-        logger.info(f"DEBUG to_netcdf: slope_inclination values BEFORE save = {ds_to_save.slope_inclination.values}")
-        logger.info(f"DEBUG to_netcdf: slope_inclination dims = {ds_to_save.slope_inclination.dims}")
+        logger.debug(f"to_netcdf: slope_inclination values BEFORE save = {ds_to_save.slope_inclination.values}")
+        logger.debug(f"to_netcdf: slope_inclination dims = {ds_to_save.slope_inclination.dims}")
     
     # ENCODE STRING COORDINATES FOR NETCDF
     for coord_name in ("location", "realization"):
@@ -1906,7 +1890,7 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
             slope_val = -999
         f.write(f"SlopeAngle= {slope_val:.0f}\n")
         
-        # Handle slope azimuth
+        # Handle slope slope_azimuth
         try:
             azimuth = int(round(single_loc_ds.slope_azimuth.values.item()))
         except (AttributeError, ValueError):

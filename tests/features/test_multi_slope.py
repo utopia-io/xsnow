@@ -31,7 +31,7 @@ class TestMultiSlopeDetection:
         
         ds = read(data_dir, lazy=False)
         
-        # Check inclination coordinate
+        # Check slope_inclination coordinate
         if 'slope_inclination' in ds.data.coords:
             slope_angles = ds.data['slope_inclination'].values
             
@@ -80,7 +80,7 @@ class TestMultiSlopeMerging:
                 assert len(valid_data) > 0, f"Slope {slope_idx} has no valid data"
     
     def test_slopes_sorted_by_angle(self, synthetic_pro, tmp_path):
-        """Test that slopes are sorted by inclination angle."""
+        """Test that slopes are sorted by slope_inclination angle."""
         slopes = [45, 0, 30, 15]  # Unsorted
         data_dir = synthetic_pro.multi_slope(tmp_path, "TEST_STATION", slopes=slopes)
         
