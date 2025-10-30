@@ -440,8 +440,8 @@ def test_read_with_slope_selector(multi_slope_directory, compare_datasets):
     assert 'slope' not in ds_single.dims
     assert 'slope' in ds_single.coords
     assert int(ds_single.slope) == 0
-    # Verify we got the correct slope by checking the associated inclination coordinate
-    assert np.isclose(ds_single.inclination.item(), 15.0)
+    # Verify we got the correct slope by checking the associated slope_inclination coordinate
+    assert np.isclose(ds_single.slope_inclination.item(), 15.0)
 
     # Repeat with SlopeLike input
     ds_single2 = read(multi_slope_directory, slope=0)
@@ -453,10 +453,10 @@ def test_read_with_slope_selector(multi_slope_directory, compare_datasets):
     
     assert ds_slice is not None
     assert ds_slice.sizes['slope'] == 1
-    assert np.isclose(ds_slice.inclination.item(), 15.0)
+    assert np.isclose(ds_slice.slope_inclination.item(), 15.0)
 
     # Repeat with SlopeLike input
-    ds_slice2 = read(multi_slope_directory, slope={"inclination": 15})
+    ds_slice2 = read(multi_slope_directory, slope={"slope_inclination": 15})
     compare_datasets(ds_slice, ds_slice2)
     
     # Test selecting an out-of-bounds index, which should be empty
@@ -650,7 +650,7 @@ class TestSlopeCoordinatePreservation:
     """
     Test suite for slope coordinate preservation bug fix.
     
-    This test class verifies that inclination and azimuth coordinates
+    This test class verifies that slope_inclination and slope_azimuth coordinates
     are correctly preserved when:
     1. Concatenating multi-location datasets
     2. Merging PRO and SMET data
@@ -669,7 +669,7 @@ class TestSlopeCoordinatePreservation:
         
         This test creates two stations with different slope values and verifies that
         after reading them together and performing time slicing, each station maintains
-        its own inclination and azimuth values (not NaN or mixed values).
+        its own slope_inclination and slope_azimuth values (not NaN or mixed values).
         
         Regression test for bug where coords='minimal' caused all locations to share
         the first location's slope values.
@@ -725,40 +725,40 @@ SlopeAzi= 90.0
         assert ds is not None
         assert ds.sizes['location'] == 2
         
-        # Check that inclination and azimuth exist
-        assert 'inclination' in ds.coords
-        assert 'azimuth' in ds.coords
+        # Check that slope_inclination and slope_azimuth exist
+        assert 'slope_inclination' in ds.coords
+        assert 'slope_azimuth' in ds.coords
         
         # Get values for each station
         ds_a = ds.sel(location='station_A')
         ds_b = ds.sel(location='station_B')
         
         # Extract slope values (handle both scalar and array cases)
-        a_incl = float(ds_a.inclination.values.flat[0])
-        a_azi = float(ds_a.azimuth.values.flat[0])
-        b_incl = float(ds_b.inclination.values.flat[0])
-        b_azi = float(ds_b.azimuth.values.flat[0])
+        a_incl = float(ds_a.slope_inclination.values.flat[0])
+        a_azi = float(ds_a.slope_azimuth.values.flat[0])
+        b_incl = float(ds_b.slope_inclination.values.flat[0])
+        b_azi = float(ds_b.slope_azimuth.values.flat[0])
         
         # Verify each station has its own correct values
-        assert np.isclose(a_incl, 30.0), f"Station A inclination should be 30.0, got {a_incl}"
-        assert np.isclose(a_azi, 180.0), f"Station A azimuth should be 180.0, got {a_azi}"
-        assert np.isclose(b_incl, 25.0), f"Station B inclination should be 25.0, got {b_incl}"
-        assert np.isclose(b_azi, 90.0), f"Station B azimuth should be 90.0, got {b_azi}"
+        assert np.isclose(a_incl, 30.0), f"Station A slope_inclination should be 30.0, got {a_incl}"
+        assert np.isclose(a_azi, 180.0), f"Station A slope_azimuth should be 180.0, got {a_azi}"
+        assert np.isclose(b_incl, 25.0), f"Station B slope_inclination should be 25.0, got {b_incl}"
+        assert np.isclose(b_azi, 90.0), f"Station B slope_azimuth should be 90.0, got {b_azi}"
         
         # Test that time slicing preserves coordinates
         ds_sliced = ds.sel(time=slice('2024-01-02', '2024-01-03'))
         
-        assert 'inclination' in ds_sliced.coords
-        assert 'azimuth' in ds_sliced.coords
+        assert 'slope_inclination' in ds_sliced.coords
+        assert 'slope_azimuth' in ds_sliced.coords
         
         # Verify values are still correct after slicing
         ds_a_sliced = ds_sliced.sel(location='station_A')
         ds_b_sliced = ds_sliced.sel(location='station_B')
         
-        a_incl_sliced = float(ds_a_sliced.inclination.values.flat[0])
-        a_azi_sliced = float(ds_a_sliced.azimuth.values.flat[0])
-        b_incl_sliced = float(ds_b_sliced.inclination.values.flat[0])
-        b_azi_sliced = float(ds_b_sliced.azimuth.values.flat[0])
+        a_incl_sliced = float(ds_a_sliced.slope_inclination.values.flat[0])
+        a_azi_sliced = float(ds_a_sliced.slope_azimuth.values.flat[0])
+        b_incl_sliced = float(ds_b_sliced.slope_inclination.values.flat[0])
+        b_azi_sliced = float(ds_b_sliced.slope_azimuth.values.flat[0])
         
         assert np.isclose(a_incl_sliced, 30.0)
         assert np.isclose(a_azi_sliced, 180.0)
@@ -766,8 +766,8 @@ SlopeAzi= 90.0
         assert np.isclose(b_azi_sliced, 90.0)
         
         # Most importantly: verify no NaN values
-        assert not np.isnan(a_incl_sliced), "Station A inclination became NaN after slicing"
-        assert not np.isnan(b_incl_sliced), "Station B inclination became NaN after slicing"
+        assert not np.isnan(a_incl_sliced), "Station A slope_inclination became NaN after slicing"
+        assert not np.isnan(b_incl_sliced), "Station B slope_inclination became NaN after slicing"
     
     def test_merge_order_preserves_valid_coords(self, tmp_path):
         """
@@ -822,23 +822,23 @@ fields = timestamp HS
         assert ds is not None
         
         # Check that slope coordinates exist and are NOT NaN
-        assert 'inclination' in ds.coords
-        assert 'azimuth' in ds.coords
+        assert 'slope_inclination' in ds.coords
+        assert 'slope_azimuth' in ds.coords
         
-        incl_value = float(ds.inclination.values.flat[0])
-        azi_value = float(ds.azimuth.values.flat[0])
+        incl_value = float(ds.slope_inclination.values.flat[0])
+        azi_value = float(ds.slope_azimuth.values.flat[0])
         
         # Should have PRO file's values, not NaN
-        assert not np.isnan(incl_value), "inclination is NaN - SMET may have overwritten PRO values"
-        assert not np.isnan(azi_value), "azimuth is NaN - SMET may have overwritten PRO values"
+        assert not np.isnan(incl_value), "slope_inclination is NaN - SMET may have overwritten PRO values"
+        assert not np.isnan(azi_value), "slope_azimuth is NaN - SMET may have overwritten PRO values"
         assert np.isclose(incl_value, 30.0), f"Expected 30.0, got {incl_value}"
         assert np.isclose(azi_value, 180.0), f"Expected 180.0, got {azi_value}"
         
         # Test time slicing preserves valid coordinates
         ds_sliced = ds.sel(time=slice('2024-01-01', '2024-01-02'))
         
-        incl_sliced = float(ds_sliced.inclination.values.flat[0])
-        azi_sliced = float(ds_sliced.azimuth.values.flat[0])
+        incl_sliced = float(ds_sliced.slope_inclination.values.flat[0])
+        azi_sliced = float(ds_sliced.slope_azimuth.values.flat[0])
         
         assert not np.isnan(incl_sliced)
         assert not np.isnan(azi_sliced)
@@ -880,23 +880,23 @@ fields = timestamp HS TA
         assert ds is not None
         
         # Check that slope coordinates were extracted from header
-        assert 'inclination' in ds.coords
-        assert 'azimuth' in ds.coords
+        assert 'slope_inclination' in ds.coords
+        assert 'slope_azimuth' in ds.coords
         
-        incl_value = float(ds.inclination.values.flat[0])
-        azi_value = float(ds.azimuth.values.flat[0])
+        incl_value = float(ds.slope_inclination.values.flat[0])
+        azi_value = float(ds.slope_azimuth.values.flat[0])
         
         # Should have header values, not NaN
-        assert not np.isnan(incl_value), "inclination is NaN despite being in header"
-        assert not np.isnan(azi_value), "azimuth is NaN despite being in header"
+        assert not np.isnan(incl_value), "slope_inclination is NaN despite being in header"
+        assert not np.isnan(azi_value), "slope_azimuth is NaN despite being in header"
         assert np.isclose(incl_value, 35.0), f"Expected 35.0, got {incl_value}"
         assert np.isclose(azi_value, 270.0), f"Expected 270.0, got {azi_value}"
         
         # Test time slicing preserves coordinates
         ds_sliced = ds.sel(time=slice('2024-01-02', '2024-01-03'))
         
-        incl_sliced = float(ds_sliced.inclination.values.flat[0])
-        azi_sliced = float(ds_sliced.azimuth.values.flat[0])
+        incl_sliced = float(ds_sliced.slope_inclination.values.flat[0])
+        azi_sliced = float(ds_sliced.slope_azimuth.values.flat[0])
         
         assert not np.isnan(incl_sliced)
         assert not np.isnan(azi_sliced)
@@ -933,17 +933,17 @@ SlopeAzi= {azi}
         # Read datasets
         ds = read(tmp_path)
         
-        # With coords='all' (the fix), inclination should have shape (2, 1)
+        # With coords='all' (the fix), slope_inclination should have shape (2, 1)
         # or be properly broadcast for each location
-        assert 'inclination' in ds.coords
+        assert 'slope_inclination' in ds.coords
         
         # Check dimensions - should be indexed by location and/or slope
-        slope_incl_dims = ds.inclination.dims
-        assert len(slope_incl_dims) > 0, "inclination has no dimensions"
+        slope_incl_dims = ds.slope_inclination.dims
+        assert len(slope_incl_dims) > 0, "slope_inclination has no dimensions"
         
         # Most importantly: each location should have its own value
-        x_incl = float(ds.sel(location='station_X').inclination.values.flat[0])
-        y_incl = float(ds.sel(location='station_Y').inclination.values.flat[0])
+        x_incl = float(ds.sel(location='station_X').slope_inclination.values.flat[0])
+        y_incl = float(ds.sel(location='station_Y').slope_inclination.values.flat[0])
         
         assert not np.isclose(x_incl, y_incl), \
             f"Bug present: both stations have same slope value ({x_incl})"

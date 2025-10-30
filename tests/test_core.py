@@ -121,9 +121,9 @@ def test_compare_processed_hs_against_smet():
     # This line causes a KeyError because 16.0 is not in the integer index.
     # sub = ds.sel(realization=0, slope=16.0)
 
-    # First, find the integer index for the desired slope inclination.
+    # First, find the integer index for the desired slope slope_inclination.
     # The .where() method filters the dataset, and .item() extracts the integer index.
-    slope_idx_to_select = ds.where(ds.inclination == 16.0, drop=True).slope.item()
+    slope_idx_to_select = ds.where(ds.slope_inclination == 16.0, drop=True).slope.item()
     
     # Now, select using the correct integer index.
     sub = ds.sel(realization=0, slope=slope_idx_to_select)
