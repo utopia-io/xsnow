@@ -2,6 +2,7 @@ stages:
   - lint
   - standard-install
   - gpu-install
+  - performance      # ← NEW: Performance testing stage
   - docs
 
 workflow:
@@ -110,6 +111,167 @@ tests-gpu:
   allow_failure: true
 
 ########################################
+# Performance: Quick Benchmarks (Auto)
+########################################
+performance-quick:
+  stage: performance
+  cache:
+    key: "performance-${CI_JOB_NAME}"
+    paths:
+      - .cache/pip
+      - .benchmarks/
+    policy: pull-push
+  script:
+    - pip install -e ".[testing]"
+    - pytest tests/performance/ --benchmark-only -m "not slow" 
+        --benchmark-json=benchmark-results.json
+        --benchmark-columns=min,max,mean,stddev,median
+        -v
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - benchmark-results.json
+      - .benchmarks/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == "dev"
+
+########################################
+# Performance: Regression Check (MR)
+########################################
+performance-regression-check:
+  stage: performance
+  cache:
+    key: "performance-baseline"
+    paths:
+      - .cache/pip
+      - .benchmarks/
+    policy: pull
+  script:
+    - pip install -e ".[testing]"
+    - |
+      echo "Checking for performance regressions..."
+      if [ -d ".benchmarks" ] && [ "$(ls -A .benchmarks)" ]; then
+        echo "✓ Baseline found, comparing..."
+        pytest tests/performance/ --benchmark-only -m "not slow" \
+          --benchmark-compare=0001 \
+          --benchmark-compare-fail=mean:20% \
+          --benchmark-json=comparison.json \
+          -v || {
+            echo "⚠️  Performance regression detected (>20% slower)"
+            echo "Review the output above for details"
+            exit 1
+          }
+        echo "✓ No significant regressions"
+      else
+        echo "⚠️  No baseline - saving current as baseline"
+        pytest tests/performance/ --benchmark-only -m "not slow" \
+          --benchmark-save=baseline -v
+      fi
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - comparison.json
+      - .benchmarks/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  allow_failure: true
+
+########################################
+# Performance: Save Baseline (Main)
+########################################
+performance-save-baseline:
+  stage: performance
+  cache:
+    key: "performance-baseline"
+    paths:
+      - .cache/pip
+      - .benchmarks/
+    policy: pull-push
+  script:
+    - pip install -e ".[testing]"
+    - pytest tests/performance/ --benchmark-only -m "not slow" \
+        --benchmark-save=baseline \
+        --benchmark-json=baseline-results.json \
+        -v
+    - echo "✓ Baseline saved for future comparisons"
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - baseline-results.json
+      - .benchmarks/
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+########################################
+# Performance: Full Suite (Manual)
+########################################
+performance-full:
+  stage: performance
+  cache:
+    key: "performance-full"
+    paths:
+      - .cache/pip
+    policy: pull-push
+  script:
+    - pip install -e ".[testing]"
+    - pytest tests/performance/ --benchmark-only \
+        --benchmark-json=full-benchmark-results.json \
+        --benchmark-columns=all \
+        -v -s
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - full-benchmark-results.json
+  rules:
+    - when: manual
+  allow_failure: true
+
+########################################
+# Performance: Memory Profiling (Manual)
+########################################
+performance-memory:
+  stage: performance
+  cache:
+    key: "performance-memory"
+    paths:
+      - .cache/pip
+    policy: pull-push
+  script:
+    - pip install -e ".[testing]"
+    - pytest tests/performance/ -v -s -m memprof
+  rules:
+    - when: manual
+  allow_failure: true
+
+########################################
+# Performance: Parser Comparison (Manual)
+########################################
+performance-parser:
+  stage: performance
+  cache:
+    key: "performance-parser"
+    paths:
+      - .cache/pip
+    policy: pull-push
+  script:
+    - pip install -e ".[testing]"
+    - |
+      if [ -f "tests/performance/test_pro_parser_readlines_vs_generator.py" ]; then
+        pytest tests/performance/test_pro_parser_readlines_vs_generator.py -v -s
+      else
+        pytest tests/performance/test_parser_optimization_example.py -v -s
+      fi
+  rules:
+    - when: manual
+  allow_failure: true
+
+########################################
 # Docs build template
 ########################################
 .default-docs: &default-docs
@@ -128,18 +290,6 @@ tests-gpu:
     paths: [ public ]
     expire_in: 360 days
 
-# Helper pattern for all docs jobs:
-# 0. Work out DOC_LABEL using setuptools-scm (for branches) or tag (for releases)
-# 1. Inject DOC_LABEL into docs/index.md (ENV_DOC_VERSION -> DOC_LABEL)
-#    (and into docs/_config.yml if that placeholder exists, harmless if not)
-# 2. Build with jupyter-book
-# 3. Copy to public/<dest>/
-# 4. Generate:
-#    - public/index.html      (redirect to /stable/)
-#    - public/versionpicker/index.html  (list all dirs currently in public/)
-#
-# This runs in all three jobs so any job can regenerate both pages.
-
 ########################################
 # Docs from default branch  -> /stable/
 ########################################
@@ -149,33 +299,19 @@ docs-stable:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: on_success
   script:
-
-    # 1. Figure out version string via setuptools-scm
     - export XSNOW_VERSION=$(python -c "import xsnow; print(xsnow.__version__)")
     - export DOC_LABEL="stable (${XSNOW_VERSION})"
-
-    # 2. Inject DOC_LABEL
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/index.md
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/_config.yml || true
-
-    # 3. Generate API docs into docs/api/_generated (match local Makefile)
     - echo "Generating API docs…"
     - rm -rf docs/api/_generated || true
     - mkdir -p docs/api/_generated
     - sphinx-apidoc -f -e -o docs/api/_generated src/xsnow
-
-    # 4. Clean up the first-line titles for readability (match local Makefile)
     - sed -i '1s/^xsnow\.extensions\.//' docs/api/_generated/*.rst || true
     - sed -i '1s/^xsnow\.//' docs/api/_generated/*.rst || true
-
-    # 5. Build docs
     - jupyter-book build docs
-
-    # 6. Copy to /stable/
     - mkdir -p public/stable
     - cp -r docs/_build/html/* public/stable/
-
-    # 7. Create root index.html with fallback logic
     - |
       mkdir -p public
       if [ -d public/stable ]; then
@@ -207,8 +343,6 @@ docs-stable:
           '<p>No built documentation folders are currently available.</p>' \
           > public/index.html
       fi
-
-    # 8. Create /versionpicker/ listing what's actually present
     - |
       mkdir -p public/versionpicker
       {
@@ -232,7 +366,6 @@ docs-stable:
         echo '<p>Tip: You can directly visit /stable/, /dev/, or /vX.Y.Z/ (tagged releases).';
         echo ' During early development, /dev/ may be the only one available.</p>';
       } > public/versionpicker/index.html
-
 
 ########################################
 # Docs from dev branch -> /dev/
@@ -244,33 +377,20 @@ docs-dev:
       when: always
   allow_failure: true
   script:
-    # 0. Clean up old 'latest'
     - rm -rf public/latest || true
-
-    # 1. Version label
     - export XSNOW_VERSION=$(python -c "import xsnow; print(xsnow.__version__)")
     - export DOC_LABEL="dev (${XSNOW_VERSION})"
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/index.md
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/_config.yml || true
-
-    # 2. Generate API docs into docs/api/_generated
     - echo "Generating API docs…"
     - rm -rf docs/api/_generated || true
     - mkdir -p docs/api/_generated
     - sphinx-apidoc -f -e -o docs/api/_generated src/xsnow
-
-    # 3. Clean up headers like you do locally
     - sed -i '1s/^xsnow\.extensions\.//' docs/api/_generated/*.rst || true
     - sed -i '1s/^xsnow\.//' docs/api/_generated/*.rst || true
-
-    # 4. Build docs (best effort on dev)
     - jupyter-book build docs || true
-
-    # 5. Copy to /dev/
     - mkdir -p public/dev
     - if [ -d docs/_build/html ]; then cp -r docs/_build/html/* public/dev/; fi
-
-    # 6. Fallback index.html + versionpicker (unchanged from current)
     - |
       mkdir -p public
       if [ -d public/stable ]; then
@@ -302,7 +422,6 @@ docs-dev:
           '<p>No built documentation folders are currently available.</p>' \
           > public/index.html
       fi
-
     - |
       mkdir -p public/versionpicker
       {
@@ -326,7 +445,6 @@ docs-dev:
         echo '<p>Tip: You can directly visit /stable/, /dev/, or /vX.Y.Z/ (tagged releases).';
         echo ' During early development, /dev/ may be the only one available.</p>';
       } > public/versionpicker/index.html
-
 
 ########################################
 # Docs from git tag (release) -> /<tag>/
@@ -335,34 +453,20 @@ docs-tagged:
   <<: *default-docs
   rules:
     - if: $CI_COMMIT_TAG
-      when: on_success          # only publish tagged docs if pipeline is green
+      when: on_success
   script:
-
-    # 1. Use the tag literally, e.g. v1.2.3
     - export DOC_LABEL="${CI_COMMIT_TAG}"
-
-    # 2. Inject DOC_LABEL into docs/index.md and (optionally) _config.yml
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/index.md
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/_config.yml || true
-
-    # 3. Generate API docs into docs/api/_generated (match local Makefile)
     - echo "Generating API docs…"
     - rm -rf docs/api/_generated || true
     - mkdir -p docs/api/_generated
     - sphinx-apidoc -f -e -o docs/api/_generated src/xsnow
-
-    # 4. Clean up the first-line titles for readability (match local Makefile sed)
     - sed -i '1s/^xsnow\.extensions\.//' docs/api/_generated/*.rst || true
     - sed -i '1s/^xsnow\.//' docs/api/_generated/*.rst || true
-
-    # 5. Build docs
     - jupyter-book build docs
-
-    # 6. Copy to /<tag>/ in public
     - mkdir -p "public/${CI_COMMIT_TAG}"
     - cp -r docs/_build/html/* "public/${CI_COMMIT_TAG}/"
-
-    # 7. Create root index.html with fallback logic (prefer stable, then dev, else fallback)
     - |
       mkdir -p public
       if [ -d public/stable ]; then
@@ -394,8 +498,6 @@ docs-tagged:
           '<p>No built documentation folders are currently available.</p>' \
           > public/index.html
       fi
-
-    # 8. Create /versionpicker/ listing what's actually present
     - |
       mkdir -p public/versionpicker
       {
@@ -419,7 +521,6 @@ docs-tagged:
         echo '<p>Tip: You can directly visit /stable/, /dev/, or /vX.Y.Z/ (tagged releases).';
         echo ' During early development, /dev/ may be the only one available.</p>';
       } > public/versionpicker/index.html
-
 
 ########################################
 # Publish GitLab Pages
@@ -437,11 +538,11 @@ pages:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: on_success
     - if: $CI_COMMIT_BRANCH == "dev"
-      when: always  # publish even on failure (docs-dev allowed to fail gracefully)
+      when: always
     - if: $CI_COMMIT_TAG
       when: on_success
     - when: never
-  allow_failure: true  # helpful for dev
+  allow_failure: true
   script:
     - echo "Publishing GitLab Pages artifacts"
   artifacts:

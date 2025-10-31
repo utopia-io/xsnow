@@ -84,10 +84,10 @@ class TestLazyLoadingDaskArrays:
     @pytest.mark.synthetic
     def test_auto_detect_lazy_mode(self, synthetic_pro, tmp_path):
         """Test that lazy mode is auto-detected based on file count."""
-        # Create 11 files (> 10 threshold)
+        # Create 31 files (> 30 threshold)
         data_dir = synthetic_pro.multi_station(
             tmp_path,
-            n_stations=11,
+            n_stations=31,
             n_profiles_each=5
         )
         

@@ -24,7 +24,6 @@ dependencies = [
     "tzdata>=2024.1",
     "pytest>=8.4.2",
     "dask>=2025.9.1",
-    "psutil>=7.1.0",
 ]
 keywords = ["snow", "stratigraphy", "avalanche", "xarray", "post-processing"]
 classifiers = [
@@ -38,7 +37,10 @@ classifiers = [
 testing = [
   "pytest>=8.0",
   "pytest-cov",
-  "pytest-benchmark",
+  "psutil>=7.1.0",
+  "pytest-benchmark>=5.1.0",
+  "memory-profiler>=0.61.0",
+
 ]
 gpu = [
   "cupy-cuda12x; platform_system == 'Linux'",  # nvidia wheels
