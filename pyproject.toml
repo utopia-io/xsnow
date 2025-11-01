@@ -91,9 +91,3 @@ markers = [
 filterwarnings = [
     "ignore::DeprecationWarning:multiprocessing",
 ]
-
-# Add test discovery patterns (Optional)
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
