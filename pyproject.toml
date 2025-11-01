@@ -86,8 +86,6 @@ markers = [
     "synthetic: marks tests that use synthetic data",
     "edge_case: marks edge case tests",
 ]
-
-# Configure warnings (Optional)
 filterwarnings = [
     "ignore::DeprecationWarning:multiprocessing",
 ]
