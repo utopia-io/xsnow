@@ -73,11 +73,18 @@ version_scheme = "guess-next-dev"
 local_scheme = "node-and-date"
 
 [tool.pytest.ini_options]
-timeout = 300  # 5 minute timeout per test
+timeout = 300  # Kill any test taking longer than 5 minutes
 timeout_method = "thread"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "benchmark: marks tests that benchmark performance",
+    "gpu: marks tests that require GPU",
+    "real_data: marks tests that use real data files",
+    "synthetic: marks tests that use synthetic data",
+    "edge_case: marks edge case tests",
 ]
 
 # Configure warnings (Optional)
