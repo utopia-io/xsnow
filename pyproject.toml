@@ -73,6 +73,8 @@ version_scheme = "guess-next-dev"
 local_scheme = "node-and-date"
 
 [tool.pytest.ini_options]
+timeout = 300  # 5 minute timeout per test
+timeout_method = "thread"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "benchmark: marks tests that benchmark performance",

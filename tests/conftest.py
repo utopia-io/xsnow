@@ -580,41 +580,68 @@ def assert_physical_validity():
 @pytest.fixture
 def compare_datasets():
     """
-    Helper fixture for comparing two datasets.
+    Fixture to compare two xsnowDataset objects.
     
-    Usage:
-        def test_equality(compare_datasets):
-            ds1 = read(source1)
-            ds2 = read(source2)
-            compare_datasets(ds1, ds2, rtol=1e-5)
+    Handles both eager (numpy) and lazy (dask) datasets by computing
+    dask arrays before comparison.
     """
-    def comparator(ds1, ds2, rtol=1e-5, check_attrs=False):
-        """Compare two xsnowDatasets or xarray.Datasets."""
-        # Unwrap if xsnowDatasets
-        data1 = ds1.data if isinstance(ds1, xsnowDataset) else ds1
-        data2 = ds2.data if isinstance(ds2, xsnowDataset) else ds2
-        
-        # Check dimensions
-        assert data1.sizes == data2.sizes, f"Dataset dimensions differ: {data1.sizes} vs {data2.sizes}"
-        
-        # Check data variables
-        common_vars = set(data1.data_vars) & set(data2.data_vars)
-        for var in common_vars:
-            np.testing.assert_allclose(
-                data1[var].values,
-                data2[var].values,
-                rtol=rtol,
-                equal_nan=True,
-                err_msg=f"Variable '{var}' differs"
-            )
-        
-        if check_attrs:
-            assert data1.attrs == data2.attrs, "Dataset attributes differ"
-        
-        return True
+    import dask.array as da
     
-    return comparator
-
+    def _compare(ds1, ds2, rtol=1e-5):
+        # Helper to compute dataset if it contains dask arrays
+        def compute_if_dask(ds):
+            """Compute all dask arrays in a dataset."""
+            has_dask = False
+            
+            # Check if any variables are dask arrays
+            for var_name in ds.data.data_vars:
+                var = ds.data[var_name]
+                if isinstance(var.data, da.Array):
+                    has_dask = True
+                    break
+            
+            # If dataset has dask arrays, compute them
+            if has_dask:
+                # Use xarray's compute method to compute all dask arrays at once
+                ds_computed = ds.data.compute()
+                # Return new xsnowDataset with computed data
+                from xsnow import xsnowDataset
+                return xsnowDataset(ds_computed)
+            
+            return ds
+        
+        # Compute any dask arrays before comparison
+        ds1 = compute_if_dask(ds1)
+        ds2 = compute_if_dask(ds2)
+        
+        # Compare dimensions
+        assert ds1.sizes == ds2.sizes, \
+            f"Dimension mismatch: {ds1.sizes} != {ds2.sizes}"
+        
+        # Compare coordinates
+        for coord in ds1.coords:
+            if coord in ds2.coords:
+                np.testing.assert_allclose(
+                    ds1.coords[coord].values,
+                    ds2.coords[coord].values,
+                    rtol=rtol,
+                    err_msg=f"Coordinate {coord} differs"
+                )
+        
+        # Compare data variables
+        for var in ds1.data.data_vars:
+            assert var in ds2.data.data_vars, \
+                f"Variable {var} not found in second dataset"
+            
+            # Now both are numpy arrays, safe to compare
+            np.testing.assert_allclose(
+                ds1.data[var].values,
+                ds2.data[var].values,
+                rtol=rtol,
+                err_msg=f"Variable {var} differs"
+            )
+    
+    return _compare
 
 # ============================================================================
 # PERFORMANCE MONITORING FIXTURES
