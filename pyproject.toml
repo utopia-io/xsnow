@@ -73,7 +73,7 @@ version_scheme = "guess-next-dev"
 local_scheme = "node-and-date"
 
 [tool.pytest.ini_options]
-timeout = 300  # Kill any test taking longer than 5 minutes
+timeout = 300 # Kill any test taking longer than 5 minutes
 timeout_method = "thread"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -86,6 +86,7 @@ markers = [
     "synthetic: marks tests that use synthetic data",
     "edge_case: marks edge case tests",
 ]
+
 
 # Configure warnings (Optional)
 filterwarnings = [
