@@ -74,10 +74,10 @@ tests-cpu:
         --junitxml=pytest-junit.xml 
         --cov=xsnow 
         --cov-report=xml
-        --ignore=tests/performance/              
-        --ignore=tests/loading/test_loading_modes.py  
-        --ignore=tests/loading/test_lazy_loading.py   
-        --timeout=300                             
+        --ignore=tests/performance/ 
+        --ignore=tests/loading/test_loading_modes.py
+        --ignore=tests/loading/test_lazy_loading.py
+        --timeout=300
   artifacts:
     when: always
     expire_in: 7 days
