@@ -621,13 +621,25 @@ def compare_datasets():
         # Compare coordinates
         for coord in ds1.coords:
             if coord in ds2.coords:
-                np.testing.assert_allclose(
-                    ds1.coords[coord].values,
-                    ds2.coords[coord].values,
-                    rtol=rtol,
-                    err_msg=f"Coordinate {coord} differs"
-                )
-        
+                coord1_vals = ds1.coords[coord].values
+                coord2_vals = ds2.coords[coord].values
+                
+                # Handle non-numeric coordinates (datetime, strings) - use exact equality
+                if np.issubdtype(coord1_vals.dtype, np.datetime64) or np.issubdtype(coord1_vals.dtype, np.str_):
+                    np.testing.assert_array_equal(
+                        coord1_vals,
+                        coord2_vals,
+                        err_msg=f"Coordinate {coord} differs"
+                    )
+                else:
+                    # Numeric coordinates - use rtol
+                    np.testing.assert_allclose(
+                        coord1_vals,
+                        coord2_vals,
+                        rtol=rtol,
+                        err_msg=f"Coordinate {coord} differs"
+                    )   
+                         
         # Compare data variables
         for var in ds1.data.data_vars:
             assert var in ds2.data.data_vars, \

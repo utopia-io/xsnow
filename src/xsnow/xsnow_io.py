@@ -856,7 +856,7 @@ def _create_pro_dataset(
     add_surface_sh_as_layer: bool = True,
     use_dask: bool = False,
     chunks: Dict[str, int] | None = None
-) -> Optional[xr.Dataset] | None:
+) -> xr.Dataset | None:
     """Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
 
     This function transforms the intermediate raw data from `_read_pro_raw`
@@ -1008,11 +1008,7 @@ def _create_pro_dataset(
         }
     )
 
-    # ============================================================================
-    # Add CF-compliant attributes from registry
-    # ============================================================================
-    from xsnow import xsnowDataset
-    return xsnowDataset(ds)
+    return ds 
 
 
 # --------------------------------------------------------------------------- #
@@ -1473,7 +1469,7 @@ def _merge_and_finalize(
             continue
 
         if len(all_to_merge) > 1:
-            merged_loc_ds = xr.merge(all_to_merge, compat='override', join='outer')
+            merged_loc_ds = xr.merge(all_to_merge, compat='override', join='outer', combine_attrs='no_conflicts')
             merged_datasets.append(merged_loc_ds)
         else:
             merged_datasets.append(all_to_merge[0])
@@ -1491,10 +1487,20 @@ def _merge_and_finalize(
         dim='location', 
         join='outer', 
         coords='all',
+        compat='override'
     )
     
-    # The location coordinate is already meaningful strings
+    # Preserve CF-compliant metadata
+    if not final_xr_dataset.attrs:
+        final_xr_dataset.attrs = {
+            'Conventions': 'CF-1.8',
+            'title': 'SNOWPACK model output',
+            'source': 'SNOWPACK model output (.pro and .smet files)',
+            'history': f'{pd.Timestamp.now(tz="UTC").isoformat()}: Created by xsnow.',
+            'crs': 'EPSG:4326'
+        }
     
+    # The location coordinate is already meaningful strings
     # Apply final filters
     if time: 
         final_xr_dataset = time.apply(final_xr_dataset)

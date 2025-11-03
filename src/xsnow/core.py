@@ -74,13 +74,28 @@ class xsnowDataset:
         Args:
             source: An existing xarray.Dataset object.
         """
-        if not isinstance(source, xr.Dataset):
+        if isinstance(source, xsnowDataset):
+            self.data = source.data
+        elif isinstance(source, xr.Dataset):
+            self.data = source
+        else:
             raise TypeError(
                 "xsnowDataset must be initialized with an xarray.Dataset. "
                 "To read from files, use the `xsnow.read()` function."
             )
-        self.data: xr.Dataset = source
 
+    def __getstate__(self):
+        """Support pickling for multiprocessing.
+        
+        Without this, __getattr__ causes infinite recursion during pickling
+        when multiprocessing tries to serialize xsnowDataset objects.
+        """
+        return {'data': self.data}
+    
+    def __setstate__(self, state):
+        """Support unpickling for multiprocessing."""
+        self.data = state['data']
+        
     def __repr__(self) -> str:
         """Provides a developer-friendly, summary representation of the dataset."""
         if self.data is None:
