@@ -856,7 +856,7 @@ def _create_pro_dataset(
     add_surface_sh_as_layer: bool = True,
     use_dask: bool = False,
     chunks: Dict[str, int] | None = None
-) -> Optional[xr.Dataset]:
+) -> Optional[xr.Dataset] | None:
     """Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
 
     This function transforms the intermediate raw data from `_read_pro_raw`
@@ -873,10 +873,14 @@ def _create_pro_dataset(
     temperature are set to np.nan.
 
     The final dataset will have dimensions:
-    ('location', 'time', 'slope', 'realization', 'layer')
+        - location (1): Single monitoring site
+        - time (variable): Each profile timestamp
+        - slope (1): Single slope angle (from file metadata)
+        - realization (1): Single simulation run
+        - layer (max_layers): Padded vertical layers
 
     Args:
-        metadata (Dict): A dictionary of station parameters from the .pro
+        metadata (Dict): A dictionary containing SNOWPACK .pro
             file header (e.g., stationName, latitude).
         profiles (List[Dict]): A list of dictionaries, where each represents
             a single profile at a specific timestamp. The dictionaries
@@ -887,6 +891,8 @@ def _create_pro_dataset(
         add_surface_sh_as_layer (bool): If True, synthesizes a surface hoar layer
             from the 'SH_at_surface' data and adds it to the top of the
             snowpack. Defaults to True.
+        use_dask (bool): If True, create dask arrays instead of numpy arrays.
+        chunks (Dict[str, int]): Chunk sizes for dask arrays if use_dask=True.
 
     Returns:
         Optional[xr.Dataset]: An xarray.Dataset containing the structured
@@ -904,42 +910,36 @@ def _create_pro_dataset(
         if key not in ['timestamp', 'SH_at_surface']
     })
 
+    # For each parameter, collect all profile data first
     data_vars = {}
     
     for param in all_params:
-        shape = (1, len(profiles), 1, 1, max_layers)
+        # Create a list to hold data for each profile
+        profile_data = []
         
-        # Determine chunks
-        chunk_spec = None
-        if use_dask:
-            chunk_spec = (1, chunks['time'], 1, 1, chunks['layer'])
-        
-        # Single line - same for both modes!
-        arr = _create_array(shape, np.nan, np.float32, use_dask, chunk_spec)
-        
-        data_vars[param] = (("location", "time", "slope", "realization", "layer"), arr)
+        for i, profile in enumerate(profiles):
+            has_sh = False
+            sh_gsize = np.nan
+            sh_density = np.nan
+            
+            if add_surface_sh_as_layer and 'SH_at_surface' in profile:
+                sh_data = profile['SH_at_surface']
+                if sh_data.size >= 3 and sh_data[0] > 0:
+                    has_sh = True
+                    sh_gsize = sh_data[1]
+                    sh_density = sh_data[2]
 
-    for i, profile in enumerate(profiles):
-        has_sh = False
-        sh_gsize = np.nan
-        sh_density = np.nan
-        
-        if add_surface_sh_as_layer and 'SH_at_surface' in profile:
-            sh_data = profile['SH_at_surface']
-            if sh_data.size >= 3 and sh_data[0] > 0:
-                has_sh = True
-                sh_gsize = sh_data[1]
-                sh_density = sh_data[2]
-
-        num_snow_layers = len(profile.get('height', []))
-
-        for param in all_params:
+            num_snow_layers = len(profile.get('height', []))
+            
+            # Get parameter data for this profile
             param_data = profile.get(param, [])
             final_values = list(param_data[:num_snow_layers])
             
+            # Pad with NaN to num_snow_layers
             while len(final_values) < num_snow_layers:
                 final_values.append(np.nan)
 
+            # Add surface hoar layer if needed
             if has_sh:
                 if param == 'grain_type':
                     final_values.append(660)
@@ -953,9 +953,32 @@ def _create_pro_dataset(
                 else:
                     final_values.append(np.nan)
 
-            if final_values:
-                num_to_copy = min(len(final_values), max_layers)
-                data_vars[param][1][0, i, 0, 0, :num_to_copy] = np.array(final_values)[:num_to_copy]
+            # Pad to max_layers
+            while len(final_values) < max_layers:
+                final_values.append(np.nan)
+            
+            # Truncate if too long
+            final_values = final_values[:max_layers]
+            
+            # Add to profile_data
+            profile_data.append(final_values)
+        
+        # Now create the full array with shape (1, n_profiles, 1, 1, max_layers)
+        # Build as numpy first
+        np_array = np.full((1, len(profiles), 1, 1, max_layers), np.nan, dtype=np.float32)
+        
+        # Fill in the data
+        for i, profile_values in enumerate(profile_data):
+            np_array[0, i, 0, 0, :] = profile_values
+        
+        # Convert to dask if needed
+        if use_dask:
+            chunk_spec = (1, chunks['time'], 1, 1, chunks['layer'])
+            arr = da.from_array(np_array, chunks=chunk_spec) # type: ignore[arg-type]
+        else:
+            arr = np_array
+        
+        data_vars[param] = (("location", "time", "slope", "realization", "layer"), arr)
 
     # USE STRING STATION NAME DIRECTLY (not 'stationName')
     station_name = metadata.get('station_name', metadata.get('stationName', 'unknown'))
@@ -985,24 +1008,11 @@ def _create_pro_dataset(
         }
     )
 
-    ds.attrs = {
-        'Conventions': 'CF-1.8',
-        'title': f"Snowpack Profile for {station_name}",
-        'source': 'SNOWPACK model output (.pro file)',
-        'history': f'{pd.Timestamp.now(tz="UTC").isoformat()}: Created by xsnow.',
-        'crs': 'EPSG:4326'
-    }
-    
-    # Add variable metadata
-    for var_name_hashable in list(ds.variables):
-        var_name = str(var_name_hashable)
-        if reg_entry := registry.get(var_name):
-            ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', 'unknown')
-            ds[var_name].attrs['units'] = reg_entry.get('si_units', 'unknown')
-            ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
-
-    return ds
-
+    # ============================================================================
+    # Add CF-compliant attributes from registry
+    # ============================================================================
+    from xsnow import xsnowDataset
+    return xsnowDataset(ds)
 
 
 # --------------------------------------------------------------------------- #
@@ -1438,20 +1448,26 @@ def _merge_and_finalize(
                     for ds in profile_dsets
                 ]
                 
-                # Concatenate along slope dimension
-                combined_profiles_ds = xr.concat(profile_dsets_cleaned, dim='slope', join='outer', coords='all')
-                combined_profiles_ds['slope'] = np.arange(combined_profiles_ds.sizes['slope'])
+                # Extract underlying xarray Datasets before concat (xr.concat doesn't accept xsnowDataset)
+                profile_xr_datasets = [ds.data if hasattr(ds, 'data') else ds for ds in profile_dsets_cleaned]
+                combined_profiles_ds = xr.concat(profile_xr_datasets, dim='slope', join='outer', coords='all')
+                combined_profiles_ds = combined_profiles_ds.assign_coords(slope=np.arange(combined_profiles_ds.sizes['slope']))
+                
+                # Restore location-level coordinates (without slope dimension)
                 
                 # Restore location-level coordinates (without slope dimension)
                 combined_profiles_ds = combined_profiles_ds.assign_coords(location_coords)
             else:
-                combined_profiles_ds = profile_dsets[0]
+                # Extract .data if it's an xsnowDataset
+                combined_profiles_ds = profile_dsets[0].data if hasattr(profile_dsets[0], 'data') else profile_dsets[0]
 
-        # IMPORTANT: Profile datasets (from .pro files) must come FIRST in the merge list.
-        # xr.merge with compat='override' keeps the FIRST dataset's coordinate values when there are conflicts.
-        # This ensures valid inclination/slope_azimuth values from .pro files take precedence
-        # over potentially NaN values from .smet files, preventing coordinate corruption.
-        all_to_merge = ([combined_profiles_ds] if combined_profiles_ds is not None else []) + timeseries_dsets
+        # Extract .data from all datasets before merge
+        all_to_merge = []
+        if combined_profiles_ds is not None:
+            all_to_merge.append(combined_profiles_ds)
+        # Also extract .data from timeseries datasets
+        for ds in timeseries_dsets:
+            all_to_merge.append(ds.data if hasattr(ds, 'data') else ds)
         
         if not all_to_merge: 
             continue
@@ -1468,13 +1484,13 @@ def _merge_and_finalize(
     # Sort by station name for consistent ordering
     merged_datasets.sort(key=lambda ds: str(ds.location.values[0]))
     
+    # Extract .data from merged datasets (xr.concat needs plain xarray Datasets)
+    merged_xr_datasets = [ds.data if hasattr(ds, 'data') else ds for ds in merged_datasets]
     final_xr_dataset = xr.concat(
-        merged_datasets,
+        merged_xr_datasets,
         dim='location', 
         join='outer', 
-        coords='all', 
-        data_vars='all', 
-        compat='override'
+        coords='all',
     )
     
     # The location coordinate is already meaningful strings
