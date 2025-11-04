@@ -618,28 +618,30 @@ def compare_datasets():
         assert ds1.sizes == ds2.sizes, \
             f"Dimension mismatch: {ds1.sizes} != {ds2.sizes}"
         
-        # Compare coordinates
-        for coord in ds1.coords:
-            if coord in ds2.coords:
-                coord1_vals = ds1.coords[coord].values
-                coord2_vals = ds2.coords[coord].values
-                
-                # Handle non-numeric coordinates (datetime, strings) - use exact equality
-                if np.issubdtype(coord1_vals.dtype, np.datetime64) or np.issubdtype(coord1_vals.dtype, np.str_):
-                    np.testing.assert_array_equal(
-                        coord1_vals,
-                        coord2_vals,
-                        err_msg=f"Coordinate {coord} differs"
-                    )
-                else:
-                    # Numeric coordinates - use rtol
-                    np.testing.assert_allclose(
-                        coord1_vals,
-                        coord2_vals,
-                        rtol=rtol,
-                        err_msg=f"Coordinate {coord} differs"
-                    )   
-                         
+        # Compare data variables
+        for var in ds1.data.data_vars:
+            assert var in ds2.data.data_vars, \
+                f"Variable {var} not found in second dataset"
+            
+            var1_vals = ds1.data[var].values
+            var2_vals = ds2.data[var].values
+            
+            # Handle non-numeric variables (datetime, strings) - use exact equality
+            if np.issubdtype(var1_vals.dtype, np.datetime64) or np.issubdtype(var1_vals.dtype, np.str_):
+                np.testing.assert_array_equal(
+                    var1_vals,
+                    var2_vals,
+                    err_msg=f"Variable {var} differs"
+                )
+            else:
+                # Numeric variables - use rtol
+                np.testing.assert_allclose(
+                    var1_vals,
+                    var2_vals,
+                    rtol=rtol,
+                    err_msg=f"Variable {var} differs"
+                )
+                                         
         # Compare data variables
         for var in ds1.data.data_vars:
             assert var in ds2.data.data_vars, \
