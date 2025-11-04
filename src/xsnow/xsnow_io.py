@@ -1694,6 +1694,10 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
             compat='override'
         )
         
+        # Remove duplicate timestamps (can occur when updating overlapping time ranges)
+        _, unique_indices = np.unique(combined['time'].values, return_index=True)
+        combined = combined.isel(time=sorted(unique_indices))
+        
     else:
         # No common locations - simple concatenation along location dimension
         # Handle dimension mismatches
@@ -1817,8 +1821,16 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
                 f"specified maximum of {max_files} files to save."
             )
             
-    if ds.sizes.get('location') > 1:
-        raise ValueError("to_smet() only supports datasets with a single location.")
+    #num_locations = ds.sizes.get('location', 0)
+    if (num_locations := ds.sizes.get('location', 0)) is None:
+        # Dimension was squeezed - this is OK (single location)
+        num_locations = 0
+        
+    if num_locations > 1:
+        raise ValueError(
+            "to_smet only supports single-location datasets. "
+            "Use ds.sel(location='name') to select one location first."
+        )
 
     smet_vars = [name for name, var in ds.data.data_vars.items() if 'layer' not in var.dims]
     if not smet_vars:
