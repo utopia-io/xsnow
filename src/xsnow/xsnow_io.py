@@ -974,7 +974,7 @@ def _create_pro_dataset(
         # Convert to dask if needed
         if use_dask:
             chunk_spec = (1, chunks['time'], 1, 1, chunks['layer'])
-            arr = da.from_array(np_array, chunks=chunk_spec) # type: ignore[arg-type]
+            arr = da.from_array(np_array.copy(), chunks=chunk_spec) # type: ignore[arg-type]
         else:
             arr = np_array
         

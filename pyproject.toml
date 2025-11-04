@@ -40,7 +40,7 @@ testing = [
   "psutil>=7.1.0",
   "pytest-benchmark>=5.1.0",
   "memory-profiler>=0.61.0",
-  "pytest-timeout",
+  "pytest-timeout>=2.4.0",
 ]
 gpu = [
   "cupy-cuda12x; platform_system == 'Linux'",  # nvidia wheels
