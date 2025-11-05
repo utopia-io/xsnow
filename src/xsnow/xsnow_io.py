@@ -1581,9 +1581,11 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
     if existing_ds.data is None or existing_ds.data.time.size == 0:
         return read(resolved_source) or existing_ds
     
-    last_timestamp = pd.to_datetime(existing_ds.data.time.max().values).isoformat()
-    
-    time_filter = TimeSelector(sel=slice(last_timestamp, None))
+    last_timestamp = pd.to_datetime(existing_ds.data.time.max().values)
+
+    # Add 1 second to make it exclusive (avoid re-reading the last timestamp)
+    last_timestamp_exclusive = (last_timestamp + pd.Timedelta(seconds=1)).isoformat()
+    time_filter = TimeSelector(sel=slice(last_timestamp_exclusive, None))    
     new_data_obj = read(resolved_source, time=time_filter)
 
     if new_data_obj is None or new_data_obj.data.time.size == 0:
