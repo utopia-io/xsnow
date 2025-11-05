@@ -1828,9 +1828,9 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
         
     if num_locations > 1:
         raise ValueError(
-            "to_smet only supports single-location datasets. "
+            "to_smet only supports datasets with a single location. "
             "Use ds.sel(location='name') to select one location first."
-        )
+        ) 
 
     smet_vars = [name for name, var in ds.data.data_vars.items() if 'layer' not in var.dims]
     if not smet_vars:
