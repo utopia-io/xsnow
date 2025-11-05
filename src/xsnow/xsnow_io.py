@@ -1813,28 +1813,23 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
         raise ValueError("Cannot save an empty dataset.")
     
     if max_files is not None:
-        num_locations = ds.sizes.get('location')
-        if num_locations > max_files:
-            raise ValueError(
-                f"Dataset contains {num_locations} locations, which exceeds the "
-                f"specified maximum of {max_files} files to save."
-            )
-            
-    #num_locations = ds.sizes.get('location', 0)
-    if (num_locations := ds.sizes.get('location', 0)) is None:
-        # Dimension was squeezed - this is OK (single location)
-        num_locations = 0
-        
+            num_locations = ds.sizes.get('location')
+            if num_locations and num_locations > max_files:
+                raise ValueError(
+                    f"Dataset contains {num_locations} locations, which exceeds the "
+                    f"specified maximum of {max_files} files to save."
+                )
+    
+    # Check location dimension (may be None if squeezed after .sel())
     num_locations = ds.sizes.get('location', 0)
     if num_locations is None:
-        # Dimension was squeezed - this is OK (single location)
         num_locations = 0
-
+    
     if num_locations > 1:
         raise ValueError(
             "to_pro only supports single-location datasets. "
             "Use ds.sel(location='name') to select one location first."
-        ) 
+        )
 
     smet_vars = [name for name, var in ds.data.data_vars.items() if 'layer' not in var.dims]
     if not smet_vars:
