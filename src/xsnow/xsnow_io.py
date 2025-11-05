@@ -1825,9 +1825,14 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
         # Dimension was squeezed - this is OK (single location)
         num_locations = 0
         
+    num_locations = ds.sizes.get('location', 0)
+    if num_locations is None:
+        # Dimension was squeezed - this is OK (single location)
+        num_locations = 0
+
     if num_locations > 1:
         raise ValueError(
-            "to_smet only supports datasets with a single location. "
+            "to_pro only supports single-location datasets. "
             "Use ds.sel(location='name') to select one location first."
         ) 
 
