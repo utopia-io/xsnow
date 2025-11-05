@@ -1650,14 +1650,23 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
                 if coord_name in existing_loc_data.coords:
                     slope_coords_to_preserve[coord_name] = existing_loc_data[coord_name]
             
+            # Remove duplicate timestamps before concatenating
+            if 'time' in existing_loc_data.dims:
+                _, existing_idx = np.unique(existing_loc_data['time'].values, return_index=True)
+                existing_loc_data = existing_loc_data.isel(time=sorted(existing_idx))
+            
+            if 'time' in new_loc_data.dims:
+                _, new_idx = np.unique(new_loc_data['time'].values, return_index=True)
+                new_loc_data = new_loc_data.isel(time=sorted(new_idx))
+            
             # Concatenate along time dimension for this location
             merged_loc = xr.concat(
                 [existing_loc_data, new_loc_data],
                 dim='time',
                 coords='all',
                 compat='override'
-            )
-            
+            )         
+               
             # AFTER concat: Restore preserved coordinates
             if slope_coords_to_preserve:
                 merged_loc = merged_loc.assign_coords(slope_coords_to_preserve)
@@ -1693,11 +1702,7 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
             coords='all',
             compat='override'
         )
-        
-        # Remove duplicate timestamps (can occur when updating overlapping time ranges)
-        _, unique_indices = np.unique(combined['time'].values, return_index=True)
-        combined = combined.isel(time=sorted(unique_indices))
-        
+                
     else:
         # No common locations - simple concatenation along location dimension
         # Handle dimension mismatches
@@ -1724,20 +1729,16 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
                 if new_size < max_size:
                     new_data_obj.data = new_data_obj.data.reindex(
                         {dim: range(max_size)}, fill_value=np.nan
-                    )
-        
+                    )        
         # Concatenate along location dimension (different stations)
         combined = xr.concat(
             [existing_ds.data, new_data_obj.data],
             dim='location',
+            join='outer',
             coords='all',
             compat='override'
         )
-    
-    # Remove duplicate times (keep first occurrence)
-    _, index = np.unique(combined['time'], return_index=True)
-    combined = combined.isel(time=index)
-
+            
     return xsnowDataset(combined)
     
 @register_xsnowDataset_method
