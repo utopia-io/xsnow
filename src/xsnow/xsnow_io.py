@@ -1650,23 +1650,19 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
                 if coord_name in existing_loc_data.coords:
                     slope_coords_to_preserve[coord_name] = existing_loc_data[coord_name]
             
-            # Remove duplicate timestamps before concatenating
-            if 'time' in existing_loc_data.dims:
-                _, existing_idx = np.unique(existing_loc_data['time'].values, return_index=True)
-                existing_loc_data = existing_loc_data.isel(time=sorted(existing_idx))
-            
-            if 'time' in new_loc_data.dims:
-                _, new_idx = np.unique(new_loc_data['time'].values, return_index=True)
-                new_loc_data = new_loc_data.isel(time=sorted(new_idx))
-            
             # Concatenate along time dimension for this location
             merged_loc = xr.concat(
                 [existing_loc_data, new_loc_data],
                 dim='time',
                 coords='all',
                 compat='override'
-            )         
-               
+            )
+            
+            # Remove duplicate timestamps AFTER concat (handles overlapping data)
+            if 'time' in merged_loc.dims:
+                _, unique_idx = np.unique(merged_loc['time'].values, return_index=True)
+                merged_loc = merged_loc.isel(time=sorted(unique_idx))
+                               
             # AFTER concat: Restore preserved coordinates
             if slope_coords_to_preserve:
                 merged_loc = merged_loc.assign_coords(slope_coords_to_preserve)
