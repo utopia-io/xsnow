@@ -1900,13 +1900,17 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
     
     if num_locations > 1:
         raise ValueError(
-            "to_pro only supports single-location datasets. "
+            "to_pro only supports datasets with a single location. "  # FIXED MESSAGE
             "Use ds.sel(location='name') to select one location first."
         )
 
-    # Squeeze location but preserve time dimension
-    single_loc_ds = ds.data.squeeze(dim='location', drop=False)
-    
+    # Squeeze location dimension if it exists
+    if 'location' in ds.data.dims:
+        single_loc_ds = ds.data.squeeze(dim='location', drop=False)
+    else:
+        # Location already squeezed/removed by .sel()
+        single_loc_ds = ds.data
+
     # Select first slope if multiple slopes exist
     if 'slope' in single_loc_ds.dims and single_loc_ds.sizes['slope'] > 1:
         single_loc_ds = single_loc_ds.isel(slope=0)
