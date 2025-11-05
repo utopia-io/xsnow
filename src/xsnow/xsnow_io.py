@@ -1827,7 +1827,7 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
     
     if num_locations > 1:
         raise ValueError(
-            "to_pro only supports single-location datasets. "
+            "to_smet only supports datasets with a single location. "
             "Use ds.sel(location='name') to select one location first."
         )
 
@@ -1893,8 +1893,16 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
                 f"specified maximum of {max_files} files to save."
             )
 
-    if ds.sizes.get('location') > 1:
-        raise ValueError("to_pro() only supports datasets with a single location.")
+    # Check location dimension (may be None if squeezed after .sel())
+    num_locations = ds.sizes.get('location', 0)
+    if num_locations is None:
+        num_locations = 0
+    
+    if num_locations > 1:
+        raise ValueError(
+            "to_pro only supports single-location datasets. "
+            "Use ds.sel(location='name') to select one location first."
+        )
 
     # Squeeze location but preserve time dimension
     single_loc_ds = ds.data.squeeze(dim='location', drop=False)
