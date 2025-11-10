@@ -216,7 +216,7 @@ def compute_critical_crack_length(ds: 'xsnowDataset') -> 'xsnowDataset':
       - Layers above the true snow surface are padded with NaN thickness.
 
     Slope angle / aspect:
-      - Slope angle (`slope_inclination`) and aspect (`slope_azimuth`) are NOT used here.
+      - Slope angle (`inclination`) and aspect (`azimuth`) are NOT used here.
         This is a flat-terrain formulation (same as in earlier xsnow versions).
 
     Returns

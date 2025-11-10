@@ -31,9 +31,9 @@ class TestMultiSlopeDetection:
         
         ds = read(data_dir, lazy=False)
         
-        # Check slope_inclination coordinate
-        if 'slope_inclination' in ds.data.coords:
-            slope_angles = ds.data['slope_inclination'].values
+        # Check inclination coordinate
+        if 'inclination' in ds.data.coords:
+            slope_angles = ds.data['inclination'].values
             
             # Should have all the slope angles
             for expected_slope in slopes:
@@ -80,14 +80,14 @@ class TestMultiSlopeMerging:
                 assert len(valid_data) > 0, f"Slope {slope_idx} has no valid data"
     
     def test_slopes_sorted_by_angle(self, synthetic_pro, tmp_path):
-        """Test that slopes are sorted by slope_inclination angle."""
+        """Test that slopes are sorted by inclination angle."""
         slopes = [45, 0, 30, 15]  # Unsorted
         data_dir = synthetic_pro.multi_slope(tmp_path, "TEST_STATION", slopes=slopes)
         
         ds = read(data_dir, lazy=False)
         
-        if 'slope_inclination' in ds.data.coords:
-            slope_angles = ds.data['slope_inclination'].values
+        if 'inclination' in ds.data.coords:
+            slope_angles = ds.data['inclination'].values
             valid_angles = slope_angles[~np.isnan(slope_angles)]
             
             # Should be sorted
@@ -150,22 +150,22 @@ class TestMultiSlopeSelection:
         
         ds = read(data_dir, lazy=False)
         
-        if 'slope_inclination' in ds.data.coords:
+        if 'inclination' in ds.data.coords:
             # Select single location first (handles both single and multi-location)
             if ds.sizes['location'] > 1:
                 ds = ds.isel(location=0)
             else:
                 ds = ds.squeeze('location', drop=False)
             
-            # Now slope_inclination should be 1D
-            slope_angles = ds.data['slope_inclination'].values
+            # Now inclination should be 1D
+            slope_angles = ds.data['inclination'].values
             idx_30 = np.where(slope_angles == 30)[0]
             
             if len(idx_30) > 0:
                 ds_30 = ds.isel(slope=idx_30[0])
                 
                 # Verify we got the right slope
-                incl_value = float(ds_30.data['slope_inclination'].values.flat[0])
+                incl_value = float(ds_30.data['inclination'].values.flat[0])
                 assert np.isclose(incl_value, 30.0), \
                     f"Expected 30.0, got {incl_value}"
 
@@ -286,8 +286,8 @@ StationName= NO_SLOPE
         
         # Should still work, assume flat
         assert ds is not None
-        if 'slope_inclination' in ds.data.coords:
-            slope_angle = ds.data['slope_inclination'].values[0]
+        if 'inclination' in ds.data.coords:
+            slope_angle = ds.data['inclination'].values[0]
             # Should be NaN or 0
             assert np.isnan(slope_angle) or slope_angle == 0
     
@@ -391,7 +391,7 @@ class TestRealMultiSlopeData:
         assert ds.sizes['slope'] > 1
         
         # Should have slope metadata
-        assert 'slope_inclination' in ds.data.coords
+        assert 'inclination' in ds.data.coords
         
         # Each slope should have data
         if 'height' in ds.data:

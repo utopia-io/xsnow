@@ -61,7 +61,7 @@ LocationIndexSeq    = Sequence[LocationIndexScalar]
 LocationLike = Union["LocationSelector", LocationIndexScalar, LocationIndexSeq]
 
 SlopeIndexLike = Union[int, slice, Sequence[int], xr.DataArray]  # xr <-> boolean mask
-SlopeQueryMapping = Mapping[str, Any]  # e.g., {"slope_inclination": 30, "slope_azimuth": 180}
+SlopeQueryMapping = Mapping[str, Any]  # e.g., {"inclination": 30, "azimuth": 180}
 SlopeLike = Union["SlopeSelector", SlopeIndexLike, SlopeQueryMapping]
 
 RealIndexLike = Union[int, str, slice, Sequence[int], Sequence[str]]
@@ -206,7 +206,7 @@ class SlopeSelector(Selector):
 
     Supports:
     - int / list[int] / slice / xr.DataArray (existing positional/boolean logic)
-    - dict query like {'slope_inclination': 30, 'slope_azimuth': 180} to match slope
+    - dict query like {'inclination': 30, 'azimuth': 180} to match slope
       metadata coords/vars.
     """
     def __init__(self, sel: Union[SlopeIndexLike, SlopeQueryMapping]):

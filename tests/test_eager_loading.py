@@ -501,7 +501,7 @@ def test_eager_loading_real_data_with_slopes(subset_real_files):
     if 'slope' in ds.dims:
         assert ds.sizes['slope'] > 1
         print(f"\nReal data has {ds.sizes['slope']} slopes")
-        print(f"Slope slope_inclinations: {ds.slope_inclination.values}")
+        print(f"Slope inclinations: {ds.inclination.values}")
 
 
 def test_eager_loading_full_real_dataset_auto_detect(real_gridded_dir):
