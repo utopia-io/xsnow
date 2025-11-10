@@ -170,9 +170,9 @@ def read(
                         ds[coord_name] = (coord_data.dims, decoded_values)
             
             # DEBUG: Check slope coordinates after loading
-            if 'slope_inclination' in ds.coords:
-                logger.debug(f"read NetCDF: slope_inclination values AFTER load = {ds.slope_inclination.values}")
-                logger.debug(f"read NetCDF: slope_inclination dims = {ds.slope_inclination.dims}")
+            if 'inclination' in ds.coords:
+                logger.debug(f"read NetCDF: inclination values AFTER load = {ds.inclination.values}")
+                logger.debug(f"read NetCDF: inclination dims = {ds.inclination.dims}")
             
             return xsnowDataset(ds)
         except Exception as e:
@@ -201,7 +201,7 @@ def read(
         logger.debug(f"Auto-detected lazy={lazy} for {total_files} files (threshold={lazy_threshold})")
 
     # --- Step 4: Read and process data files ---
-    # TODO: The datetime_start *_end parsing results in nan for slope_inclination and slope_azimuth!
+    # TODO: The datetime_start *_end parsing results in nan for inclination and azimuth!
     datetime_start, datetime_end = (time_sel.sel.start, time_sel.sel.stop) if time_sel and isinstance(time_sel.sel, slice) else (None, None)
     
     if lazy:
@@ -995,12 +995,12 @@ def _create_pro_dataset(
             'latitude': ('location', [float(metadata.get('latitude', np.nan))]),
             'longitude': ('location', [float(metadata.get('longitude', np.nan))]),
             'altitude': ('location', [float(metadata.get('altitude', np.nan))]),
-            'slope_inclination': ('slope', [
+            'inclination': ('slope', [
                 int(round(float(metadata.get('slopeAngle', np.nan))))
                 if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
                 else np.nan
             ]),
-            'slope_azimuth': ('slope', [
+            'azimuth': ('slope', [
                 int(round(float(metadata.get('slopeAzi', np.nan))))
                 if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
                 else np.nan
@@ -1281,7 +1281,7 @@ def read_smet(
     
     # FIXED: Try to get slope values from SMET header before defaulting to NaN
     # This prevents unnecessary NaN assignments when slope metadata is available
-    if 'slope_inclination' not in ds.coords:
+    if 'inclination' not in ds.coords:
         # Try to get slope angle from various possible header keys
         slope_incl = header.get('SlopeAngle', header.get('slopeAngle', 
                     header.get('slope_angle', header.get('SlopeAzi='))))
@@ -1300,8 +1300,8 @@ def read_smet(
             slope_azi = np.nan
         
         ds = ds.assign_coords({
-            'slope_inclination': ('slope', [slope_incl]),
-            'slope_azimuth': ('slope', [slope_azi])
+            'inclination': ('slope', [slope_incl]),
+            'azimuth': ('slope', [slope_azi])
         })
 
     return ds
@@ -1419,14 +1419,14 @@ def _merge_and_finalize(
         combined_profiles_ds = None
         if profile_dsets:
             if len(profile_dsets) > 1:
-                # Sort by slope_inclination if it exists, otherwise use 0 as default
+                # Sort by inclination if it exists, otherwise use 0 as default
                 def get_slope_key(ds):
-                    if 'slope_inclination' in ds.coords:
-                        return ds.coords['slope_inclination'].values[0]
-                    elif 'slope_inclination' in ds.data_vars:
-                        return ds['slope_inclination'].values[0]
+                    if 'inclination' in ds.coords:
+                        return ds.coords['inclination'].values[0]
+                    elif 'inclination' in ds.data_vars:
+                        return ds['inclination'].values[0]
                     else:
-                        return 0.0  # Default value if slope_inclination doesn't exist
+                        return 0.0  # Default value if inclination doesn't exist
                 
                 profile_dsets.sort(key=get_slope_key)
                 
@@ -1514,9 +1514,9 @@ def _merge_and_finalize(
     final_dataset = xsnowDataset(final_xr_dataset)
     
     # DEBUG: Check slope coordinates after merge
-    if 'slope_inclination' in final_dataset.data.coords:
-        logger.debug(f"_merge_and_finalize: slope_inclination values = {final_dataset.data.slope_inclination.values}")
-        logger.debug(f"_merge_and_finalize: slope_inclination dims = {final_dataset.data.slope_inclination.dims}")
+    if 'inclination' in final_dataset.data.coords:
+        logger.debug(f"_merge_and_finalize: inclination values = {final_dataset.data.inclination.values}")
+        logger.debug(f"_merge_and_finalize: inclination dims = {final_dataset.data.inclination.dims}")
     
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
 
@@ -1545,51 +1545,53 @@ def _coerce_realization(sel: Optional[RealizationLike]) -> Optional[RealizationS
 #                           WRITE FUNCTIONS                                   #
 # --------------------------------------------------------------------------- #
 
-@register_xsnowDataset_method
-def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xsnowDataset:
-    """
-    Updates an existing xsnowDataset with new data from a source.
+## This interferes with xarray's update method and changes the semantics, disabling for now
+# TODO: update after tutorial on merging is done and clear
+# @register_xsnowDataset_method
+# def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xsnowDataset:
+#     """
+#     Updates an existing xsnowDataset with new data from a source.
 
-    This method is designed for workflows where you load a cached dataset
-    (e.g., from NetCDF) and want to append new data from recent .pro or
-    .smet files. It finds the last timestamp in the current data and only
-    reads new data from the source that is more recent.
+#     This method is designed for workflows where you load a cached dataset
+#     (e.g., from NetCDF) and want to append new data from recent .pro or
+#     .smet files. It finds the last timestamp in the current data and only
+#     reads new data from the source that is more recent.
     
-    Note: This method is optimized for adding new timestamps to existing data.
-    If the new data has different dimensions (e.g., different slopes), the result
-    may differ from loading all data together. For guaranteed consistency across
-    all dimensions, use a full reload instead.
+#     Note: This method is optimized for adding new timestamps to existing data.
+#     If the new data has different dimensions (e.g., different slopes), the result
+#     may differ from loading all data together. For guaranteed consistency across
+#     all dimensions, use a full reload instead.
 
-    Args:
-        existing_ds (xsnowDataset): The dataset instance to be updated.
-        source: Path to a file, a directory, or a list of files
-            containing the new data.
+#     Args:
+#         existing_ds (xsnowDataset): The dataset instance to be updated.
+#         source: Path to a file, a directory, or a list of files
+#             containing the new data.
 
-    Returns:
-        A new xsnowDataset instance with the combined data.
-    """
-    try:
-        pro_files, smet_files = _resolve_filepaths(source)
-        if not pro_files and not smet_files:
-            logger.warning("Update source contains no data files.")
-            return existing_ds
-        resolved_source = pro_files + smet_files
-    except (FileNotFoundError, TypeError) as e:
-        logger.error(e)
-        return existing_ds
+#     Returns:
+#         A new xsnowDataset instance with the combined data.
+#     """
+#     try:
+#         pro_files, smet_files = _resolve_filepaths(source)
+#         if not pro_files and not smet_files:
+#             logger.warning("Update source contains no data files.")
+#             return existing_ds
+#         resolved_source = pro_files + smet_files
+#     except (FileNotFoundError, TypeError) as e:
+#         logger.error(e)
+#         return existing_ds
 
-    if existing_ds.data is None or existing_ds.data.time.size == 0:
-        return read(resolved_source) or existing_ds
+#     if existing_ds.data is None or existing_ds.data.time.size == 0:
+#         return read(resolved_source) or existing_ds
     
-    last_timestamp = pd.to_datetime(existing_ds.data.time.max().values)
+#     last_timestamp = pd.to_datetime(existing_ds.data.time.max().values)
 
-    # Add 1 second to make it exclusive (avoid re-reading the last timestamp)
-    last_timestamp_exclusive = (last_timestamp + pd.Timedelta(seconds=1)).isoformat()
-    time_filter = TimeSelector(sel=slice(last_timestamp_exclusive, None))    
-    new_data_obj = read(resolved_source, time=time_filter)
+#     # Add 1 second to make it exclusive (avoid re-reading the last timestamp)
+#     last_timestamp_exclusive = (last_timestamp + pd.Timedelta(seconds=1)).isoformat()
+#     time_filter = TimeSelector(sel=slice(last_timestamp_exclusive, None))    
+#     new_data_obj = read(resolved_source, time=time_filter)
 
-    if new_data_obj is None or new_data_obj.data.time.size == 0:
-        return existing_ds
+#     if new_data_obj is None or new_data_obj.data.time.size == 0:
+#         return existing_ds
 
     # ========================================================================
     # FIX: Handle string-based location coordinates properly
@@ -1648,7 +1650,7 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
             
             # BEFORE concat: Save coordinates from existing dataset
             slope_coords_to_preserve = {}
-            for coord_name in ['slope_inclination', 'slope_azimuth']:
+            for coord_name in ['inclination', 'azimuth']:
                 if coord_name in existing_loc_data.coords:
                     slope_coords_to_preserve[coord_name] = existing_loc_data[coord_name]
             
@@ -1762,9 +1764,9 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     ds_to_save = ds.to_xarray().copy()
     
     # DEBUG: Check slope coordinates before saving
-    if 'slope_inclination' in ds_to_save.coords:
-        logger.debug(f"to_netcdf: slope_inclination values BEFORE save = {ds_to_save.slope_inclination.values}")
-        logger.debug(f"to_netcdf: slope_inclination dims = {ds_to_save.slope_inclination.dims}")
+    if 'inclination' in ds_to_save.coords:
+        logger.debug(f"to_netcdf: inclination values BEFORE save = {ds_to_save.inclination.values}")
+        logger.debug(f"to_netcdf: inclination dims = {ds_to_save.inclination.dims}")
     
     # ENCODE STRING COORDINATES FOR NETCDF
     for coord_name in ("location", "realization"):
@@ -1930,14 +1932,14 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
         
         # Get slope angle value
         try:
-            slope_val = int(round(single_loc_ds.slope_inclination.values.item()))
+            slope_val = int(round(single_loc_ds.inclination.values.item()))
         except (AttributeError, ValueError):
             slope_val = -999
         f.write(f"SlopeAngle= {slope_val:.0f}\n")
         
-        # Handle slope slope_azimuth
+        # Handle slope azimuth
         try:
-            azimuth = int(round(single_loc_ds.slope_azimuth.values.item()))
+            azimuth = int(round(single_loc_ds.azimuth.values.item()))
         except (AttributeError, ValueError):
             azimuth = -999
         f.write(f"SlopeAzi= {azimuth:.0f}\n")
