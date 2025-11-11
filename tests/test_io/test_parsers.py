@@ -13,6 +13,7 @@ Strategy:
 import pytest
 import numpy as np
 import pandas as pd
+import xarray as xr
 from pathlib import Path
 
 from xsnow.xsnow_io import (
@@ -355,6 +356,8 @@ def test_read_pro_raw_surface_hoar_synthesis(tmp_path, synthetic_pro):
 def test_create_pro_dataset_empty_profiles(tmp_path, synthetic_pro):
     """
     Edge case: Creating dataset from empty profile list.
+    Should still return a minimal dataset with profile_status = 1
+    and no time dimension.
     """
     metadata = {
         'station_name': 'TEST',  # Changed from 'stationName'
@@ -362,11 +365,20 @@ def test_create_pro_dataset_empty_profiles(tmp_path, synthetic_pro):
         'longitude': '10.5',
         'altitude': '2500'
     }
-    
+
     ds = _create_pro_dataset(metadata, [], max_layers=10)
-    
-    # Should return None for empty profiles
-    assert ds is None
+
+    # Should now return a Dataset,
+    assert isinstance(ds, xr.Dataset)
+    assert 'profile_status' in ds
+    status = ds['profile_status'].values
+    assert np.all(status == 1)
+    assert 'time' not in ds.dims
+    for coord in ['location', 'slope', 'realization']:
+        assert coord in ds.coords
+    assert ds['profile_status'].dims == ('location', 'slope', 'realization')
+    assert ds['profile_status'].shape == (1, 1, 1)
+
 
 
 @pytest.mark.synthetic

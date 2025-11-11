@@ -872,12 +872,22 @@ def _create_pro_dataset(
     density and grain size taken from the file, while other variables like
     temperature are set to np.nan.
 
+    `profile_status` semantics in this worker:
+        - 2: valid profile WITH snow for that timestamp
+        - 1: valid profile WITHOUT snow for that timestamp (file parsed, no snow)
+      (Values 0 / <0 are reserved for higher-level logic.)
+
+    If no profiles are provided but metadata exists, a minimal dataset with
+    `profile_status = 1` (no snow / no profiles, but valid file) is returned.
+    This variable has no time dimension and will broadcast across time when
+    merged with time-resolved datasets later on.
+
     The final dataset will have dimensions:
         - location (1): Single monitoring site
-        - time (variable): Each profile timestamp
+        - time (variable): Each profile timestamp  [only if existent]
         - slope (1): Single slope angle (from file metadata)
         - realization (1): Single simulation run
-        - layer (max_layers): Padded vertical layers
+        - layer (max_layers): Padded vertical layers  [only if existent]
 
     Args:
         metadata (Dict): A dictionary containing SNOWPACK .pro
@@ -898,30 +908,88 @@ def _create_pro_dataset(
         Optional[xr.Dataset]: An xarray.Dataset containing the structured
         snow profile data, or None if the input profiles list is empty.
     """
-    if not profiles:
-        return None
 
     chunks = chunks or {'time': 100, 'layer': -1}
-        
-    timestamps = pd.to_datetime([p['timestamp'] for p in profiles], format='%d.%m.%Y %H:%M:%S')
-    
+
+    # ------------------------------------------------------------------
+    # Case 1: no profiles, but we still build a dataset with profile_status = 1
+    # ------------------------------------------------------------------
+    if not profiles:
+        # USE STRING STATION NAME DIRECTLY (not 'stationName')
+        station_name = metadata.get('station_name', metadata.get('stationName', 'unknown'))
+
+        slope_index = [0]
+
+        ds = xr.Dataset(
+            data_vars={
+                # shape: (location=1, slope=1, realization=1)
+                # This will broadcast along 'time' if/when merged with datasets
+                # that introduce a time dimension for this site.
+                'profile_status': (
+                    ('location', 'slope', 'realization'),
+                    np.array([[[1]]], dtype='i1')
+                )
+            },
+            coords={
+                'location': [station_name],
+                'slope': slope_index,
+                'realization': [0],
+                'latitude': (
+                    'location',
+                    [float(metadata.get('latitude', np.nan))]
+                ),
+                'longitude': (
+                    'location',
+                    [float(metadata.get('longitude', np.nan))]
+                ),
+                'altitude': (
+                    'location',
+                    [float(metadata.get('altitude', np.nan))]
+                ),
+                'inclination': (
+                    'slope',
+                    [
+                        int(round(float(metadata.get('slopeAngle', np.nan))))
+                        if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
+                        else np.nan
+                    ]
+                ),
+                'azimuth': (
+                    'slope',
+                    [
+                        int(round(float(metadata.get('slopeAzi', np.nan))))
+                        if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
+                        else np.nan
+                    ]
+                ),
+            }
+        )
+
+        return ds
+
+    # ------------------------------------------------------------------
+    # Case 2: profiles present → full 5D dataset + per-timestamp profile_status
+    # ------------------------------------------------------------------
+    timestamps = pd.to_datetime(
+        [p['timestamp'] for p in profiles],
+        format='%d.%m.%Y %H:%M:%S'
+    )
+
     all_params = sorted({
-        key for p in profiles for key in p 
+        key for p in profiles for key in p
         if key not in ['timestamp', 'SH_at_surface']
     })
 
-    # For each parameter, collect all profile data first
-    data_vars = {}
-    
+    data_vars: Dict[str, Any] = {}
+
     for param in all_params:
-        # Create a list to hold data for each profile
         profile_data = []
-        
-        for i, profile in enumerate(profiles):
+
+        for profile in profiles:
             has_sh = False
             sh_gsize = np.nan
             sh_density = np.nan
-            
+
             if add_surface_sh_as_layer and 'SH_at_surface' in profile:
                 sh_data = profile['SH_at_surface']
                 if sh_data.size >= 3 and sh_data[0] > 0:
@@ -930,12 +998,12 @@ def _create_pro_dataset(
                     sh_density = sh_data[2]
 
             num_snow_layers = len(profile.get('height', []))
-            
+
             # Get parameter data for this profile
             param_data = profile.get(param, [])
             final_values = list(param_data[:num_snow_layers])
-            
-            # Pad with NaN to num_snow_layers
+
+            # Pad with NaN up to num_snow_layers
             while len(final_values) < num_snow_layers:
                 final_values.append(np.nan)
 
@@ -948,7 +1016,11 @@ def _create_pro_dataset(
                 elif param == 'density':
                     final_values.append(sh_density)
                 elif param == 'height':
-                    last_height = final_values[-1] if final_values and not np.isnan(final_values[-1]) else 0.0
+                    last_height = (
+                        final_values[-1]
+                        if final_values and not np.isnan(final_values[-1])
+                        else 0.0
+                    )
                     final_values.append(last_height + 0.001)
                 else:
                     final_values.append(np.nan)
@@ -956,59 +1028,112 @@ def _create_pro_dataset(
             # Pad to max_layers
             while len(final_values) < max_layers:
                 final_values.append(np.nan)
-            
+
             # Truncate if too long
             final_values = final_values[:max_layers]
-            
-            # Add to profile_data
+
             profile_data.append(final_values)
-        
-        # Now create the full array with shape (1, n_profiles, 1, 1, max_layers)
-        # Build as numpy first
-        np_array = np.full((1, len(profiles), 1, 1, max_layers), np.nan, dtype=np.float32)
-        
-        # Fill in the data
+
+        # Build numpy array with shape (1, n_profiles, 1, 1, max_layers)
+        np_array = np.full(
+            (1, len(profiles), 1, 1, max_layers),
+            np.nan,
+            dtype=np.float32
+        )
+
         for i, profile_values in enumerate(profile_data):
             np_array[0, i, 0, 0, :] = profile_values
-        
+
         # Convert to dask if needed
         if use_dask:
             chunk_spec = (1, chunks['time'], 1, 1, chunks['layer'])
-            arr = da.from_array(np_array.copy(), chunks=chunk_spec) # type: ignore[arg-type]
+            arr = da.from_array(np_array.copy(), chunks=chunk_spec)  # type: ignore[arg-type]
         else:
             arr = np_array
-        
-        data_vars[param] = (("location", "time", "slope", "realization", "layer"), arr)
 
-    # USE STRING STATION NAME DIRECTLY (not 'stationName')
+        data_vars[param] = (
+            ("location", "time", "slope", "realization", "layer"),
+            arr
+        )
+
+    # ------------------------------------------------------------------
+    # Compute profile_status for each timestamp
+    #   2: at least one non-NaN z < 0  (snow on ground)
+    #   1: otherwise (parsed, but no snow)
+    # ------------------------------------------------------------------
+    status_np = np.empty((1, len(profiles), 1, 1), dtype='i1')
+
+    for i, profile in enumerate(profiles):
+        status = 1  # default: valid, no snow
+
+        z = profile.get('z', None)
+        if z is not None:
+            z_arr = np.asarray(z, dtype=float)
+            # Snow if any level is below 0 and valid
+            if np.any(~np.isnan(z_arr) & (z_arr < 0.0)):
+                status = 2
+
+        status_np[0, i, 0, 0] = status
+
+    if use_dask:
+        status_arr = da.from_array(
+            status_np,
+            chunks=(1, chunks['time'], 1, 1)
+        )  # type: ignore[arg-type]
+    else:
+        status_arr = status_np
+
+    data_vars['profile_status'] = (
+        ("location", "time", "slope", "realization"),
+        status_arr
+    )
+
+    # ------------------------------------------------------------------
+    # Build Dataset with coords
+    # ------------------------------------------------------------------
     station_name = metadata.get('station_name', metadata.get('stationName', 'unknown'))
-    
     slope_index = [0]
+
     ds = xr.Dataset(
         data_vars,
         coords={
-            'location': [station_name],  # ✨ STRING COORDINATE!
+            'location': [station_name],  # string coordinate
             'time': timestamps,
             'slope': slope_index,
             'realization': [0],
             'layer': np.arange(max_layers),
-            'latitude': ('location', [float(metadata.get('latitude', np.nan))]),
-            'longitude': ('location', [float(metadata.get('longitude', np.nan))]),
-            'altitude': ('location', [float(metadata.get('altitude', np.nan))]),
-            'inclination': ('slope', [
-                int(round(float(metadata.get('slopeAngle', np.nan))))
-                if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
-                else np.nan
-            ]),
-            'azimuth': ('slope', [
-                int(round(float(metadata.get('slopeAzi', np.nan))))
-                if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
-                else np.nan
-            ])
+            'latitude': (
+                'location',
+                [float(metadata.get('latitude', np.nan))]
+            ),
+            'longitude': (
+                'location',
+                [float(metadata.get('longitude', np.nan))]
+            ),
+            'altitude': (
+                'location',
+                [float(metadata.get('altitude', np.nan))]
+            ),
+            'inclination': (
+                'slope',
+                [
+                    int(round(float(metadata.get('slopeAngle', np.nan))))
+                    if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
+                    else np.nan
+                ]
+            ),
+            'azimuth': (
+                'slope',
+                [
+                    int(round(float(metadata.get('slopeAzi', np.nan))))
+                    if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
+                    else np.nan
+                ]
+            )
         }
     )
 
-    return ds 
+    return ds
 
 
 # --------------------------------------------------------------------------- #
