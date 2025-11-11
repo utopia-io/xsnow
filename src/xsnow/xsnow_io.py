@@ -344,7 +344,7 @@ def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
         )
         
         # Create dataset if data found
-        if raw_data and raw_data[1]:
+        if raw_data and raw_data[0]:
             metadata, profiles = raw_data
             return _create_pro_dataset(metadata, profiles, max_layers, add_sh)
     except Exception as e:
@@ -457,7 +457,7 @@ def _read_pro_files_lazy(
                     add_surface_sh_as_layer=add_sh
                 )
                 
-                if profiles:
+                if metadata:
                     # Create dataset with dask arrays (lazy!)
                     ds = _create_pro_dataset(
                         metadata, 
@@ -542,7 +542,7 @@ def _create_dataset_from_pro_file(
         )
 
         # Step 2: Create the dataset if data was found
-        if raw_data and raw_data[1]:  # Check if profiles list is not empty
+        if raw_data and raw_data[0]:  # Check if metadata dict is not empty
             metadata, profiles = raw_data
             return _create_pro_dataset(metadata, profiles, max_layers, add_sh)
             
@@ -1058,20 +1058,23 @@ def _create_pro_dataset(
 
     # ------------------------------------------------------------------
     # Compute profile_status for each timestamp
-    #   2: at least one non-NaN z < 0  (snow on ground)
-    #   1: otherwise (parsed, but no snow)
+    #   2: at least one non-NaN height > 0  (snow on ground)
+    #   1: no height > 0
+    #   0: safe default if others are not valid but still parsed without error
     # ------------------------------------------------------------------
     status_np = np.empty((1, len(profiles), 1, 1), dtype='i1')
 
     for i, profile in enumerate(profiles):
-        status = 1  # default: valid, no snow
+        status = 0  # default: no data otherwise proven differently
 
-        z = profile.get('z', None)
-        if z is not None:
-            z_arr = np.asarray(z, dtype=float)
+        height = profile.get('height', None)
+        if height is not None:
+            height_arr = np.asarray(height, dtype=float)
             # Snow if any level is below 0 and valid
-            if np.any(~np.isnan(z_arr) & (z_arr < 0.0)):
+            if np.any(~np.isnan(height_arr) & (height_arr > 0.0)):
                 status = 2
+            else:
+                status = 1
 
         status_np[0, i, 0, 0] = status
 
