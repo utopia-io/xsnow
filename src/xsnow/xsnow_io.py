@@ -1742,6 +1742,8 @@ def _merge_and_finalize(
     if 'inclination' in final_dataset.data.coords:
         logger.debug(f"_merge_and_finalize: inclination values = {final_dataset.data.inclination.values}")
         logger.debug(f"_merge_and_finalize: inclination dims = {final_dataset.data.inclination.dims}")
+
+    final_dataset = final_dataset.update_profile_status()
     
     return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
 
