@@ -668,6 +668,187 @@ def _handle_duplicate_names(names: List[str]) -> List[str]:
     
     return unique_names
 
+def _read_pro_metadata(
+    filepath: Union[str, Path],
+    logger: Optional[logging.Logger] = None,
+) -> Dict[str, Any]:
+    """
+    Read minimal metadata from a .pro file header.
+
+    Returns a dict with at least:
+      - station_name
+      - latitude
+      - longitude
+      - altitude
+      - slopeAngle (raw)
+      - slopeAzi (raw)
+
+    If the file cannot be read, falls back to filename-based station_name
+    and NaNs for others.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    file_path = Path(filepath)
+
+    metadata: Dict[str, Any] = {
+        "station_name": _sanitize_station_name(file_path.stem),
+        "latitude": np.nan,
+        "longitude": np.nan,
+        "altitude": np.nan,
+        "slopeAngle": np.nan,
+        "slopeAzi": np.nan,
+    }
+
+    if not file_path.exists():
+        logger.error(f"File not found while reading metadata: {filepath}")
+        return metadata
+
+    in_header = False
+
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line == "[STATION_PARAMETERS]":
+                    in_header = True
+                    continue
+                if line.startswith('[') and line != "[STATION_PARAMETERS]":
+                    # any other section ends header
+                    if in_header:
+                        break
+                    continue
+                if in_header:
+                    for key, value in HEADER_MAP.items():
+                        if line.startswith(key):
+                            metadata[value] = line.split('=', 1)[1].strip()
+    except Exception as exc:
+        logger.warning(f"Error reading metadata from {file_path.name}: {exc}")
+        # keep fallback metadata
+
+    # Station name fallback / sanitize
+    if not metadata.get("station_name"):
+        metadata["station_name"] = file_path.stem
+    metadata["station_name"] = _sanitize_station_name(metadata["station_name"])
+
+    return metadata
+
+
+def _parse_pro_profiles_from_lines(
+    lines: List[str],
+    file_path: Path,
+    code_map_to_use: Dict[str, str],
+    datetime_start: Optional[str],
+    datetime_end: Optional[str],
+    logger: logging.Logger,
+    remove_soil: bool,
+    add_surface_sh_as_layer: bool,
+) -> List[Dict]:
+    """Parse [DATA] section into temp_profiles list."""
+    temp_profiles: List[Dict] = []
+    in_data = False
+
+    start_ts = pd.to_datetime(datetime_start, format='mixed') if datetime_start else None
+    end_ts = pd.to_datetime(datetime_end, format='mixed') if datetime_end else None
+
+    def _process_and_append_profile(profile_data: Dict):
+        if not profile_data or 'timestamp' not in profile_data:
+            return
+
+        profile_ts = pd.to_datetime(
+            profile_data['timestamp'],
+            format='%d.%m.%Y %H:%M:%S',
+            errors='coerce'
+        )
+        if pd.isna(profile_ts):
+            return
+
+        if start_ts and profile_ts < start_ts:
+            return
+        if end_ts and profile_ts > end_ts:
+            return
+
+        # Remove soil layers if requested
+        if remove_soil and 'grain_type' in profile_data:
+            grain_types = profile_data['grain_type']
+            soil_indices = np.where((grain_types == 81) | (grain_types == 82))[0]
+            if soil_indices.size > 0:
+                first_soil_idx = soil_indices[0]
+                new_profile_data = {}
+                for key, val in profile_data.items():
+                    if isinstance(val, np.ndarray) and val.size == grain_types.size:
+                        new_profile_data[key] = val[:first_soil_idx]
+                    else:
+                        new_profile_data[key] = val
+                profile_data = new_profile_data
+
+        height_array = profile_data.get('height', np.array([]))
+        if height_array.size == 0:
+            return
+
+        has_snow = np.nanmax(height_array) > 0
+
+        sh_data = profile_data.get('SH_at_surface', np.array([]))
+        has_sh = add_surface_sh_as_layer and sh_data.size >= 3 and sh_data[0] > 0
+
+        if has_snow or has_sh:
+            temp_profiles.append(profile_data)
+
+    def _parse_and_process_block(lines_block: List[str]):
+        if not lines_block:
+            return
+        profile_dict: Dict[str, Any] = {}
+
+        # First line is timestamp line: "0500,<timestamp>"
+        ts_line = lines_block[0]
+        try:
+            profile_dict['timestamp'] = ts_line.split(',', 1)[1]
+        except IndexError:
+            return
+
+        for profile_line in lines_block[1:]:
+            try:
+                param_code, *data_parts = profile_line.split(',')
+                param_name = code_map_to_use.get(param_code)
+                if param_name:
+                    data_values = data_parts[1:]  # skip declared layer count
+                    profile_dict[param_name] = np.array(data_values, dtype=float)
+            except (ValueError, IndexError):
+                logger.warning(
+                    f"Could not parse data in {file_path.name} at timestamp "
+                    f"{profile_dict.get('timestamp', 'unknown')}. Line: '{profile_line}'"
+                )
+        _process_and_append_profile(profile_dict)
+
+    current_profile_lines: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped == '[DATA]':
+            in_data = True
+            continue
+        if stripped.startswith('[') and stripped != '[DATA]':
+            # any other section ends data region
+            if in_data:
+                break
+            continue
+
+        if in_data:
+            if stripped.startswith("0500,"):
+                # new block
+                _parse_and_process_block(current_profile_lines)
+                current_profile_lines = [stripped]
+            else:
+                current_profile_lines.append(stripped)
+    # last block
+    _parse_and_process_block(current_profile_lines)
+
+    return temp_profiles
+
+
 def _read_pro_raw(
     filepath: Union[str, Path],
     datetime_start: Optional[str] = None,
@@ -717,128 +898,25 @@ def _read_pro_raw(
         return {}, []
 
     code_map_to_use = code_map if code_map is not None else CODE_TO_NAME_MAP
-    metadata: Dict[str, Any] = {}
-    temp_profiles: List[Dict] = []
-    
-    in_header, in_data = False, False
 
-    start_ts = pd.to_datetime(datetime_start, format='mixed') if datetime_start else None
-    end_ts = pd.to_datetime(datetime_end, format='mixed') if datetime_end else None
-
-    # --- HELPER FUNCTIONS ---
-    def _process_and_append_profile(profile_data: Dict):
-        """Helper to process a completed profile dictionary."""
-        if not profile_data or 'timestamp' not in profile_data:
-            return
-
-        profile_ts = pd.to_datetime(profile_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
-        if pd.notna(profile_ts):
-            in_range = True
-            if start_ts and profile_ts < start_ts:
-                in_range = False
-            if end_ts and profile_ts > end_ts:
-                in_range = False
-            
-            if in_range:
-                # Check for soil layers and slice the data if necessary
-                if remove_soil and 'grain_type' in profile_data:
-                    grain_types = profile_data['grain_type']
-                    # Find the first occurrence of a soil layer
-                    soil_indices = np.where((grain_types == 81) | (grain_types == 82))[0]
-                    
-                    if soil_indices.size > 0:
-                        first_soil_idx = soil_indices[0]
-                        # Create a new dictionary, slicing all array variables
-                        # to keep only the elements BEFORE the first soil layer.
-                        new_profile_data = {}
-                        for key, val in profile_data.items():
-                            if isinstance(val, np.ndarray) and val.size == grain_types.size:
-                                new_profile_data[key] = val[:first_soil_idx]
-                            else:
-                                new_profile_data[key] = val
-                        profile_data = new_profile_data
-                
-                height_array = profile_data.get('height', np.array([]))
-                # Ensure height_array is not empty after potential slicing
-                if height_array.size == 0:
-                    return
-
-                has_snow = np.nanmax(height_array) > 0
-
-                sh_data = profile_data.get('SH_at_surface', np.array([]))
-                has_sh = add_surface_sh_as_layer and sh_data.size >= 3 and sh_data[0] > 0
-                
-                if has_snow or has_sh:
-                    temp_profiles.append(profile_data)
-                    
-    def _parse_and_process_block(lines_block: List[str]):
-        """Parses a block of lines for one timestamp into a dict and processes it."""
-        if not lines_block:
-            return
-        
-        profile_dict = {}
-        # The first line is always the timestamp
-        ts_line = lines_block[0]
-        profile_dict['timestamp'] = ts_line.split(',', 1)[1]
-        
-        # Process the rest of the lines for this block
-        for profile_line in lines_block[1:]:
-            try:
-                param_code, *data_parts = profile_line.split(',')
-                if (param_name := code_map_to_use.get(param_code)):
-                    data_values = data_parts[1:] # Skip the layer count
-                    profile_dict[param_name] = np.array(data_values, dtype=float)
-            except (ValueError, IndexError):
-                logger.warning(
-                    f"Could not parse data in {file_path.name} at timestamp "
-                    f"{profile_dict.get('timestamp', 'unknown')}. Line: '{profile_line}'"
-                )
-        _process_and_append_profile(profile_dict)
-
-    # --- MAIN PARSING LOGIC ---
+    # read once
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         lines = f.readlines()
 
-    current_profile_lines = []
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            continue
-        if line == '[STATION_PARAMETERS]':
-            in_header, in_data = True, False
-        elif line == '[DATA]':
-            in_header, in_data = False, True
-        elif line.startswith('['):
-            in_header, in_data = False, False
-        elif in_header:
-            for key, value in HEADER_MAP.items():
-                if line.startswith(key):
-                    metadata[value] = line.split('=', 1)[1].strip()
-        elif in_data:
-            # Detect the start of a new profile block
-            if line.startswith("0500,"):
-                # If we have lines from a previous block, process them now
-                _parse_and_process_block(current_profile_lines)
-                # Start a new block
-                current_profile_lines = [line]
-            else:
-                # Add the current line to the block
-                current_profile_lines.append(line)
+    # 1) metadata from header
+    metadata = _read_pro_metadata(filepath, logger=logger)
 
-    # After the loop, process the very last profile block in the file
-    _parse_and_process_block(current_profile_lines)
-
-    # POST-PROCESSING: Sanitize station name
-    if 'station_name' not in metadata or not metadata['station_name']:
-        # Use filename as fallback
-        metadata['station_name'] = file_path.stem
-        if logger:
-            logger.warning(
-                f"No StationName found in {file_path.name}, using filename: {file_path.stem}"
-            )
-    
-    # Sanitize the station name
-    metadata['station_name'] = _sanitize_station_name(metadata['station_name'])
+    # 2) profiles from data section
+    temp_profiles = _parse_pro_profiles_from_lines(
+        lines=lines,
+        file_path=file_path,
+        code_map_to_use=code_map_to_use,
+        datetime_start=datetime_start,
+        datetime_end=datetime_end,
+        logger=logger,
+        remove_soil=remove_soil,
+        add_surface_sh_as_layer=add_surface_sh_as_layer,
+    )
 
     return metadata, temp_profiles
 
@@ -855,7 +933,8 @@ def _create_pro_dataset(
     max_layers: int,
     add_surface_sh_as_layer: bool = True,
     use_dask: bool = False,
-    chunks: Dict[str, int] | None = None
+    chunks: Dict[str, int] | None = None,
+    empty_profile_status_default: int = 0,
 ) -> xr.Dataset | None:
     """Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
 
@@ -874,11 +953,12 @@ def _create_pro_dataset(
 
     `profile_status` semantics in this worker:
         - 2: valid profile WITH snow for that timestamp
-        - 1: valid profile WITHOUT snow for that timestamp (file parsed, no snow)
-      (Values 0 / <0 are reserved for higher-level logic.)
+        - 1: valid profile WITHOUT snow for that timestamp
+        - 0: no parse error, but also none of the other categories
+        - <0: parse errors (need to be provided from outside this function from higher-level)
 
     If no profiles are provided but metadata exists, a minimal dataset with
-    `profile_status = 1` (no snow / no profiles, but valid file) is returned.
+    `profile_status = empty_profile_status_default` is returned.
     This variable has no time dimension and will broadcast across time when
     merged with time-resolved datasets later on.
 
@@ -927,11 +1007,12 @@ def _create_pro_dataset(
                 # that introduce a time dimension for this site.
                 'profile_status': (
                     ('location', 'slope', 'realization'),
-                    np.array([[[1]]], dtype='i1')
+                    np.array([[[empty_profile_status_default]]], dtype='i1')
                 )
             },
             coords={
                 'location': [station_name],
+                'time': ('time', np.array([], dtype='datetime64[ns]')),
                 'slope': slope_index,
                 'realization': [0],
                 'latitude': (
