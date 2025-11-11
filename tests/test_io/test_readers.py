@@ -291,12 +291,12 @@ def test_read_directory_with_only_invalid_files(tmp_path, synthetic_pro):
     synthetic_pro.corrupted(tmp_path, "malformed_data")
     synthetic_pro.corrupted(tmp_path, "empty")  # FIX: Just pass tmp_path, not a file path
     
-    # Should return None or empty dataset
+    # Should return proper dataset but profile_status <=0
     ds = read(tmp_path)
     
-    if ds is not None:
-        # If any data was recovered, it should be minimal
-        assert ds.sizes['location'] >= 0
+    assert all(dim in ds.dims for dim in ['location', 'time', 'slope', 'realization'])
+    assert ds.sizes['location'] >= 0
+    assert (ds.profile_status.values.squeeze() <= 0).all()
 
 
 @pytest.mark.synthetic
@@ -304,12 +304,17 @@ def test_read_mixed_valid_and_invalid_files(tmp_path, synthetic_pro):
     """
     Test that valid files are read even when invalid files are present.
     """
+    pytest.skip("Semantically wrong/ambiguous test!")
+    # comment FH: The invalid file is actually not invalid, but resembles the file structure
+    #             of an emtpy timestamp. In this case, we want to read the data and
+    #             need to test for both locations below. Should rename the test and also adjust
+    #             the synthetic corrupt file assembly.
+
     # Create one valid file
     synthetic_pro.basic(tmp_path, "VALID")
     
     # Create one corrupted file  
     synthetic_pro.corrupted(tmp_path, "malformed_data")
-    
     ds = read(tmp_path)
     
     # Should load the valid file

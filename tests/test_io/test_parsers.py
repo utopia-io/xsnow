@@ -280,6 +280,7 @@ def test_parse_corrupted_file_invalid_timestamp(tmp_path, synthetic_pro):
     
     # Profiles with bad timestamps should be skipped
     assert isinstance(profiles, list)
+    assert len(profiles) == 0
 
 
 @pytest.mark.synthetic
@@ -356,8 +357,7 @@ def test_read_pro_raw_surface_hoar_synthesis(tmp_path, synthetic_pro):
 def test_create_pro_dataset_empty_profiles(tmp_path, synthetic_pro):
     """
     Edge case: Creating dataset from empty profile list.
-    Should still return a minimal dataset with profile_status = 1
-    and no time dimension.
+    Should still return a minimal dataset with profile_status = 0.
     """
     metadata = {
         'station_name': 'TEST',  # Changed from 'stationName'
@@ -372,8 +372,8 @@ def test_create_pro_dataset_empty_profiles(tmp_path, synthetic_pro):
     assert isinstance(ds, xr.Dataset)
     assert 'profile_status' in ds
     status = ds['profile_status'].values
-    assert np.all(status == 1)
-    assert 'time' not in ds.dims
+    assert np.all(status == 0)
+    assert 'time' in ds.dims
     for coord in ['location', 'slope', 'realization']:
         assert coord in ds.coords
     assert ds['profile_status'].dims == ('location', 'slope', 'realization')

@@ -350,8 +350,11 @@ def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
     except Exception as e:
         # Can't use logger in worker, just return None
         logging.warning(f"Warning: Failed to process {filepath.name}: {e}")
-    
-    return None
+        try:
+            metadata = _read_pro_metadata(filepath)
+            return _create_pro_dataset(metadata, [], max_layers, empty_profile_status_default=-1)
+        except Exception as e:
+            return None
 
 
 
@@ -445,6 +448,7 @@ def _read_pro_files_lazy(
         chunks = parser_kwargs.get('chunks', {'time': 100, 'layer': -1})
         
         for fp in pro_files:
+            ds = None
             try:
                 # Parse raw data (metadata and structure - small, can be eager)
                 metadata, profiles = _read_pro_raw(
@@ -467,11 +471,16 @@ def _read_pro_files_lazy(
                         use_dask=True,  # Create dask arrays
                         chunks=chunks
                     )
-                    if ds is not None:
-                        final_datasets.append(ds)
-                        
             except Exception as e:
                 logger.warning(f"Failed to process {fp.name}: {e}")
+                try:
+                    metadata = _read_pro_metadata(fp)
+                    ds = _create_pro_dataset(metadata, [], max_layers_to_use, use_dask=True,
+                                             chunks=chunks, empty_profile_status_default=-1)
+                except Exception as e:
+                    pass
+            if ds is not None:
+                final_datasets.append(ds)
         
         logger.info(f"Created {len(final_datasets)} lazy datasets (data NOT yet loaded into memory)")
         return final_datasets
@@ -541,13 +550,20 @@ def _create_dataset_from_pro_file(
             add_surface_sh_as_layer=add_sh
         )
 
-        # Step 2: Create the dataset if data was found
+        # Step 2: Create the dataset
         if raw_data and raw_data[0]:  # Check if metadata dict is not empty
             metadata, profiles = raw_data
             return _create_pro_dataset(metadata, profiles, max_layers, add_sh)
             
     except Exception as e:
-        logger.error(f"Failed to create dataset from {filepath.name}", exc_info=e)
+        try:
+            metadata = _read_pro_metadata(filepath)
+            ds = _create_pro_dataset(metadata, [], max_layers, empty_profile_status_default=-1)
+            logger.warning(f"Cannot parse {filepath.name}", exc_info=e)
+            return ds
+        except Exception as e:
+            logger.error(f"Failed to create dataset from {filepath.name}", exc_info=e)
+
     
     return None
 
