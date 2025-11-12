@@ -1253,7 +1253,7 @@ def read_smet(
     tz_val = header.get('tz')
     if tz_val is not None:
         try:
-            ds['time'].attrs['timezone'] = int(tz_val)
+            ds['time'].tz.set_attr(int(tz_val))
         except (ValueError, TypeError):
             logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
             
