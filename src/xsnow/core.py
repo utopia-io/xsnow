@@ -239,6 +239,10 @@ class xsnowDataset:
             raise KeyError("Dataset is not loaded.")
         return key in self.data
 
+    def _rewrap(self, new_data: xr.Dataset) -> "xsnowDataset":
+            """Return a new xsnowDataset instance wrapping new_data."""
+            return self.__class__(new_data)
+
     def copy(self, deep: bool = False) -> 'xsnowDataset':
         """
         Returns a copy of the dataset.
@@ -488,8 +492,30 @@ class DatasetDecorator(xsnowDataset):
         return self._base
 
     def _rewrap(self, new_data: xr.Dataset):
-        """Return a new instance of *this* decorator class around new_data."""
-        return self.__class__(*self._decorator_args, **self._decorator_kwargs, data=new_data)
+        """
+        Return a new instance of *this* decorator class around new_data.
+        Rebuild the base chain so base.data == new_data (no mutation).
+        """
+        base = self._base
+
+        if isinstance(base, DatasetDecorator):
+            # Rebuild the entire decorator chain under us with new_data
+            new_base = base._rewrap(new_data)
+        elif isinstance(base, xsnowDataset):
+            # Plain base wrapper → rebuild it around new_data
+            new_base = base._rewrap(new_data)
+        else:
+            # Fallback (shouldn't happen in your design)
+            new_base = xsnowDataset(new_data)
+
+        # Create a fresh instance of *this* decorator with the rebuilt base
+        new = self.__class__(new_base, data=new_data)
+
+        # Optional: keep args/kwargs consistent for future rewraps
+        new._decorator_args = (new_base,)
+        new._decorator_kwargs = {}
+
+        return new
 
     def __getattr__(self, name):
         # 1) Prefer the xsnowDataset surface (user methods, registered extensions, etc.)
