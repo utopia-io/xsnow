@@ -24,6 +24,7 @@ StationName= TEST_STATION
 Latitude= 46.5
 Longitude= 10.5
 Altitude= 2500
+tz = 1
 [DATA]
 0500,01.01.2025 12:00:00
 0501,3,0.1,0.2,0.3
@@ -43,6 +44,7 @@ station_name = TEST_STATION
 latitude = 46.5
 longitude = 10.5
 altitude = 2500
+tz = 1
 fields = timestamp TA HS
 [DATA]
 2025-01-01T12:00:00 270.15 0.3
@@ -191,6 +193,36 @@ def test_read_single_pro_file(data_directory):
     expected_density = 350
     actual_density = profile1['density'].isel(layer=2).item()
     assert np.isclose(actual_density, expected_density)
+
+def test_single_smet_file_metadata(data_directory):
+    """
+    Tests reading a single .smet file and verifies the metadata of the dataset and variables.
+    """
+    smet_file = data_directory / "test.smet"
+    ds = read(smet_file)
+    assert ds.attrs
+    assert 'crs' in ds.attrs
+    assert 'history' in ds.attrs
+    assert 'timezone' in ds['time'].attrs
+    assert ds['time'].attrs['timezone'] == 'UTC+01:00'  # converted from int
+    for var in list(ds.variables):
+        assert 'units' in ds[var].attrs
+        assert 'standard_name' in ds[var].attrs
+
+def test_single_pro_file_metadata(data_directory):
+    """
+    Tests reading a single .pro file and verifies the metadata of the dataset and variables.
+    """
+    pro_file = data_directory / "test.pro"
+    ds = read(pro_file)
+    assert ds.attrs
+    assert 'crs' in ds.attrs
+    assert 'history' in ds.attrs
+    for var in list(ds.variables):
+        assert 'units' in ds[var].attrs
+        assert 'standard_name' in ds[var].attrs
+    assert 'timezone' in ds['time'].attrs
+    assert ds['time'].attrs['timezone'] == 'UTC+01:00'  # converted from int
 
 def test_read_from_directory(data_directory):
     """

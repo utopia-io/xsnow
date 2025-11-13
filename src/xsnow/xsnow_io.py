@@ -1478,7 +1478,7 @@ def read_smet(
     tz_val = header.get('tz')
     if tz_val is not None:
         try:
-            ds['time'].attrs['timezone'] = int(tz_val)
+            ds['time'].tz.set_attr(int(tz_val))
         except (ValueError, TypeError):
             logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
             
@@ -1724,6 +1724,15 @@ def _merge_and_finalize(
             'history': f'{pd.Timestamp.now(tz="UTC").isoformat()}: Created by xsnow.',
             'crs': 'EPSG:4326'
         }
+
+    # Add variable metadata
+    for var_name_hashable in list(final_xr_dataset.variables):
+        var_name = str(var_name_hashable)
+        if reg_entry := registry.get(var_name):
+            final_xr_dataset[var_name].attrs['standard_name'] = reg_entry.get('standard_name', 'unknown')
+            final_xr_dataset[var_name].attrs['units'] = reg_entry.get('si_units', 'unknown')
+            final_xr_dataset[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
+
     
     # The location coordinate is already meaningful strings
     # Apply final filters
