@@ -38,11 +38,11 @@ def test_to_netcdf_basic(real_file_subset, tmp_path):
     assert output_file.exists()
     assert output_file.stat().st_size > 0
 
-
 @pytest.mark.real_data
 def test_to_netcdf_preserves_metadata(real_file_subset, tmp_path):
     """
-    Test that NetCDF output preserves important metadata.
+    Test that NetCDF output preserves important metadata and
+    the 'mapping' attribute on profile_status.
     """
     ds_original = read(real_file_subset)
     
@@ -52,14 +52,32 @@ def test_to_netcdf_preserves_metadata(real_file_subset, tmp_path):
     # Read back
     ds_loaded = read(output_file)
     
-    # Check metadata preservation
+    # --- Global metadata ---
     assert 'Conventions' in ds_loaded.data.attrs
     assert 'crs' in ds_loaded.data.attrs
     
-    # Check coordinates
+    # --- Coordinates ---
     assert 'latitude' in ds_loaded.coords
     assert 'longitude' in ds_loaded.coords
     assert 'altitude' in ds_loaded.coords
+
+    # --- profile_status.mapping roundtrip ---
+    # Ensure the original dataset had profile_status + mapping
+    assert "profile_status" in ds_original
+    orig_ps = ds_original["profile_status"]
+    assert "mapping" in orig_ps.attrs
+    orig_mapping = orig_ps.attrs["mapping"]
+    assert isinstance(orig_mapping, dict)
+
+    # After NetCDF roundtrip, mapping should be restored identically
+    assert "profile_status" in ds_loaded
+    loaded_ps = ds_loaded["profile_status"]
+    assert "mapping" in loaded_ps.attrs
+
+    loaded_mapping = loaded_ps.attrs["mapping"]
+    assert isinstance(loaded_mapping, dict)
+    assert loaded_mapping == orig_mapping
+
 
 
 @pytest.mark.real_data

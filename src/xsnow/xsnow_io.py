@@ -25,13 +25,15 @@ out-of-core loading strategy for .pro files using Dask. The process is:
     memory at any given time, enabling the processing of vast amounts of data
     on a single machine.
 """
+from __future__ import annotations
 import os
 import sys
+import json
 import logging
 import multiprocessing
+import concurrent.futures
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Union, Tuple, Sequence, Mapping
-import concurrent.futures
 
 
 import numpy as np
@@ -155,26 +157,7 @@ def read(
     # --- Step 2: Resolve file paths ---
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
-            # Using context managers to ensure file is properly closed
-            with xr.open_dataset(source) as ds:
-                ds = ds.load()
-
-            # Decode bytes to strings for string-based coordinates
-            for coord_name in ('location', 'realization'):
-                if coord_name in ds.coords:
-                    coord_data = ds[coord_name]
-                    if coord_data.dtype.kind == 'S':  # Byte string
-                        # Decode to Unicode strings
-                        decoded_values = [val.decode('utf-8') if isinstance(val, bytes) else str(val) 
-                                        for val in coord_data.values]
-                        ds[coord_name] = (coord_data.dims, decoded_values)
-            
-            # DEBUG: Check slope coordinates after loading
-            if 'inclination' in ds.coords:
-                logger.debug(f"read NetCDF: inclination values AFTER load = {ds.inclination.values}")
-                logger.debug(f"read NetCDF: inclination dims = {ds.inclination.dims}")
-            
-            return xsnowDataset(ds)
+            return _read_xsnow_netcdf(source)
         except Exception as e:
             logger.warning(f"Failed to read NetCDF file {source}: {e}")
             return None
@@ -222,6 +205,81 @@ def read(
     all_datasets = pro_datasets + smet_datasets
     return _merge_and_finalize(all_datasets, time_sel, location_sel, slope_sel, realization_sel)
 
+
+
+def _read_xsnow_netcdf(source: Union[str, Path]) -> Optional["xsnowDataset"]:
+    """Read xsnow's custom netcdf format
+
+    This includes proper json decoding of any 'mapping' attribute and
+    handling of fixed-length byte coordinate strings.
+    """
+    # open lazily, then materialize metadata/coords eagerly
+    with xr.open_dataset(source) as _ds:
+        ds = _ds.load()
+
+    # Decode fixed-length byte coords back to str
+    for coord_name in ("location", "realization"):
+        if coord_name in ds.coords:
+            coord_data = ds[coord_name]
+            if coord_data.dtype.kind == 'S':  # byte strings
+                decoded_values = [
+                    (val.decode("utf-8") if isinstance(val, (bytes, np.bytes_)) else str(val))
+                    for val in coord_data.values
+                ]
+                ds[coord_name] = (coord_data.dims, decoded_values)
+
+    # if 'inclination' in ds.coords:
+    #     logger.debug(f"read NetCDF: inclination AFTER load = {ds.inclination.values}")
+    #     logger.debug(f"read NetCDF: inclination dims = {ds.inclination.dims}")
+
+    # Restore mapping attrs from JSON
+    ds = _decode_mapping_attrs_from_netcdf(ds)
+
+    return xsnowDataset(ds)
+
+
+def _decode_mapping_attrs_from_netcdf(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Reverse of _encode_mapping_attrs_for_netcdf:
+    - If 'mapping_json' exists (dataset or variable), parse JSON and restore
+      the 'mapping' dict attr (with int keys when possible).
+    - Leaves other attrs untouched.
+    """
+    def _parse(json_str: str):
+        try:
+            obj = json.loads(json_str)
+            # convert numeric-like keys back to int where possible
+            if isinstance(obj, dict):
+                new = {}
+                for k, v in obj.items():
+                    try:
+                        k2 = int(k)
+                    except (ValueError, TypeError):
+                        k2 = k
+                    new[k2] = v
+                return new
+            return obj
+        except Exception:
+            # fall back: leave as string if something goes wrong
+            return json_str
+
+    # dataset-level
+    mj = ds.attrs.get("mapping_json")
+    if isinstance(mj, str):
+        decoded = _parse(mj)
+        ds.attrs["mapping"] = decoded
+        # optional: clean up the helper attr
+        del ds.attrs["mapping_json"]
+
+    # variable-level
+    for name, var in ds.variables.items():
+        mj = var.attrs.get("mapping_json")
+        if isinstance(mj, str):
+            decoded = _parse(mj)
+            var.attrs["mapping"] = decoded
+            del var.attrs["mapping_json"]
+
+    return ds
 
 # --------------------------------------------------------------------------- #
 #                    EAGER LOADING WITH MULTIPROCESSING                       #
@@ -1974,7 +2032,30 @@ def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xs
         )
             
     return xsnowDataset(combined)
-    
+
+
+def _encode_mapping_attrs_for_netcdf(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Return a Dataset with any variable/dataset attrs named 'mapping'
+    (which must be dicts) serialized into JSON under 'mapping_json'.
+    The original 'mapping' attr is removed to satisfy NetCDF constraints.
+    This function modifies in-place!
+    """
+    ds_out = ds  # work in-place on the copy the caller passes in
+
+    # dataset-level attrs
+    if isinstance(ds_out.attrs.get("mapping"), dict):
+        ds_out.attrs["mapping_json"] = json.dumps(ds_out.attrs["mapping"])
+        del ds_out.attrs["mapping"]
+
+    # variable-level attrs
+    for name, var in ds_out.variables.items():
+        if isinstance(var.attrs.get("mapping"), dict):
+            var.attrs["mapping_json"] = json.dumps(var.attrs["mapping"])
+            del var.attrs["mapping"]
+
+    return ds_out
+
 @register_xsnowDataset_method
 def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     """
@@ -1999,34 +2080,33 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     
     # DEBUG: Check slope coordinates before saving
     if 'inclination' in ds_to_save.coords:
-        logger.debug(f"to_netcdf: inclination values BEFORE save = {ds_to_save.inclination.values}")
+        logger.debug(f"to_netcdf: inclination BEFORE save = {ds_to_save.inclination.values}")
         logger.debug(f"to_netcdf: inclination dims = {ds_to_save.inclination.dims}")
-    
-    # ENCODE STRING COORDINATES FOR NETCDF
+
+    # Encode any dict attrs named 'mapping' as JSON
+    ds_to_save = _encode_mapping_attrs_for_netcdf(ds_to_save)
+
+    # Encode string coordinates as fixed-length bytes for NetCDF classic compatibility
     for coord_name in ("location", "realization"):
         if coord_name in ds_to_save.coords:
             coord_data = ds_to_save[coord_name]
-            
-            # Check if coordinate is string-like
             if coord_data.dtype.kind in ("U", "S", "O"):
-                # Determine max string length
                 if coord_data.dtype.kind == "U":
-                    max_len = max(len(str(x)) for x in coord_data.values)
+                    max_len = max((len(str(x)) for x in coord_data.values), default=1)
                 elif coord_data.dtype.kind == "S":
-                    max_len = coord_data.dtype.itemsize
-                else:  # Object dtype
-                    max_len = max(len(str(x)) for x in coord_data.values)
-                
-                # Set encoding to fixed-length string
+                    max_len = max(1, coord_data.dtype.itemsize)
+                else:
+                    max_len = max((len(str(x)) for x in coord_data.values), default=1)
                 ds_to_save[coord_name].encoding = {
                     "dtype": f"S{max_len}",
                     "compression": "zlib",
-                    "complevel": 4
+                    "complevel": 4,
                 }
-                
-                logger.debug(f"Encoding {coord_name} as S{max_len}")
+                logger.debug(f"Encoding coord '{coord_name}' as S{max_len}")
+
+    path = Path(path)
     ds_to_save.to_netcdf(path, **kwargs)
-    logging.info(f"Dataset successfully saved to {path}")
+    logger.info(f"Dataset successfully saved to {path}")
 
 @register_xsnowDataset_method
 def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = None, **kwargs):
