@@ -22,7 +22,7 @@ import xarray as xr
 from pathlib import Path
 import shutil
 
-from xsnow import xsnowDataset
+from xsnow import xsnowDataset, read
 
 # ============================================================================
 # TEST DATA REPOSITORY MANAGEMENT
@@ -113,12 +113,105 @@ def gridded_pros_dir() -> Path:
 
 
 @pytest.fixture(scope="session")
+def snp_gridded_cache_dir(tmp_path_factory) -> Path:
+    """
+    A per-session temp dir to store cached NetCDF outputs.
+    One per pytest invocation (per worker under xdist).
+    """
+    return tmp_path_factory.mktemp("snp_gridded_cache")
+
+
+@pytest.fixture(scope="session")
+def snp_gridded_netcdf(
+    snp_gridded_cache_dir: Path,
+    gridded_pros_dir: Path,
+) -> Path:
+    """
+    Build the slow dataset ONCE from raw files, then cache as NetCDF.
+    """
+    nc_path = snp_gridded_cache_dir / "snp_gridded.nc"
+
+    if not nc_path.exists():
+        xs = read(gridded_pros_dir)
+        xs.to_netcdf(nc_path)
+
+    return nc_path
+
+
+@pytest.fixture(scope="function")
+def snp_gridded_xs(snp_gridded_netcdf: Path):
+    """
+    Fast reader: open the cached NetCDF for tests.
+    """
+    xs = read(snp_gridded_netcdf)
+    return xs
+
+
+@pytest.fixture(scope="session")
 def snowobs_pros_dir() -> Path:
     """Directory containing snow observation SNOWPACK .pro files."""
     try:
         return _get_dir_path("pros/snowobs")
     except FileNotFoundError:
         pytest.skip("Snow observation data not available in test repo")
+
+
+@pytest.fixture(scope="session")
+def snowobs_pits_dir() -> Path:
+    """Directory containing snow observation .pro files (converted from caaml)."""
+    try:
+        return _get_dir_path("caamls")
+    except FileNotFoundError:
+        pytest.skip("Snow observation data not available in test repo")
+
+
+@pytest.fixture(scope="session")
+def snp_snowobs_cache_dir(tmp_path_factory) -> Path:
+    """
+    A per-session temp dir to store cached NetCDF outputs.
+    One per pytest invocation (per worker under xdist).
+    """
+    return tmp_path_factory.mktemp("snp_snowobs_cache")
+
+
+@pytest.fixture(scope="session")
+def snp_snowobs_netcdf(
+    snp_snowobs_cache_dir: Path,
+    snowobs_pros_dir: Path,
+    snowobs_pits_dir: Path,
+) -> Path:
+    """
+    Build the slow dataset ONCE from raw files, then cache as NetCDF.
+    """
+    nc_path_sim = snp_snowobs_cache_dir / "snp_snowobs_sim.nc"
+    nc_path_obs = snp_snowobs_cache_dir / "snp_snowobs_obs.nc"
+
+    if not nc_path_sim.exists():
+        xs = read(snowobs_pros_dir)
+        xs.to_netcdf(nc_path_sim)
+
+    if not nc_path_obs.exists():
+        xs = read(snowobs_pits_dir)
+        xs.to_netcdf(nc_path_obs)
+
+    return nc_path_sim, nc_path_obs
+
+
+@pytest.fixture(scope="function")
+def snp_snowobs_sim_xs(snp_snowobs_netcdf: Path):
+    """
+    Fast reader: open the cached NetCDF for tests.
+    """
+    xs = read(snp_snowobs_netcdf[0])
+    return xs
+
+@pytest.fixture(scope="function")
+def snp_snowobs_obs_xs(snp_snowobs_netcdf: Path):
+    """
+    Fast reader: open the cached NetCDF for tests.
+    """
+    xs = read(snp_snowobs_netcdf[1])
+    return xs
 
 
 @pytest.fixture(scope="session")
