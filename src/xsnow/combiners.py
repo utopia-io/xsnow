@@ -410,7 +410,10 @@ def combine(
 def concat(
     objs: Iterable[Union[xsnowDataset, xr.Dataset]],
     dim: Union[str, xr.DataArray, pd.Index],
-    join: Union[JoinMode, Literal['exact']] = "outer",
+    join: Union[JoinMode, Literal["exact"]] = "outer",
+    compat: str | callable = "no_conflicts",
+    combine_attrs: Union[str, callable] = "no_conflicts_rlx",
+    rlx_attrs: Iterable[str] = ("history",),
     **kwargs,
 ):
     """
@@ -418,11 +421,13 @@ def concat(
 
     - Accepts an iterable of `xsnowDataset` and/or `xarray.Dataset`.
     - For join in {"outer", "exact"}:
-        Behaves exactly like `xarray.concat`.
+        Behaves exactly like `xarray.concat`, except that when
+        `combine_attrs="no_conflicts_rlx"` is used, selected Dataset-level
+        attributes (see `rlx_attrs`) are treated specially.
     - For join in {"inner", "left", "right"}:
-        Applies the requested join semantics to all coordinates **except `layer`**.
-        The `layer` dimension is always promoted to the union across inputs to
-        avoid accidentally dropping layers.
+        Applies the requested join semantics to all coordinates **except
+        `layer`**. The `layer` dimension is always promoted to the union
+        across inputs to avoid accidentally dropping layers.
 
     Parameters
     ----------
@@ -436,6 +441,36 @@ def concat(
         - For "outer" and "exact": no xsnow-specific behavior is applied.
         - For "inner", "left", "right": 'layer' is treated specially and
           uses the union of layer coordinates from all inputs.
+    compat : {"identical", "equals", "broadcast_equals", "no_conflicts", "override"} or callable
+        How to compare non-concatenated variables of the same name for potential
+        conflicts. Passed through to `xarray.concat`.
+    combine_attrs : {"drop", "identical", "no_conflicts", "drop_conflicts",
+                     "override", "no_conflicts_rlx"} or callable
+        How to combine attrs of the objects being concatenated.
+
+        - Standard xarray values are passed through untouched.
+        - The xsnow-specific value `"no_conflicts_rlx"` behaves like
+          `"no_conflicts"` *except* that attributes listed in `rlx_attrs`
+          are ignored for conflict checking:
+
+              * original inputs are left unchanged,
+              * internally, shallow copies with those attrs removed are passed
+                to `xarray.concat(..., combine_attrs="no_conflicts")`,
+              * after concat, each relaxed attribute is rebuilt on the result:
+
+                  - for `"history"`: all non-empty histories are concatenated
+                    into a single multi-line string with a small header and
+                    `[input i]` tags,
+                  - for any other relaxed attr: the first non-empty / non-None
+                    value among the inputs is used (if any).
+
+        This means `crs`, timezone and other critical attrs still trigger
+        errors when they differ, while differing `history` (and other
+        relaxed attrs) do not.
+    rlx_attrs : iterable of str, default ("history",)
+        Dataset-level attribute names to *relax* under
+        `combine_attrs="no_conflicts_rlx"`. All other attrs are still
+        subject to strict `"no_conflicts"` checking.
     **kwargs :
         Additional keyword arguments forwarded to `xarray.concat`.
 
@@ -450,7 +485,7 @@ def concat(
         raise ValueError("xsnow.concat() received no datasets to concatenate.")
 
     # Unwrap xsnowDataset -> xarray.Dataset
-    xr_objs = []
+    xr_objs: list[xr.Dataset] = []
     saw_xsnow = False
     for obj in objs:
         if isinstance(obj, xsnowDataset):
@@ -468,44 +503,125 @@ def concat(
         out = xr_objs[0]
         return xsnowDataset(out) if saw_xsnow else out
 
-    # Fast path: for outer / exact, just delegate to xarray
-    if join in ("outer", "exact"):
-        out = xr.concat(xr_objs, dim=dim, join=join, **kwargs)
-        return xsnowDataset(out) if saw_xsnow else out
+    # ---------------------------------------------------------
+    # Handle special combine_attrs="no_conflicts_rlx"
+    # ---------------------------------------------------------
+    rlx_attrs = tuple(rlx_attrs)
+    relaxed_values: dict[str, list[Any]] | None = None
+    xr_combine_attrs: Union[str, callable] = combine_attrs
 
+    if isinstance(combine_attrs, str) and combine_attrs == "no_conflicts_rlx":
+        relaxed_values = {name: [] for name in rlx_attrs}
+        xr_objs_for_concat: list[xr.Dataset] = []
+
+        for ds in xr_objs:
+            ds_view = ds.copy(deep=False)
+            # ensure attrs is our own dict so we can safely pop
+            ds_view.attrs = dict(ds_view.attrs)
+
+            for name in rlx_attrs:
+                val = ds_view.attrs.pop(name, None)
+                relaxed_values[name].append(val)
+
+            xr_objs_for_concat.append(ds_view)
+
+        xr_objs = xr_objs_for_concat
+        xr_combine_attrs = "no_conflicts"  # strict for all non-relaxed attrs
+
+    # ---------------------------------------------------------
+    # Helper to finalize: wrap and re-attach relaxed attrs
+    # ---------------------------------------------------------
+    def _wrap_and_attach_relaxed(ds_out: xr.Dataset) -> Union[xsnowDataset, xr.Dataset]:
+        if relaxed_values is not None:
+            ds_out = ds_out.copy(deep=False)
+            ds_out.attrs = dict(ds_out.attrs)
+
+            for name, values in relaxed_values.items():
+                non_empty = [
+                    v
+                    for v in values
+                    if v is not None and (not isinstance(v, str) or v.strip())
+                ]
+                if not non_empty:
+                    # nothing meaningful to set
+                    continue
+
+                if name == "history":
+                    lines = [
+                        f"xsnow.concat: combined {len(values)} input histories."
+                    ]
+                    # Only include the ones that actually had history text
+                    idx_non_empty = [
+                        (idx, v) for idx, v in enumerate(values, start=1)
+                        if v is not None and (not isinstance(v, str) or v.strip())
+                    ]
+                    for idx, h in idx_non_empty:
+                        lines.append(f"[input {idx}] {h}")
+                    ds_out.attrs[name] = "\n".join(lines)
+                else:
+                    # For other relaxed attrs, prefer the first non-empty value.
+                    ds_out.attrs[name] = non_empty[0]
+
+        return xsnowDataset(ds_out) if saw_xsnow else ds_out
+
+    # ---------------------------------------------------------
+    # Fast path: for outer / exact, just delegate to xarray
+    # ---------------------------------------------------------
+    if join in ("outer", "exact"):
+        out = xr.concat(
+            xr_objs,
+            dim=dim,
+            join=join,
+            compat=compat,
+            combine_attrs=xr_combine_attrs,
+            **kwargs,
+        )
+        return _wrap_and_attach_relaxed(out)
+
+    # ---------------------------------------------------------
     # For inner / left / right:
     # - apply requested join semantics to all dims
     # - but ensure `layer` uses the union of all its coordinates
-
-    # Check if any dataset even has the layer dim; if not, just fall back.
-    layer_dim = 'layer'
+    # ---------------------------------------------------------
+    layer_dim = "layer"
     has_layer = any(layer_dim in ds.dims for ds in xr_objs)
     if not has_layer:
-        out = xr.concat(xr_objs, dim=dim, join=join, **kwargs)
-        return xsnowDataset(out) if saw_xsnow else out
+        out = xr.concat(
+            xr_objs,
+            dim=dim,
+            join=join,
+            compat=compat,
+            combine_attrs=xr_combine_attrs,
+            **kwargs,
+        )
+        return _wrap_and_attach_relaxed(out)
 
-    # 1. Collect union of layer coords from ORIGINAL datasets
+    # 1. Collect union of layer coords
     all_layers = None
     for ds in xr_objs:
         if layer_dim in ds.dims:
             if layer_dim in ds.coords:
                 vals = ds[layer_dim].values
             else:
-                # if no coord, fall back to positional indices
                 vals = np.arange(ds.sizes[layer_dim])
             all_layers = vals if all_layers is None else np.union1d(all_layers, vals)
 
     # Safety: shouldn't happen if has_layer is True, but guard anyway
     if all_layers is None:
-        out = xr.concat(xr_objs, dim=dim, join=join, **kwargs)
-        return xsnowDataset(out) if saw_xsnow else out
+        out = xr.concat(
+            xr_objs,
+            dim=dim,
+            join=join,
+            compat=compat,
+            combine_attrs=xr_combine_attrs,
+            **kwargs,
+        )
+        return _wrap_and_attach_relaxed(out)
 
     # 2. Align all datasets once according to requested join
-    #    This is lazy: it builds views / dask graphs, no compute().
     aligned = xr.align(*xr_objs, join=join)
 
-    # 3. Reindex just the layer_dim to the union, for those that have it.
-    #    This enforces the xsnow rule: never drop layers due to join semantics.
+    # 3. Reindex just the layer_dim to the union
     reindexed = []
     for ds in aligned:
         if layer_dim in ds.dims:
@@ -513,12 +629,17 @@ def concat(
         else:
             reindexed.append(ds)
 
-    # 4. Final concat.
-    #    Inputs are already aligned, so join here is mostly irrelevant.
-    #    Use join="left" (or omit) to avoid a second alignment pass.
-    out = xr.concat(reindexed, dim=dim, join="left", **kwargs)
+    # 4. Final concat
+    out = xr.concat(
+        reindexed,
+        dim=dim,
+        join="left",  # inputs already aligned
+        compat=compat,
+        combine_attrs=xr_combine_attrs,
+        **kwargs,
+    )
 
-    return xsnowDataset(out) if saw_xsnow else out
+    return _wrap_and_attach_relaxed(out)
 
 
 @register_xsnowDataset_method
