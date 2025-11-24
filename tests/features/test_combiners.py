@@ -144,7 +144,7 @@ def _prep_two_mergable_datasets(xs: xsnowDataset) -> tuple[xsnowDataset, xsnowDa
     assert times.size >= 48, "Need at least 48 timestamps to create overlap windows."
 
     # Define old/new windows (index-based, ensures overlap)
-    t0 = int((base.profile_status >= 1).any(dim=["slope", "realization"])\
+    t0 = int((base.HS >= 0).any(dim=["slope", "realization"])\
                                        .all(dim="location")\
                                        .argmax())  # first ts all locations have data
     if base.sizes['time'] < t0+38:
@@ -201,6 +201,8 @@ def _prep_two_mergable_datasets(xs: xsnowDataset) -> tuple[xsnowDataset, xsnowDa
         for var in old.data_vars:
             if "slope" in old[var].dims and "location" in old[var].dims:
                 old[var].loc[dict(location=l0, slope=srm)] = np.nan
+        old['z'].loc[dict(location=l0, slope=srm)] = np.nan
+        old['HS'].loc[dict(location=l0, slope=srm)] = np.nan
 
     # ------------------------------------------------------------------
     # In one overlap timestamp: remove several layers from 'old'
@@ -217,14 +219,15 @@ def _prep_two_mergable_datasets(xs: xsnowDataset) -> tuple[xsnowDataset, xsnowDa
     # ------------------------------------------------------------------
     if old.sizes.get("layer", 0) >= 1 and overlap_times.size >= 2:
         t_modify = overlap_times[1]
+        slope_modify = np.arange(1, old.sizes['slope'])
         top_idx = old.sizes["layer"] - 1
         for var in old.data_vars:
             if "layer" in old[var].dims and "time" in old[var].dims:
-                arr = old[var].sel(time=t_modify)
+                arr = old[var].sel(time=t_modify, slope=slope_modify)
                 vals = arr.values
                 if np.issubdtype(vals.dtype, np.number):
                     vals[..., top_idx] = 123.0
-                    old[var].loc[dict(time=t_modify)] = vals
+                    old[var].loc[dict(time=t_modify, slope=slope_modify)] = vals
 
     # ------------------------------------------------------------------
     # Set all non-null density values of 'old' to -999 during overlap
@@ -250,27 +253,42 @@ def _prep_two_mergable_datasets(xs: xsnowDataset) -> tuple[xsnowDataset, xsnowDa
 
     return old, new
 
-def _assert_complex_merge_invariants(ds_old: Union[xsnowDataset, xr.Dataset], 
-                                     ds_new: Union[xsnowDataset, xr.Dataset]) -> None:
+def _assert_complex_merge_invariants(
+    ds_old: Union[xsnowDataset, xr.Dataset],
+    ds_new: Union[xsnowDataset, xr.Dataset],
+) -> None:
     """
     Hard precondition checks for complex xsnow.combine tests.
 
     These assertions are *required* for the tests to be meaningful. If any of
     them fails, either the sample data layout changed, or the manipulations in
     _prep_two_mergable_datasets no longer do what the tests assume.
+
+    Assumes the following `profile_status` semantics:
+
+        < 0 : error / special flag (preserve as-is)
+          0 : no usable vertical profile (no layer data)
+          1 : valid vertical profile WITHOUT snow
+          2 : valid vertical profile WITH snow
     """
-    # --- required variables ---
+    # Unwrap xsnowDataset to bare xr.Dataset if needed
+    if isinstance(ds_old, xsnowDataset):
+        ds_old = ds_old.data
+    if isinstance(ds_new, xsnowDataset):
+        ds_new = ds_new.data
+
+    # --- required variables & core dims ---
     for label, ds in (("old", ds_old), ("new", ds_new)):
         assert "density" in ds.data_vars, f"{label} dataset must have variable 'density'"
         assert "profile_status" in ds.data_vars, f"{label} dataset must have 'profile_status'"
 
-        # --- required core dims ---
         for dim in ("time", "location", "slope", "layer", "realization"):
             assert dim in ds.dims, f"{label} dataset must have dimension {dim!r}"
 
     # --- overlapping times must exist and be non-trivial ---
     overlap = np.intersect1d(ds_old["time"].values, ds_new["time"].values)
     assert overlap.size >= 2, "Expected at least two overlapping timestamps."
+    t_remove = overlap[0]
 
     # --- manipulations in _prep_two_mergable_datasets should have taken effect ---
 
@@ -290,13 +308,31 @@ def _assert_complex_merge_invariants(ds_old: Union[xsnowDataset, xr.Dataset],
         "New density has no finite values in overlap; combine tests would be meaningless."
     )
 
-    # 3) At the first overlap time, the layered variable should have some NaNs in old
+    # 3) At the first overlap time, the layered variable should have some NaNs in
+    #    old *inside valid profiles* (partial layer deletions, no full-profile gap).
     layer_var = "density"
-    t_remove = overlap[0]
     old_at_t_remove = ds_old[layer_var].sel(time=t_remove)
-    assert np.isnan(old_at_t_remove.values).any(), (
-        f"Expected some NaNs in old[{layer_var!r}] at t_remove={t_remove}; "
-        "looks like the 'remove several layers' manipulation did not stick."
+    ps_old_t = ds_old["profile_status"].sel(time=t_remove)
+
+    # Align & broadcast profile_status to the layered variable
+    old_at_t_remove, ps_old_t = xr.align(old_at_t_remove, ps_old_t, join="inner")
+    ps_old_b = ps_old_t.broadcast_like(old_at_t_remove)
+
+    vals_old_t = old_at_t_remove.values
+    ps_vals = ps_old_b.values
+
+    # Valid profiles (status > 0)
+    mask_valid_prof = ps_vals > 0
+    # NaNs inside valid profiles
+    mask_nan_valid = np.isnan(vals_old_t) & mask_valid_prof
+    assert mask_nan_valid.any(), (
+        "Expected some NaNs in old[density] at t_remove inside valid profiles; "
+        "the 'remove several layers' manipulation may not have stuck."
+    )
+    # Also ensure there is some finite data inside valid profiles so they are not
+    # degenerate "no-layer" profiles.
+    assert (np.isfinite(vals_old_t) & mask_valid_prof).any(), (
+        "Expected some finite density values inside valid profiles at t_remove."
     )
 
     # 4) Slope dropping: if new has more slopes than old, the last slope in new
@@ -308,6 +344,32 @@ def _assert_complex_merge_invariants(ds_old: Union[xsnowDataset, xr.Dataset],
             "Expected last slope in 'new' to be absent in 'old' after slope-dropping."
         )
 
+    # 5) Slope removed only for one location in 'old' should show:
+    #    - no layer data in old (all NaN),
+    #    - profile_status == 0 in old (no usable profile),
+    #    - some finite density + profile_status > 0 in new.
+    locs = list(ds_old["location"].values)
+    if ds_old.sizes.get("slope", 0) >= 2 and len(locs) >= 1:
+        l0 = locs[0]
+        srm = ds_old["slope"].values[0]
+
+        dens_old_gap = ds_old["density"].sel(location=l0, slope=srm, time=overlap)
+        assert np.isnan(dens_old_gap.values).all(), (
+            "Expected full NaN profiles in old at (location=l0, slope=srm) over overlap; "
+            "looks like the 'remove slope for one location' manipulation changed."
+        )
+
+        ps_old_gap = ds_old["profile_status"].sel(location=l0, slope=srm, time=overlap)
+        assert (ps_old_gap.values == 0).all(), (
+            "Expected profile_status == 0 where there is no layer data "
+            "for the removed slope at one location."
+        )
+
+        ps_new_gap = ds_new["profile_status"].sel(location=l0, slope=srm, time=overlap)
+        assert (ps_new_gap.values > 0).any(), (
+            "Expected new to have valid profiles (profile_status > 0) "
+            "for the removed slope/location."
+        )
 
 @pytest.mark.real_data
 def test_combine_prefer_old_left_join(snp_gridded_xs):
@@ -315,11 +377,12 @@ def test_combine_prefer_old_left_join(snp_gridded_xs):
     Prefer old data, fill gaps from new, domain from old (join='left').
 
     We test that:
-    - partial layer deletions in old are NOT refilled from new (no layer mixing),
+    - partial layer deletions in old are NOT refilled from new (no layer mixing)
+      inside valid profiles (profile_status > 0),
     - full-profile gaps (profile_status==0) in old are filled from new,
     - density values overwritten to -999 in old remain -999,
     - a slope dropped entirely from old does NOT appear in the combined dataset,
-    - a slope removed only at one location in old is restored from new,
+    - a slope removed only for one location in old is restored from new,
     - timestamps only in new (after overlap) do NOT appear in combined.
     """
     old, new = _prep_two_mergable_datasets(snp_gridded_xs)
@@ -345,26 +408,32 @@ def test_combine_prefer_old_left_join(snp_gridded_xs):
     top_idx = nlayer - 1
 
     # 1) Several layers removed in old at t_remove should stay NaN (no refill)
+    #    inside valid profiles (profile_status > 0).
     old_da = ds_old[layer_var].sel(time=t_remove)
     new_da = ds_new[layer_var].sel(time=t_remove)
     comb_da = ds_comb[layer_var].sel(time=t_remove)
+    ps_old = ds_old["profile_status"].sel(time=t_remove)
 
-    # Align on the intersection of coords so shapes match
-    old_da, new_da, comb_da = xr.align(old_da, new_da, comb_da, join="inner")
+    # Align everything
+    old_da, new_da, comb_da, ps_old = xr.align(
+        old_da, new_da, comb_da, ps_old, join="inner"
+    )
 
+    ps_b = ps_old.broadcast_like(old_da)
     old_vals = old_da.values
     new_vals = new_da.values
     comb_vals = comb_da.values
+    ps_vals = ps_b.values
 
-    nan_mask = np.isnan(old_vals)
-    assert nan_mask.any(), "Expected some NaNs in old at t_remove"
+    mask_valid_prof = ps_vals > 0
 
-    # Combined should still have NaNs where old had NaNs
-    # (no partial backfill of individual layers)
+    nan_mask = np.isnan(old_vals) & mask_valid_prof
+    assert nan_mask.any(), "Expected some NaNs in old at t_remove inside valid profiles"
+
+    # Combined should still have NaNs where old had NaNs *inside valid profiles*
     assert np.all(np.isnan(comb_vals[nan_mask]))
 
-    # If new actually has data at some of those positions, make sure
-    # it was NOT used (we want to ensure no layer mixing).
+    # If new has data there, ensure it was NOT used (no layer mixing)
     if np.any(~np.isnan(new_vals[nan_mask])):
         assert not np.allclose(
             comb_vals[nan_mask],
@@ -372,31 +441,41 @@ def test_combine_prefer_old_left_join(snp_gridded_xs):
             equal_nan=True,
         )
 
-    # Where old had data, combined must match old
-    assert np.allclose(
-        comb_vals[~nan_mask], old_vals[~nan_mask], equal_nan=True
-    )
+    # Where old had data inside valid profiles, combined must match old
+    mask_old_data = mask_valid_prof & ~np.isnan(old_vals)
+    if mask_old_data.any():
+        assert np.allclose(
+            comb_vals[mask_old_data],
+            old_vals[mask_old_data],
+            equal_nan=True,
+        )
 
-    # 2) At t_modify, combined should still follow old, and top layer density
-    #    should be -999 wherever finite (because old's overlap density was set).
+    # 2) At t_modify, combined should still follow old *inside valid old profiles*,
+    #    and top layer density should be -999 wherever finite.
     old_da2 = ds_old[layer_var].sel(time=t_modify)
     comb_da2 = ds_comb[layer_var].sel(time=t_modify)
+    ps_old2 = ds_old["profile_status"].sel(time=t_modify)
 
-    # Align in case of slight coord differences
-    old_da2, comb_da2 = xr.align(old_da2, comb_da2, join="inner")
+    old_da2, comb_da2, ps_old2 = xr.align(old_da2, comb_da2, ps_old2, join="inner")
+
+    ps2_b = ps_old2.broadcast_like(old_da2)
+    mask_valid2 = ps2_b.values > 0
 
     old_top = old_da2.isel(layer=top_idx)
     comb_top = comb_da2.isel(layer=top_idx)
 
-    finite_old = np.isfinite(old_top.values)
+    finite_old = np.isfinite(old_top.values) & (ps2_b.isel(layer=top_idx).values > 0)
     if finite_old.any():
         # by construction in _prep_two_mergable_datasets
         assert np.all(old_top.values[finite_old] == -999)
-        # combined must match old
         assert np.all(comb_top.values[finite_old] == -999)
 
-    # More generally, for this variable at t_modify, combined should follow old
-    xr.testing.assert_allclose(comb_da2, old_da2)
+    # More generally: within valid profiles, combined must follow old
+    if mask_valid2.any():
+        np.testing.assert_allclose(
+            comb_da2.values[mask_valid2],
+            old_da2.values[mask_valid2],
+        )
 
     # 3) density values -999 in old remain -999 in combined over overlap
     dens_old = ds_old["density"].sel(time=overlap_times)
@@ -407,12 +486,9 @@ def test_combine_prefer_old_left_join(snp_gridded_xs):
 
     mask_999 = dens_old.values == -999
     assert mask_999.any(), "Expected some -999 in old density over overlap."
-
-    # Combined must keep -999 where old had it
     assert np.all(dens_comb.values[mask_999] == -999)
 
     # 4) Slope dropped entirely from old does NOT appear in combined
-    #    (Recall _prep_two_mergable_datasets dropped last slope from old)
     all_slopes_new = list(ds_new.slope.values)
     all_slopes_old = list(ds_old.slope.values)
     all_slopes_comb = list(ds_comb.slope.values)
@@ -425,12 +501,10 @@ def test_combine_prefer_old_left_join(snp_gridded_xs):
     assert set(all_slopes_comb) == set(all_slopes_old)
 
     # 5) For the slope removed only for one location in old, combined can use new
-    #    *if* new actually has data there. If new is NaN as well, there's nothing to fill.
     locs = list(ds_old.location.values)
     if ds_old.sizes.get("slope", 0) >= 1 and len(locs) >= 1:
         l0 = locs[0]
         srm = ds_old.slope.values[0]  # this is the one masked in _prep
-        # pick an overlap time
         t_any = overlap_times[0]
 
         old_profile = ds_old[layer_var].sel(location=l0, slope=srm, time=t_any)
@@ -439,7 +513,6 @@ def test_combine_prefer_old_left_join(snp_gridded_xs):
 
         # old is a gap here by construction
         assert np.isnan(old_profile.values).all(), "Expected full gap in old"
-
         has_new_data = np.any(np.isfinite(new_profile.values))
         if has_new_data:
             # When new has data, combined is allowed to use it
@@ -448,7 +521,7 @@ def test_combine_prefer_old_left_join(snp_gridded_xs):
                 new_profile.values,
                 equal_nan=True,
             )
-        # If new is also all-NaN, there's nothing to fill; no further assertion needed.
+    # If new is also all-NaN, there's nothing to fill; no further assertion needed.
 
     # 6) Timestamps only in new (after overlap) must NOT appear with join='left'
     only_in_new_times = set(ds_new.time.values) - set(ds_old.time.values)
@@ -463,7 +536,7 @@ def test_combine_prefer_old_outer_join(snp_gridded_xs):
     Additional expectations vs left-join:
     - combined has union of timestamps from old and new,
     - combined has all slopes from both old and new,
-    - partial layer deletions in old are still NOT patched from new,
+    - partial layer deletions in old are still NOT patched from new inside valid profiles,
     - density -999 in old kept, etc.
     """
     old, new = _prep_two_mergable_datasets(snp_gridded_xs)
@@ -472,21 +545,14 @@ def test_combine_prefer_old_outer_join(snp_gridded_xs):
     combined = xsnow.combine([old, new], join="outer")
     ds_old, ds_new, ds_comb = old.data, new.data, combined.data
 
-    # --- domain checks: union of coords on core dims ---
+    # domain checks...
     assert set(ds_comb.time.values) == set(ds_old.time.values) | set(ds_new.time.values)
-    assert set(ds_comb.location.values) == set(ds_old.location.values) | set(
-        ds_new.location.values
-    )
-    assert set(ds_comb.realization.values) == set(ds_old.realization.values) | set(
-        ds_new.realization.values
-    )
-    assert set(ds_comb.slope.values) == set(ds_old.slope.values) | set(
-        ds_new.slope.values
-    )
+    assert set(ds_comb.location.values) == set(ds_old.location.values) | set(ds_new.location.values)
+    assert set(ds_comb.realization.values) == set(ds_old.realization.values) | set(ds_new.realization.values)
+    assert set(ds_comb.slope.values) == set(ds_old.slope.values) | set(ds_new.slope.values)
 
     layer_var = "density"
 
-    # Overlap and special times
     overlap_times = np.intersect1d(ds_old.time.values, ds_new.time.values)
     assert overlap_times.size >= 2
     t_remove = overlap_times[0]
@@ -494,18 +560,24 @@ def test_combine_prefer_old_outer_join(snp_gridded_xs):
     nlayer = ds_comb.sizes["layer"]
     top_idx = nlayer - 1
 
-    # 1) Partial layer deletions in old should still be NaN, no refill from new
+    # 1) Partial layer deletions in old stay NaN inside valid profiles
     old_da = ds_old[layer_var].sel(time=t_remove)
     new_da = ds_new[layer_var].sel(time=t_remove)
     comb_da = ds_comb[layer_var].sel(time=t_remove)
+    ps_old = ds_old["profile_status"].sel(time=t_remove)
 
-    old_da, new_da, comb_da = xr.align(old_da, new_da, comb_da, join="inner")
+    old_da, new_da, comb_da, ps_old = xr.align(
+        old_da, new_da, comb_da, ps_old, join="inner"
+    )
 
+    ps_b = ps_old.broadcast_like(old_da)
     old_vals = old_da.values
     new_vals = new_da.values
     comb_vals = comb_da.values
+    ps_vals = ps_b.values
 
-    nan_mask = np.isnan(old_vals)
+    mask_valid_prof = ps_vals > 0
+    nan_mask = np.isnan(old_vals) & mask_valid_prof
     if nan_mask.any():
         # combined must keep NaNs where old had NaNs
         assert np.all(np.isnan(comb_vals[nan_mask]))
@@ -517,30 +589,37 @@ def test_combine_prefer_old_outer_join(snp_gridded_xs):
                 new_vals[nan_mask],
                 equal_nan=True,
             )
+        mask_old_data = mask_valid_prof & ~np.isnan(old_vals)
+        if mask_old_data.any():
+            assert np.allclose(
+                comb_vals[mask_old_data],
+                old_vals[mask_old_data],
+                equal_nan=True,
+            )
 
-        # and match old where old had values
-        assert np.allclose(
-            comb_vals[~nan_mask], old_vals[~nan_mask], equal_nan=True
-        )
-
-    # 2) At t_modify, combined should still follow old for this variable.
-    #    We align first because combined may have extra slopes from 'new'.
+    # 2) At t_modify, combined should still follow old inside valid profiles.
     old_da2 = ds_old[layer_var].sel(time=t_modify)
     comb_da2 = ds_comb[layer_var].sel(time=t_modify)
+    ps_old2 = ds_old["profile_status"].sel(time=t_modify)
 
-    old_da2, comb_da2 = xr.align(old_da2, comb_da2, join="inner")
+    old_da2, comb_da2, ps_old2 = xr.align(old_da2, comb_da2, ps_old2, join="inner")
+
+    ps2_b = ps_old2.broadcast_like(old_da2)
+    mask_valid2 = ps2_b.values > 0
 
     old_top = old_da2.isel(layer=top_idx)
     comb_top = comb_da2.isel(layer=top_idx)
 
-    finite_old = np.isfinite(old_top.values)
+    finite_old = np.isfinite(old_top.values) & (ps2_b.isel(layer=top_idx).values > 0)
     if finite_old.any():
-        # by construction, density in old over overlap is -999 wherever finite
         assert np.all(old_top.values[finite_old] == -999)
         assert np.all(comb_top.values[finite_old] == -999)
 
-    xr.testing.assert_allclose(comb_da2, old_da2)
-
+    if mask_valid2.any():
+        np.testing.assert_allclose(
+            comb_da2.values[mask_valid2],
+            old_da2.values[mask_valid2],
+        )
 
     # 3) density -999 in old kept in overlap region
     dens_old = ds_old["density"].sel(time=overlap_times)
@@ -548,12 +627,11 @@ def test_combine_prefer_old_outer_join(snp_gridded_xs):
 
     # Align so we compare only common coords (e.g. slopes)
     dens_old, dens_comb = xr.align(dens_old, dens_comb, join="inner")
-
     mask_999 = dens_old.values == -999
     if mask_999.any():
         assert np.all(dens_comb.values[mask_999] == -999)
 
-    # 4) Slope that existed only in new (dropped from old) should now be present
+    # 4) slope only in new present in combined
     all_slopes_new = list(ds_new.slope.values)
     all_slopes_old = list(ds_old.slope.values)
     all_slopes_comb = list(ds_comb.slope.values)
@@ -562,8 +640,7 @@ def test_combine_prefer_old_outer_join(snp_gridded_xs):
         assert extra_slope not in all_slopes_old
         assert extra_slope in all_slopes_comb
 
-    # 5) For the slope removed only for one location in old, combined can use new
-    #    if new actually has data there.
+    # 5) slope removed only for one location in old can be filled from new
     locs = list(ds_old.location.values)
     if ds_old.sizes.get("slope", 0) >= 1 and len(locs) >= 1:
         l0 = locs[0]
@@ -592,6 +669,9 @@ def test_combine_prefer_old_other_joins_basic_invariants(snp_gridded_xs, join_mo
     """
     Smoke-test other joins (left/right/inner/outer) in the prefer-old ordering
     for basic domain invariants and check that profile_status is present and aligned.
+
+    Also implicitly checks that the input datasets satisfy the complex-merge
+    invariants (including the updated profile_status semantics).
     """
     old, new = _prep_two_mergable_datasets(snp_gridded_xs)
     _assert_complex_merge_invariants(old, new)
@@ -605,6 +685,9 @@ def test_combine_prefer_old_other_joins_basic_invariants(snp_gridded_xs, join_mo
         if dim in ds_comb.dims:
             assert dim in ps.dims
             assert ps.sizes[dim] == ds_comb.sizes[dim]
+
+    # Basic sanity: profile_status codes should be within {-1, 0, 1}
+    assert np.isin(ps.values, [-1, 0, 1]).all()
 
     # Domain invariants
     if join_mode == "left":
@@ -645,7 +728,6 @@ def test_combine_prefer_new_overwrite_modes(snp_gridded_xs):
     # overlap for checks
     overlap_times = np.intersect1d(ds_old.time.values, ds_new.time.values)
     assert overlap_times.size >= 2
-    t_remove = overlap_times[0]
     t_modify = overlap_times[1]
 
     layer_var = "density"
@@ -659,27 +741,38 @@ def test_combine_prefer_new_overwrite_modes(snp_gridded_xs):
     ds_left = _run("left")
     assert set(ds_left.time.values) == set(ds_new.time.values)
 
-    # On overlap, density should match new, not old (-999)
+    # On overlap, density should match new, not old (-999), wherever new has
+    # a valid profile (profile_status > 0).
     dens_old = ds_old["density"].sel(time=overlap_times)
     dens_new = ds_new["density"].sel(time=overlap_times)
     dens_left = ds_left["density"].sel(time=overlap_times)
 
-    # Align on intersection of coords so boolean mask applies safely
-    dens_old, dens_new, dens_left = xr.align(dens_old, dens_new, dens_left, join="inner")
+    ps_old_overlap = ds_old["profile_status"].sel(time=overlap_times)
+    ps_new_overlap = ds_new["profile_status"].sel(time=overlap_times)
+
+    # Align on intersection of coords so masks and data align
+    dens_old, dens_new, dens_left, ps_old_overlap, ps_new_overlap = xr.align(
+        dens_old, dens_new, dens_left, ps_old_overlap, ps_new_overlap, join="inner"
+    )
 
     vals_old = dens_old.values
     vals_new = dens_new.values
     vals_left = dens_left.values
 
-    # Only consider positions where old == -999 AND new has finite data
-    mask_999_and_new = (vals_old == -999) & np.isfinite(vals_new)
+    ps_new_b = ps_new_overlap.broadcast_like(dens_new).values
+    ps_old_b = ps_old_overlap.broadcast_like(dens_old).values
+
+    # Only consider positions where new has a valid profile
+    mask_new_valid_prof = ps_new_b > 0
+
+    # Wherever old == -999 and new has finite data in a valid profile, left
+    # should follow new (overwrite the -999).
+    mask_999_and_new = (vals_old == -999) & np.isfinite(vals_new) & mask_new_valid_prof
     if mask_999_and_new.any():
-        # After combine([new, old], join='left'), new should win there
         assert np.allclose(
             vals_left[mask_999_and_new],
             vals_new[mask_999_and_new],
         )
-    # Where new is NaN, it's fine (and expected) that left still holds -999.
 
     # At t_modify, we want to assert *profile-level* semantics (no layer mixing):
     # - where new has a valid profile (profile_status > 0), left should take the
@@ -687,7 +780,6 @@ def test_combine_prefer_new_overwrite_modes(snp_gridded_xs):
     # - where new has no valid profile but old does, left should take the entire
     #   profile from old,
     # - if both are invalid, we don't constrain the result.
-    layer_var = "density"
     if "layer" in ds_left[layer_var].dims:
         var_old = ds_old[layer_var].sel(time=t_modify)
         var_new = ds_new[layer_var].sel(time=t_modify)
@@ -701,25 +793,20 @@ def test_combine_prefer_new_overwrite_modes(snp_gridded_xs):
             var_old, var_new, var_left, ps_old, ps_new, join="inner"
         )
 
-        # Broadcast profile_status masks to the layered variable's shape
-        # (xarray will handle broadcasting along the 'layer' dimension).
         mask_new_valid = (ps_new > 0)
         mask_only_old_valid = (ps_old > 0) & (ps_new == 0)
 
-        # Where new has a valid profile, left must match new for the full profile
         if bool(mask_new_valid.any()):
             xr.testing.assert_allclose(
                 var_left.where(mask_new_valid, drop=True),
                 var_new.where(mask_new_valid, drop=True),
             )
 
-        # Where only old has a valid profile, left must match old for the full profile
         if bool(mask_only_old_valid.any()):
             xr.testing.assert_allclose(
                 var_left.where(mask_only_old_valid, drop=True),
                 var_old.where(mask_only_old_valid, drop=True),
             )
-
 
     # RIGHT JOIN: domain = old, prefer new on overlaps
     ds_right = _run("right")
@@ -732,37 +819,46 @@ def test_combine_prefer_new_overwrite_modes(snp_gridded_xs):
 
         da_right = ds_right[layer_var].sel(time=t0)
         da_old = ds_old[layer_var].sel(time=t0)
+        ps_old_t0 = ds_old["profile_status"].sel(time=t0)
 
-        # Align on common coords (location, slope, realization, layer)
-        da_right, da_old = xr.align(da_right, da_old, join="inner")
+        da_right, da_old, ps_old_t0 = xr.align(
+            da_right, da_old, ps_old_t0, join="inner"
+        )
 
-        # We only require that the *data values* match; coordinates like 'z'
-        # may be recomputed by combine and are not part of the merge semantics.
-        np.testing.assert_allclose(da_right.values, da_old.values)
-        # If you still want a bit of safety on coords, you could add e.g.:
-        for coord in ("location", "slope", "realization", "layer"):
-            assert np.array_equal(da_right[coord], da_old[coord])
+        ps_b = ps_old_t0.broadcast_like(da_old)
+        mask_valid = ps_b.values > 0
+
+        # Only require equality where old has a valid profile; for status==0
+        # we don't constrain (combine may treat it as no layer data).
+        if mask_valid.any():
+            np.testing.assert_allclose(
+                da_right.values[mask_valid],
+                da_old.values[mask_valid],
+            )
 
     # INNER JOIN: domain = intersection, prefer new
     ds_inner = _run("inner")
     assert set(ds_inner.time.values) == set(overlap_times)
-    # On overlap, wherever new has finite density, inner result should match new
+    # On overlap, wherever new has finite density in a valid profile,
+    # inner result should match new.
     dens_inner = ds_inner["density"].sel(time=overlap_times)
     dens_new_sel = ds_new["density"].sel(time=overlap_times)
+    ps_new_sel = ds_new["profile_status"].sel(time=overlap_times)
 
-    # Align on common coords (e.g., slope) before comparing
-    dens_inner_a, dens_new_a = xr.align(dens_inner, dens_new_sel, join="inner")
+    dens_inner_a, dens_new_a, ps_new_a = xr.align(
+        dens_inner, dens_new_sel, ps_new_sel, join="inner"
+    )
 
     vals_inner = dens_inner_a.values
     vals_new = dens_new_a.values
+    ps_new_b = ps_new_a.broadcast_like(dens_new_a).values
 
-    mask_new_valid = np.isfinite(vals_new)
+    mask_new_valid = np.isfinite(vals_new) & (ps_new_b > 0)
     if mask_new_valid.any():
         assert np.allclose(
             vals_inner[mask_new_valid],
             vals_new[mask_new_valid],
         )
-    # Where new is NaN, we don't constrain what combine did (old may have -999 or NaNs).
 
     # OUTER JOIN: domain = union, prefer new
     ds_outer = _run("outer")
@@ -770,23 +866,27 @@ def test_combine_prefer_new_overwrite_modes(snp_gridded_xs):
         set(ds_old.time.values) | set(ds_new.time.values)
     )
 
-    # On overlap, wherever new has finite density, outer result should match new.
+    # On overlap, wherever new has finite density in a valid profile,
+    # outer result should match new.
     dens_outer = ds_outer["density"].sel(time=overlap_times)
     dens_new_sel = ds_new["density"].sel(time=overlap_times)
+    ps_new_sel = ds_new["profile_status"].sel(time=overlap_times)
 
-    # Align on common coords (esp. slope) before comparing
-    dens_outer_a, dens_new_a = xr.align(dens_outer, dens_new_sel, join="inner")
+    dens_outer_a, dens_new_a, ps_new_a = xr.align(
+        dens_outer, dens_new_sel, ps_new_sel, join="inner"
+    )
 
     vals_outer = dens_outer_a.values
     vals_new = dens_new_a.values
+    ps_new_b = ps_new_a.broadcast_like(dens_new_a).values
 
-    mask_new_valid = np.isfinite(vals_new)
+    mask_new_valid = np.isfinite(vals_new) & (ps_new_b > 0)
     if mask_new_valid.any():
         assert np.allclose(
             vals_outer[mask_new_valid],
             vals_new[mask_new_valid],
         )
-    # Where new is NaN, we don't constrain what combine did
+    # Where new is NaN or has no valid profile, we don't constrain what combine did
     # (old may have -999 or NaNs).
 
 

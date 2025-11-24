@@ -141,14 +141,19 @@ def _combine_two(
     - For variables whose dims include all core dims (and optionally 'layer'),
       choose profiles based on profile_status:
 
-         * If left has a valid profile (>=1) -> use left profile
-         * Else, if right has a valid profile (>=1) -> use right profile
+         * If left has a valid profile (status >= 1) -> use left profile
+         * Else, if right has a valid profile (status >= 1) -> use right profile
          * Else -> keep left (usually NaNs / error codes)
 
       This ensures we never mix layers of a single profile between datasets.
 
     - For variables missing core dims, fall back to element-wise prefer-left
       semantics via combine_first (left wins where non-null, right fills gaps).
+
+    Notes
+    -----
+    - profile_status is normalised to integer codes with NaNs treated as 0
+      (no layer data), and negative values are preserved.
     """
     # 1) Reindex to target coords
     target_coords = _compute_target_coords_for_two(
@@ -171,7 +176,7 @@ def _combine_two(
             copy=False,
         )
 
-    # 2) Ensure profile_status on both; align
+    # 2) Ensure profile_status on both; align & normalise
     left = _ensure_profile_status(left)
     right = _ensure_profile_status(right)
 
@@ -179,7 +184,19 @@ def _combine_two(
         left["profile_status"], right["profile_status"], join="outer"
     )
 
-    # Valid profile mask on core dims (status >= 1 means valid profile)
+    # Normalise to int8; NaNs -> 0
+    def _norm_status(da: xr.DataArray) -> xr.DataArray:
+        if da.dtype.kind == "f":
+            da = da.fillna(0)
+        try:
+            return da.astype("i1")
+        except TypeError:
+            return da.astype("float32").fillna(0).astype("i1")
+
+    status_left = _norm_status(status_left)
+    status_right = _norm_status(status_right)
+
+    # Valid profile mask on core dims (status >= 1 means existing layer data)
     has_left = status_left >= 1
     has_right = status_right >= 1
 
@@ -196,15 +213,17 @@ def _combine_two(
         status_left,
         xr.where(use_right_core, status_right, status_left),
     )
+
+    # Ensure int8 and no NaNs
+    combined_status = _norm_status(combined_status)
     out["profile_status"] = combined_status
 
     # We'll iterate over the union of data_vars
     all_vars = set(left.data_vars) | set(right.data_vars)
 
-    # Align all three objects in the same coordinate/variable space when needed
     for name in all_vars:
         if name == "profile_status":
-            continue  # already handled specially above
+            continue  # already handled
 
         in_left = name in left.data_vars
         in_right = name in right.data_vars
@@ -222,7 +241,7 @@ def _combine_two(
         var_left = left[name]
         var_right = right[name]
 
-        # Align on union of coords for this variable
+        # Align on union of coords for this variable and the masks
         var_left, var_right, mask_l, mask_r = xr.align(
             var_left,
             var_right,
@@ -239,7 +258,6 @@ def _combine_two(
 
         if is_profile_var:
             # Profile-wise choice: never mix layers.
-            # mask_l and mask_r are already aligned; just use them directly.
             merged = xr.where(mask_l, var_left, xr.where(mask_r, var_right, var_left))
         else:
             # Fallback: element-wise prefer-left semantics
