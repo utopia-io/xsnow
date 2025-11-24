@@ -132,7 +132,7 @@ def snp_gridded_netcdf(
     nc_path = snp_gridded_cache_dir / "snp_gridded.nc"
 
     if not nc_path.exists():
-        xs = read(gridded_pros_dir)
+        xs = read(gridded_pros_dir, lazy=False)
         xs.to_netcdf(nc_path)
 
     return nc_path
@@ -143,7 +143,7 @@ def snp_gridded_xs(snp_gridded_netcdf: Path):
     """
     Fast reader: open the cached NetCDF for tests.
     """
-    xs = read(snp_gridded_netcdf)
+    xs = read(snp_gridded_netcdf, lazy=False)
     return xs
 
 
@@ -187,11 +187,11 @@ def snp_snowobs_netcdf(
     nc_path_obs = snp_snowobs_cache_dir / "snp_snowobs_obs.nc"
 
     if not nc_path_sim.exists():
-        xs = read(snowobs_pros_dir)
+        xs = read(snowobs_pros_dir, lazy=False)
         xs.to_netcdf(nc_path_sim)
 
     if not nc_path_obs.exists():
-        xs = read(snowobs_pits_dir)
+        xs = read(snowobs_pits_dir, lazy=False)
         xs.to_netcdf(nc_path_obs)
 
     return nc_path_sim, nc_path_obs
@@ -202,7 +202,7 @@ def snp_snowobs_sim_xs(snp_snowobs_netcdf: Path):
     """
     Fast reader: open the cached NetCDF for tests.
     """
-    xs = read(snp_snowobs_netcdf[0])
+    xs = read(snp_snowobs_netcdf[0], lazy=False)
     return xs
 
 @pytest.fixture(scope="function")
@@ -210,7 +210,7 @@ def snp_snowobs_obs_xs(snp_snowobs_netcdf: Path):
     """
     Fast reader: open the cached NetCDF for tests.
     """
-    xs = read(snp_snowobs_netcdf[1])
+    xs = read(snp_snowobs_netcdf[1], lazy=False)
     return xs
 
 
