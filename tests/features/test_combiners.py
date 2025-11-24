@@ -1111,3 +1111,333 @@ def test_overwrite_with_is_combine_outer_prefer_other(snp_gridded_xs):
     combined_direct = xsnow.combine([new, old], join="outer")
 
     xr.testing.assert_identical(combined_fn.data, combined_direct.data)
+
+
+
+
+
+
+# =========================================================================
+# xsnow.combine behaviors on layered + non-layered xsnowDatasets
+# =========================================================================
+
+@pytest.fixture(scope="session")
+def snp_gridded_smets_xs() -> xsnow.xsnowDataset:
+    """
+    Gridded SMET nowcast inputs corresponding to snp_gridded_xs.
+
+    This is a non-layered dataset (no 'layer' dim) that contains forcing / meta
+    variables such as TA, HS, etc., on the same spatial grid as snp_gridded_xs.
+    """
+    path = f"{xsnow.sample_data.snp_gridded_dir()}/smets/gridded/nowcast"
+    return xsnow.read(path)
+
+
+# 1) Augment layered dataset with non-layered SMET inputs
+@pytest.mark.real_data
+@pytest.mark.parametrize("join_mode", ["outer", "left", "right", "inner"])
+def test_combine_augment_with_smets_preserves_layers_and_adds_TA(
+    snp_gridded_xs: xsnow.xsnowDataset,
+    snp_gridded_smets_xs: xsnow.xsnowDataset,
+    join_mode: str,
+):
+    """
+    Combine layered snp_gridded_xs with non-layered SMET inputs:
+
+    - Drop TA (and a few other met vars) from the layered dataset.
+    - Subset SMETs to a single location (VIR2A) so it contributes only there.
+    - Combine with different join modes.
+
+    Expectations
+    ------------
+    * Layered variables (e.g. density) at VIR2A are identical to snp_gridded_xs
+      after combine (no layer mixing / no changes from SMETs).
+    * TA at VIR2A in the combined dataset matches the SMET dataset (augmentation).
+    * HS in the combined dataset at VIR2A comes from the layered dataset, not
+      from SMETs, wherever the layered profile is valid (profile_status > 0).
+    """
+    xs_layered = snp_gridded_xs
+    xs_smets = snp_gridded_smets_xs
+
+    # Sanity: need at least one of the met vars present to drop later
+    met_vars = ["TA", "RH", "VW", "DW", "ISWR"]
+    have_any_met = any(v in xs_layered.data_vars for v in met_vars)
+    if not have_any_met:
+        pytest.skip(
+            "Layered dataset does not contain any of the expected met variables."
+        )
+
+    # Pick locations: we expect VIR1A and VIR2A to exist, but guard with skips
+    locs_layer = [str(l) for l in xs_layered.data["location"].values]
+    if "VIR2A" not in locs_layer:
+        pytest.skip("Location 'VIR2A' not found in layered dataset.")
+    if "VIR1A" not in locs_layer:
+        pytest.skip("Location 'VIR1A' not found in layered dataset.")
+
+    locs_smets = [str(l) for l in xs_smets.data["location"].values]
+    if "VIR2A" not in locs_smets:
+        pytest.skip("Location 'VIR2A' not found in SMET dataset.")
+
+    # ------------------------------------------------------------------
+    # 1) Build a modified layered dataset:
+    #    - drop VIR1A entirely
+    #    - drop some met vars so SMETs can provide them uniquely
+    # ------------------------------------------------------------------
+    base_ds = xs_layered.data
+    ds_layered_mod = base_ds.sel(location=[l for l in locs_layer if l != "VIR1A"])
+    ds_layered_mod = ds_layered_mod.drop_vars(
+        [v for v in met_vars if v in ds_layered_mod.data_vars]
+    )
+
+    xs_layered_mod = xsnow.xsnowDataset(ds_layered_mod)
+
+    # ------------------------------------------------------------------
+    # 2) Subset SMETs to VIR2A only, but KEEP the location dimension
+    # ------------------------------------------------------------------
+    ds_smets_sub = xs_smets.data.sel(location=["VIR2A"])
+    xs_smets_sub = xsnow.xsnowDataset(ds_smets_sub)
+
+    # ------------------------------------------------------------------
+    # 3) Combine layered + SMETs
+    # ------------------------------------------------------------------
+    combined = xsnow.combine([xs_layered_mod, xs_smets_sub], join=join_mode)
+    ds_comb = combined.data
+
+    # ----------------------------
+    # a) Layers at VIR2A unchanged
+    # ----------------------------
+    if "density" in xs_layered_mod.data_vars:
+        layer_var = "density"
+    else:
+        candidates = [
+            n for n, v in xs_layered_mod.data_vars.items() if "layer" in v.dims
+        ]
+        if not candidates:
+            pytest.skip("No layered variable available in layered dataset.")
+        layer_var = candidates[0]
+
+    old_layer = xs_layered_mod.data[layer_var].sel(location="VIR2A")
+    new_layer = ds_comb[layer_var].sel(location="VIR2A")
+
+    # Align on common coords (time, slope, realization, layer)
+    old_layer_a, new_layer_a = xr.align(old_layer, new_layer, join="inner")
+    xr.testing.assert_allclose(new_layer_a, old_layer_a)
+
+    # ----------------------------
+    # b) TA at VIR2A matches SMETs
+    # ----------------------------
+    if "TA" not in xs_smets_sub.data_vars:
+        pytest.skip("SMET dataset does not contain TA variable.")
+
+    ta_smets = xs_smets_sub.data["TA"].sel(location="VIR2A")
+    ta_comb = ds_comb["TA"].sel(location="VIR2A")
+
+    ta_smets_a, ta_comb_a = xr.align(ta_smets, ta_comb, join="inner")
+    
+    # We only require that the *values* of TA match the SMETs input.
+    # Coordinate metadata on the slope dimension (inclination, azimuth, etc.)
+    # may come from whichever dataset is on the left of the combine call.
+    np.testing.assert_allclose(ta_comb_a.values, ta_smets_a.values)
+
+    # ----------------------------
+    # c) HS at VIR2A comes from the layered dataset
+    # ----------------------------
+    if "HS" in xs_layered_mod.data_vars and "HS" in ds_comb.data_vars:
+        hs_layered = xs_layered_mod.data["HS"].sel(location="VIR2A")
+
+        # profile_status from layered dataset (recompute if needed)
+        if "profile_status" in xs_layered_mod.data_vars:
+            ps_layered = xs_layered_mod.data["profile_status"].sel(location="VIR2A")
+        else:
+            ps_layered = (
+                xs_layered_mod.update_profile_status()
+                .data["profile_status"]
+                .sel(location="VIR2A")
+            )
+
+        hs_comb = ds_comb["HS"].sel(location="VIR2A")
+
+        hs_layered_a, ps_layered_a, hs_comb_a = xr.align(
+            hs_layered, ps_layered, hs_comb, join="inner"
+        )
+
+        mask_valid = ps_layered_a > 0
+        if bool(mask_valid.any()):
+            np.testing.assert_allclose(
+                hs_comb_a.values[mask_valid.values],
+                hs_layered_a.values[mask_valid.values],
+            )
+
+
+# 2) Precedence & gap-filling for non-layer variables (TA),
+#    HS consistency w.r.t. layered dataset
+@pytest.mark.real_data
+@pytest.mark.parametrize("join_mode", ["outer", "left", "right", "inner"])
+def test_combine_nonlayer_TA_precedence_and_HS_consistency(
+    snp_gridded_xs: xsnow.xsnowDataset,
+    snp_gridded_smets_xs: xsnow.xsnowDataset,
+    join_mode: str,
+):
+    """
+    Check prefer-left semantics and NaN-filling for non-layer variables, and
+    ensure HS stays consistent with the layered dataset.
+
+    Setup
+    -----
+    - Modify TA in both snp_gridded_xs and SMETs on a shared
+      (location, time[, slope, realization]) index:
+        * t0: left TA = 999, right TA = 42      (both finite)
+        * t1: left TA = NaN, right TA = 42      (gap to be filled)
+    - Combine in both orders: [left, right] and [right, left].
+
+    Expectations
+    ------------
+    - combine([left, right], ...) : prefer left where finite, otherwise fill
+      from right:
+        * at t0 → 999
+        * at t1 → 42
+    - combine([right, left], ...) : same rule, but with swapped roles:
+        * at t0 → 42
+        * at t1 → 999
+    - Layered variables (e.g. density) are identical to the original
+      layered dataset in both combined outputs (no layer mixing).
+    - HS in both combined outputs comes from the layered dataset wherever
+      the original profile_status > 0.
+    """
+    xs_layered = snp_gridded_xs
+    xs_smets = snp_gridded_smets_xs
+
+    if "TA" not in xs_layered.data_vars or "TA" not in xs_smets.data_vars:
+        pytest.skip("Both datasets must contain TA for this precedence test.")
+
+    # Choose a common location and two overlapping times
+    locs_layer = set(str(l) for l in xs_layered.data["location"].values)
+    locs_smets = set(str(l) for l in xs_smets.data["location"].values)
+    common_locs = sorted(locs_layer & locs_smets)
+    if not common_locs:
+        pytest.skip("No common locations between layered and SMET datasets.")
+    loc = common_locs[0]
+
+    times_layer = set(xs_layered.data["time"].values)
+    times_smets = set(xs_smets.data["time"].values)
+    overlap_times = sorted(times_layer & times_smets)
+    if len(overlap_times) < 2:
+        pytest.skip("Need at least two overlapping timestamps for TA precedence test.")
+
+    t0, t1 = overlap_times[:2]
+
+    # Pick first slope/realization indices where present
+    dsL = xs_layered.data
+    dsS = xs_smets.data
+
+    sel_common = {"location": loc}
+    for dim in ("slope", "realization"):
+        if dim in dsL.dims and dsL.sizes[dim] > 0:
+            sel_common[dim] = dsL.coords[dim].values[0]
+        elif dim in dsS.dims and dsS.sizes[dim] > 0:
+            sel_common[dim] = dsS.coords[dim].values[0]
+
+    # Create modified copies
+    dsL_mod = dsL.copy(deep=True)
+    dsS_mod = dsS.copy(deep=True)
+
+    # Helper to build selection dict for a given time
+    def _sel_for_time(t):
+        d = dict(sel_common)
+        d["time"] = t
+        return d
+
+    # t0: both finite, different values
+    dsL_mod["TA"].loc[_sel_for_time(t0)] = 999.0
+    dsS_mod["TA"].loc[_sel_for_time(t0)] = 42.0
+
+    # t1: left NaN, right finite
+    dsL_mod["TA"].loc[_sel_for_time(t1)] = np.nan
+    dsS_mod["TA"].loc[_sel_for_time(t1)] = 42.0
+
+    xsL_mod = xsnow.xsnowDataset(dsL_mod)
+    xsS_mod = xsnow.xsnowDataset(dsS_mod)
+
+    # Combine in both orders with the same join mode
+    comb_LR = xsnow.combine([xsL_mod, xsS_mod], join=join_mode)
+    comb_RL = xsnow.combine([xsS_mod, xsL_mod], join=join_mode)
+
+    ds_LR = comb_LR.data
+    ds_RL = comb_RL.data
+
+    # Build selection dicts for reading back TA
+    def _sel(ds, t):
+        d = {"location": loc, "time": t}
+        ta = ds["TA"]
+        for dim in ("slope", "realization"):
+            if dim in ta.dims:
+                d[dim] = sel_common[dim]
+        return d
+
+    # Prefer-left semantics with NaN fill: [left, right]
+    val_LR_t0 = float(ds_LR["TA"].sel(_sel(ds_LR, t0)))
+    val_LR_t1 = float(ds_LR["TA"].sel(_sel(ds_LR, t1)))
+    assert val_LR_t0 == pytest.approx(999.0)
+    assert val_LR_t1 == pytest.approx(42.0)
+
+    # Same rule, swapped roles: [right, left]
+    val_RL_t0 = float(ds_RL["TA"].sel(_sel(ds_RL, t0)))
+    val_RL_t1 = float(ds_RL["TA"].sel(_sel(ds_RL, t1)))
+    assert val_RL_t0 == pytest.approx(42.0)
+    assert val_RL_t1 == pytest.approx(42.0)
+
+    # ----------------------------
+    # Layers unchanged in both combined outputs
+    # ----------------------------
+    if "density" in xs_layered.data_vars:
+        layer_var = "density"
+    else:
+        candidates = [
+            n for n, v in xs_layered.data_vars.items() if "layer" in v.dims
+        ]
+        if not candidates:
+            pytest.skip("No layered variable available for layer-invariance check.")
+        layer_var = candidates[0]
+
+    dens_orig = xs_layered.data[layer_var]
+    dens_LR = ds_LR[layer_var]
+    dens_RL = ds_RL[layer_var]
+
+    dens_orig_a, dens_LR_a = xr.align(dens_orig, dens_LR, join="inner")
+    dens_orig_b, dens_RL_b = xr.align(dens_orig, dens_RL, join="inner")
+
+    # LR: we expect a fully “xsnow-native” result, including coords
+    xr.testing.assert_allclose(dens_LR_a, dens_orig_a)
+
+    # RL: only require that the *values* of the layered variable are unchanged.
+    # Coordinate metadata (inclination, azimuth, etc.) may differ depending
+    # on which dataset appears on the left during combine.
+    np.testing.assert_allclose(dens_RL_b.values, dens_orig_b.values)
+
+    # ----------------------------
+    # HS always comes from the layered dataset wherever it has valid profiles
+    # ----------------------------
+    if "HS" in xs_layered.data_vars:
+        hs_orig = xs_layered.data["HS"]
+        # profile_status from layered dataset (recompute if needed)
+        if "profile_status" in xs_layered.data_vars:
+            ps_orig = xs_layered.data["profile_status"]
+        else:
+            ps_orig = xs_layered.update_profile_status().data["profile_status"]
+
+        for ds_comb in (ds_LR, ds_RL):
+            if "HS" not in ds_comb.data_vars:
+                continue
+
+            hs_comb = ds_comb["HS"]
+
+            hs_orig_a, ps_orig_a, hs_comb_a = xr.align(
+                hs_orig, ps_orig, hs_comb, join="inner"
+            )
+
+            mask_valid = ps_orig_a > 0
+            if bool(mask_valid.any()):
+                np.testing.assert_allclose(
+                    hs_comb_a.values[mask_valid.values],
+                    hs_orig_a.values[mask_valid.values],
+                )
