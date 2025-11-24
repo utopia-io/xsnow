@@ -1026,10 +1026,10 @@ def _create_pro_dataset(
     temperature are set to np.nan.
 
     `profile_status` semantics in this worker:
-        - 2: valid profile WITH snow for that timestamp
-        - 1: valid profile WITHOUT snow for that timestamp
-        - 0: no parse error, but also none of the other categories
+        - 1: valid snow layer data (no layer data counts as valid information here!)
+        - 0: no data (default, e.g., 'height' missing in pro file)
         - <0: parse errors (need to be provided from outside this function from higher-level)
+        - status = 0 should basically never happen for this function.
 
     If no profiles are provided but metadata exists, a minimal dataset with
     `profile_status = empty_profile_status_default` is returned.
@@ -1066,7 +1066,7 @@ def _create_pro_dataset(
     chunks = chunks or {'time': 100, 'layer': -1}
 
     # ------------------------------------------------------------------
-    # Case 1: no profiles, but we still build a dataset with profile_status = 1
+    # Case 1: no profiles, but we still build a dataset with profile_status
     # ------------------------------------------------------------------
     if not profiles:
         # USE STRING STATION NAME DIRECTLY (not 'stationName')
@@ -1123,7 +1123,7 @@ def _create_pro_dataset(
         return ds
 
     # ------------------------------------------------------------------
-    # Case 2: profiles present → full 5D dataset + per-timestamp profile_status
+    # Case 2: profiles present --> full 5D dataset + per-timestamp profile_status
     # ------------------------------------------------------------------
     timestamps = pd.to_datetime(
         [p['timestamp'] for p in profiles],
@@ -1213,24 +1213,16 @@ def _create_pro_dataset(
 
     # ------------------------------------------------------------------
     # Compute profile_status for each timestamp
-    #   2: at least one non-NaN height > 0  (snow on ground)
-    #   1: no height > 0
-    #   0: safe default if others are not valid but still parsed without error
+    #   1: 'height' data exists (even if no snow on ground)
+    #   0: safe default if no 'height' data but still parsed without error
     # ------------------------------------------------------------------
     status_np = np.empty((1, len(profiles), 1, 1), dtype='i1')
 
     for i, profile in enumerate(profiles):
         status = 0  # default: no data otherwise proven differently
-
         height = profile.get('height', None)
-        if height is not None:
-            height_arr = np.asarray(height, dtype=float)
-            # Snow if any level is below 0 and valid
-            if np.any(~np.isnan(height_arr) & (height_arr > 0.0)):
-                status = 2
-            else:
-                status = 1
-
+        if height is not None and len(height) >= 1:
+            status = 1
         status_np[0, i, 0, 0] = status
 
     if use_dask:
@@ -1810,9 +1802,12 @@ def _merge_and_finalize(
         logger.debug(f"_merge_and_finalize: inclination values = {final_dataset.data.inclination.values}")
         logger.debug(f"_merge_and_finalize: inclination dims = {final_dataset.data.inclination.dims}")
 
+    if 'z' not in final_dataset and 'height' in final_dataset:
+        final_dataset = final_dataset.compute_z_depth()
+
     final_dataset = final_dataset.update_profile_status()
     
-    return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
+    return final_dataset
 
 
 def _coerce_time(sel: Optional[TimeLike]) -> Optional[TimeSelector]:

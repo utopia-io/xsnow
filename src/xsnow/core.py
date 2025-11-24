@@ -419,166 +419,126 @@ class xsnowDataset:
     
     def update_profile_status(
         self,
-        data_vars_hint: list[str] | None = None,
-        max_data_vars: int = 5,
     ) -> xr.Dataset:
         """
-        Attach or update `profile_status` with the following semantics:
+        Attach or update `profile_status` with very simple semantics:
 
-        < 0 : error / special flag (preserve as-is)
-            0 : unknown / no information (yet)
-            1 : valid profile WITHOUT snow
-            2 : valid profile WITH snow
+            -1 : error during parsing  (preserved as-is)
+            0 : no snow layer data
+            1 : existing snow layer data (this may include "no snow", see below!)
 
-        Logic:
-        - Start from existing profile_status if present, else from 0.
-        - Set to 2 where snow is detected:
-                * if `z` with `layer` dim exists: any(z < 0) along layer
-                * elif no suitable `z` but `HS` exists: HS > 0
-            (only when current status >= 0)
-        - Set to 1 where:
-                * status is still 0, AND
-                * at least one selected non-status data variable with dims
-                ⊇ (profile_status.dims) is non-null at that index.
+        Logic
+        -----
+        1. Start from existing `profile_status` if present, otherwise from 0 over the
+        core dims (location, time, slope, realization that exist in the dataset).
 
-        Candidate data variables for the 0→1 decision:
-        - Up to `max_data_vars` are used.
-        - Order of priority:
-            1) `data_vars_hint` (filtered to existing vars with suitable dims),
-            2) preferred vars: ['z', 'HS', 'height', 'density', 'temperature']
-            (with suitable dims),
-            3) all remaining data vars with suitable dims.
+        **Negative values (< 0) are *never* changed by this method.**
+
+        2. For `profile_status` to be positive after this call, the dataset must contain 
+        the vertical (layer) variable `z` *and*
+            * have negative `z` values (i.e., snow layers), *or*
+            * NaN `z` values (i.e., *no* snow layers) but a pre-existing `profile_status==1`, *or*
+            * NaN `z` values (i.e., *no* snow layers) but an existing `HS==0`.
+
+        **Note that the profile_status counts *no snow* as existing layer information if the
+        previous criteria are met.**
+
+        If `z` doesn't exists, all non-negative profile_status entries are set to 0 (no layer data).
+        Similarly, if `z` exists with all-NaN and `HS` does not exist or is NaN, the status
+        is set to 0.
         """
 
         # -------------------------
         # 1. Base status
         # -------------------------
-        if 'profile_status' in self:
-            base = self['profile_status']
+        if "profile_status" in self:
+            base = self["profile_status"]
         else:
-            core_dims = [d for d in ('location', 'time', 'slope', 'realization') if d in self.dims]
+            core_dims = [d for d in ("location", "time", "slope", "realization") if d in self.dims]
             if not core_dims:
-                base = xr.DataArray(np.array(0, dtype='i1'), name='profile_status')
+                base = xr.DataArray(np.array(0, dtype="i1"), name="profile_status")
             else:
                 coords = {d: self.coords[d] for d in core_dims}
                 shape = [self.sizes[d] for d in core_dims]
                 base = xr.DataArray(
-                    np.zeros(shape, dtype='i1'),
+                    np.zeros(shape, dtype="i1"),
                     coords=coords,
                     dims=tuple(core_dims),
-                    name='profile_status',
+                    name="profile_status",
                 )
 
-        # normalize dtype & NaNs → 0
-        if base.dtype.kind == 'f':
-            base = base.fillna(0).astype('i1')
+        # normalize dtype & NaNs --> 0
+        if base.dtype.kind == "f":
+            base = base.fillna(0).astype("i1")
         else:
             try:
-                base = base.astype('i1')
+                base = base.astype("i1")
             except TypeError:
-                base = base.astype('float32').fillna(0).astype('i1')
+                base = base.astype("float32").fillna(0).astype("i1")
 
         status = base
+        core_dims = status.dims  # e.g. ('location', 'time', 'slope', 'realization')
+        mask_nonneg = status >= 0  # we never change negative codes
 
         # -------------------------
-        # 2. Set 2 where snow is detected
+        # 3. No vertical variable --> everything non-negative becomes 0
         # -------------------------
-        snow_mask = None
+        z_exists = True if 'z' in self and "layer" in self['z'].dims \
+                        else False
+        if not z_exists:
+            status_out = xr.where(mask_nonneg, 0, status)
+        else:
+            v = self['z']
+            # Reduce over all non-core, non-layer dims to get per-profile masks
+            reduce_dims = [d for d in v.dims if d not in core_dims and d != "layer"]
+            snowlike = v < 0
+            if reduce_dims:
+                snowlike = snowlike.any(dim=reduce_dims)
+            snowlike = snowlike.any(dim="layer")
+            snowlike = snowlike.broadcast_like(status)
 
-        if 'z' in self:
-            z = self['z']
-            if 'layer' in z.dims:
-                snow_mask = (z < 0).any(dim='layer')
+            # HS-based fallback
+            if "HS" in self and "layer" not in self["HS"].dims:
+                hs = self["HS"]
+                hs_reduce_dims = [d for d in hs.dims if d not in core_dims]
+                hs_eq0 = (hs == 0)
+                if hs_reduce_dims:
+                    hs_eq0 = hs_eq0.any(dim=hs_reduce_dims)
+                hs_eq0 = hs_eq0.broadcast_like(status)
+            else:
+                hs_eq0 = xr.zeros_like(status, dtype=bool)
 
-        if snow_mask is None and 'HS' in self:
-            hs = self['HS']
-            snow_mask = hs > 0
+            # Recompute status for all non-negative entries:
+            # Start with 0 everywhere (for non-negative)
+            status_out = xr.where(mask_nonneg, 0, status)
 
-        if snow_mask is not None:
-            snow_mask = snow_mask.broadcast_like(status)
-            status = xr.where(snow_mask & (status >= 0), 2, status)
+            # layer_var indicates something (z<0) --> 1
+            status_out = xr.where(mask_nonneg & snowlike, 1, status_out)
 
-        # -------------------------
-        # 3. Set 1 where status == 0 and we see data
-        # -------------------------
-        core_dims = status.dims
-        candidates: list[str] = []
-
-        def _suitable(var: xr.DataArray) -> bool:
-            # Only use vars that are defined on at least all core dims
-            return set(core_dims).issubset(var.dims)
-
-        # 3.1 Hints first
-        if data_vars_hint is not None:
-            for name in data_vars_hint:
-                if (
-                    name in self.data_vars
-                    and name != 'profile_status'
-                    and name not in candidates
-                    and _suitable(self.data_vars[name])
-                ):
-                    candidates.append(name)
-                    if len(candidates) >= max_data_vars:
-                        break
-
-        # 3.2 Preferred list next
-        preferred = ['z', 'HS', 'height', 'density', 'temperature']
-        if len(candidates) < max_data_vars:
-            for name in preferred:
-                if (
-                    name in self.data_vars
-                    and name != 'profile_status'
-                    and name not in candidates
-                    and _suitable(self.data_vars[name])
-                ):
-                    candidates.append(name)
-                    if len(candidates) >= max_data_vars:
-                        break
-
-        # 3.3 Fill remaining slots with any suitable data vars
-        if len(candidates) < max_data_vars:
-            for name, var in self.data_vars.items():
-                if (
-                    name != 'profile_status'
-                    and name not in candidates
-                    and _suitable(var)
-                ):
-                    candidates.append(name)
-                    if len(candidates) >= max_data_vars:
-                        break
-
-        has_data = None
-
-        for name in candidates:
-            var = self[name]
-
-            mask = var.notnull()
-            extra_dims = [d for d in var.dims if d not in core_dims]
-            if extra_dims:
-                mask = mask.any(dim=extra_dims)
-
-            mask = mask.broadcast_like(status)
-            has_data = mask if has_data is None else (has_data | mask)
-
-        if has_data is not None:
-            status = xr.where((status == 0) & has_data, 1, status)
+            # No snowlike signal, but HS==0 at that profile or
+            # pre-existing status was positive --> also 1
+            status_out = xr.where(
+                mask_nonneg & ~snowlike & (hs_eq0 | status>0),
+                1,
+                status_out,
+            )
 
         # -------------------------
         # 4. Attributes & return
         # -------------------------
-        attrs = dict(getattr(status, "attrs", {}))
-        attrs.setdefault('long_name', 'profile status (error / no data / valid)')
-        attrs.setdefault('units', '1')
-        attrs.setdefault('standard_name', 'profile_status')
-        attrs['mapping'] = {
+        attrs = dict(getattr(status_out, "attrs", {}))
+        attrs.setdefault("long_name", "profile status (snow layer data)")
+        attrs.setdefault("units", "1")
+        attrs.setdefault("standard_name", "profile_status")
+        attrs["mapping"] = {
             -1: "error during parsing",
-            0: "unknown / no data",
-            1: "valid, no snow",
-            2: "valid, with snow",
+            0: "no layer data",
+            1: "existing layer data",
         }
-        status.attrs = attrs
+        status_out.attrs = attrs
 
-        return self.__class__(self.data.assign(profile_status=status))
+        return self.__class__(self.data.assign(profile_status=status_out))
+
 
 
     def to_gpu(self) -> 'xsnowDataset':
