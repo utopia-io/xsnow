@@ -16,25 +16,32 @@ Extend the ``xsnowDataset`` class with additional dimensions
 
 Expected layout of data source file structure
 ---------------
+This is the expected layout for SNOWPACK-native files or if the simulations do not want to
+be stored in one netcdf dataset.
+
 ``source/{run}/{member}/{location}.{smet|pro|nc}``
 Examples:
-    deterministic-forecast-analysis/
-        nowcast/            # run: this could be a stacked pseudo-run that spans the entire season
+    
+1. Deterministic forecast analysis
+    meteo-input/            # source: there can be other sources, e.g. snowpack-output/, etc.
+        analysis/           # run: this could be a stacked pseudo-run that spans the entire season
             det/            # member: this example has only the deterministic model
                 VIR1A.smet  # one specific location, time spans entire season
                 VIR2A.smet
         2025-12-01T00:00Z/  # run: specific model run, this directory contains only few timesteps 
             det/
-                VIR1A.smet  # only includes forecast data from 2025-12-01T00:00Z--full leadtime (~72h)
+                VIR1A.smet  # only includes forecast data from 2025-12-01T00:00Z--full leadtime
                 VIR2A.smet
         2025-12-01T09:00Z/
             det/
                 VIR1A.smet
                 VIR2A.smet
+        ...
 
 
-    ensemble-forecast-analysis/
-        nowcast/            # run: as above
+2. Ensemble forecast analysis
+    meteo-input/            # source: as above
+        analysis/            # run: as above
             det/            # member: deterministic control member
                 VIR1A.smet  # location: as above
                 VIR2A.smet
@@ -52,6 +59,7 @@ Examples:
             p01/
                 VIR1A.smet
                 VIR2A.smet
+            ...
 
 What this module adds
 ---------------------
@@ -72,6 +80,7 @@ import fnmatch
 import logging
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
+from collections import OrderedDict
 
 import numpy as np
 import pandas as pd
@@ -200,6 +209,41 @@ def _compute_leadtime_hours(
     if note:
         lead.attrs["note"] = note
     return lead
+
+
+def _transpose_fx_dims(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Reorder dimensions to keep the base ordering and append run last.
+
+    Preferred order: location, time, slope, realization, layer, run.
+    Unknown dims keep their original relative order just before run.
+    """
+    preferred = ["location", "time", "slope", "realization", "layer"]
+    dims = list(ds.dims)
+
+    final: List[str] = [d for d in preferred if d in dims]
+    seen = set(final)
+
+    extras = [d for d in dims if d not in seen and d != "run"]
+    final.extend(extras)
+
+    if "run" in dims:
+        final.append("run")
+
+    ds = ds.transpose(*final, missing_dims="ignore")
+
+    # Rebuild dataset to enforce dimension discovery order for ds.dims
+    def _var_sort_key(var: xr.Variable) -> int:
+        idxs = [final.index(d) for d in var.dims if d in final]
+        return min(idxs) if idxs else len(final) + 1
+
+    ordered_vars = OrderedDict(
+        sorted(ds.variables.items(), key=lambda item: (_var_sort_key(item[1]), item[0]))
+    )
+    rebuilt = xr.Dataset(ordered_vars, attrs=ds.attrs)
+    rebuilt = rebuilt.set_coords(ds.coords.keys())
+
+    return rebuilt.transpose(*final, missing_dims="ignore")
 
 
 def scan_source(
@@ -428,5 +472,7 @@ def read_ensemble_fx(
 
     if squeeze_run and combined.sizes.get("run", 0) == 1:
         combined = combined.squeeze("run")
+
+    combined = _transpose_fx_dims(combined)
 
     return EnsembleFX(xsnowDataset(combined))
