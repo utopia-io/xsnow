@@ -96,7 +96,7 @@ def test_basic_update_workflow(initial_data, update_data, tmp_path):
     np.testing.assert_array_equal(ds_cached.time.values, initial_times)
     
     # Step 4: Update with new data (incremental update)
-    ds_updated = ds_cached.update(update_data)
+    ds_updated = ds_cached.append_latest(update_data)
     assert ds_updated is not None
     assert ds_updated.sizes['time'] == 5  # 3 initial + 2 new
     print(f"Updated data: {ds_updated.sizes['time']} timesteps")
@@ -111,9 +111,9 @@ def test_basic_update_workflow(initial_data, update_data, tmp_path):
     assert all(times[i] <= times[i+1] for i in range(len(times)-1)), "Times not sorted"
 
 
-def test_update_only_loads_new_data(initial_data, update_data, tmp_path):
+def test_append_latest_only_loads_new_data(initial_data, update_data, tmp_path):
     """
-    Verifies that .update() only reads data after the last timestamp.
+    Verifies that .append_latest() only reads data after the last timestamp.
     This is the key efficiency feature.
     """
     # Load and cache initial data
@@ -127,7 +127,7 @@ def test_update_only_loads_new_data(initial_data, update_data, tmp_path):
     
     # Load from cache and update
     ds_cached = read(nc_file)
-    ds_updated = ds_cached.update(update_data)
+    ds_updated = ds_cached.append_latest(update_data)
     
     # Should have added 2 new timesteps (18:00 and 00:00 next day)
     # but NOT re-read the 3 initial ones
@@ -138,7 +138,7 @@ def test_update_only_loads_new_data(initial_data, update_data, tmp_path):
     assert all(t > last_time for t in new_times), "New times should be after cached data"
 
 
-def test_update_with_no_new_data(initial_data, tmp_path):
+def test_append_latest_with_no_new_data(initial_data, tmp_path):
     """Tests update when there's no new data to add."""
     # Load and cache
     ds_initial = read(initial_data, lazy=False)
@@ -147,20 +147,20 @@ def test_update_with_no_new_data(initial_data, tmp_path):
     
     # Try to update with the same data
     ds_cached = read(nc_file)
-    ds_updated = ds_cached.update(initial_data)
+    ds_updated = ds_cached.append_latest(initial_data)
     
     # Should have the same data (no duplicates)
     assert ds_updated.sizes['time'] == ds_initial.sizes['time']
 
 
-def test_update_preserves_data_integrity(initial_data, update_data, tmp_path):
+def test_append_latest_preserves_data_integrity(initial_data, update_data, tmp_path):
     """Verifies that update preserves all data correctly."""
     # Incremental load
     ds_initial = read(initial_data, lazy=False)
     nc_file = tmp_path / "cached.nc"
     ds_initial.to_netcdf(nc_file)
     ds_cached = read(nc_file)
-    ds_incremental = ds_cached.update(update_data)
+    ds_incremental = ds_cached.append_latest(update_data)
     
     # Verify incremental update worked
     assert ds_incremental is not None
@@ -184,7 +184,7 @@ def test_update_preserves_data_integrity(initial_data, update_data, tmp_path):
 # EFFICIENCY TESTS
 # ============================================================================
 
-def test_update_is_faster_than_full_reload(initial_data, update_data, tmp_path):
+def test_append_latest_is_faster_than_full_reload(initial_data, update_data, tmp_path):
     """Verifies that incremental update is faster than full reload."""
     import time
     
@@ -202,7 +202,7 @@ def test_update_is_faster_than_full_reload(initial_data, update_data, tmp_path):
     # Method 2: Incremental update (read only new data)
     start = time.time()
     ds_cached = read(nc_file)  # Fast: read from NetCDF
-    ds_incremental = ds_cached.update(update_data)  # Only reads new files
+    ds_incremental = ds_cached.append_latest(update_data)  # Only reads new files
     update_time = time.time() - start
     
     print(f"\nPerformance comparison:")
@@ -241,7 +241,7 @@ def test_netcdf_roundtrip_preserves_data(initial_data, tmp_path):
 # EDGE CASES
 # ============================================================================
 
-def test_update_with_empty_cache(update_data, tmp_path):
+def test_append_latest_with_empty_cache(update_data, tmp_path):
     """Tests update when starting with empty NetCDF."""
     # Create a minimal empty dataset
     import xarray as xr
@@ -253,7 +253,7 @@ def test_update_with_empty_cache(update_data, tmp_path):
     # Just test that it doesn't crash
 
 
-def test_update_with_time_gap(tmp_path):
+def test_append_latest_with_time_gap(tmp_path):
     """Tests update when there's a time gap between cached and new data."""
     # Old data: Jan 1
     old_dir = tmp_path / "old"
@@ -285,7 +285,7 @@ StationName= STATION_A
     ds_old.to_netcdf(nc_file)
     
     ds_cached = read(nc_file)
-    ds_updated = ds_cached.update(new_dir)
+    ds_updated = ds_cached.append_latest(new_dir)
     
     assert ds_updated.sizes['time'] == 2
     times = pd.to_datetime(ds_updated.time.values)
@@ -293,7 +293,7 @@ StationName= STATION_A
     assert time_diff == 9, f"Expected 9 day gap, got {time_diff}"
 
 
-def test_update_with_overlapping_times(tmp_path):
+def test_append_latest_with_overlapping_times(tmp_path):
     """Tests update when new data overlaps with cached data."""
     # Cached: Jan 1 00:00 and 06:00
     cached_dir = tmp_path / "cached"
@@ -331,7 +331,7 @@ StationName= STATION_A
     ds_cached_data.to_netcdf(nc_file)
     
     ds_cached = read(nc_file)
-    ds_updated = ds_cached.update(new_dir)
+    ds_updated = ds_cached.append_latest(new_dir)
     
     # Should have 3 unique times (no duplicates)
     assert ds_updated.sizes['time'] == 3
@@ -343,7 +343,7 @@ StationName= STATION_A
 # MULTI-LOCATION TESTS
 # ============================================================================
 
-def test_update_with_multiple_locations(tmp_path):
+def test_append_latest_with_multiple_locations(tmp_path):
     """Tests update workflow with multiple stations."""
     # Initial: 3 stations
     initial_dir = tmp_path / "initial"
@@ -377,7 +377,7 @@ StationName= STATION_{i}
     ds_initial.to_netcdf(nc_file)
     
     ds_cached = read(nc_file)
-    ds_updated = ds_cached.update(new_dir)
+    ds_updated = ds_cached.append_latest(new_dir)
     
     # Should have 3 locations, 2 times each
     assert ds_updated.sizes['location'] == 3
@@ -436,7 +436,7 @@ StationName= MY_STATION
     print(f"  Loaded from cache: {ds_cached.sizes['time']} timesteps")
     
     # Update with only new data (efficient)
-    ds_updated = ds_cached.update(day2_dir)
+    ds_updated = ds_cached.append_latest(day2_dir)
     print(f"  After update: {ds_updated.sizes['time']} timesteps")
     
     # Save updated cache

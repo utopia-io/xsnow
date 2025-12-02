@@ -334,16 +334,16 @@ def test_to_smet_max_files_raises_error(multi_station_dir):
     with pytest.raises(ValueError, match="exceeds the specified maximum"):
         ds.to_smet("test.smet", max_files=1)
 
-def test_update_method(data_dir_for_io_methods):
+def test_append_latest_method(data_dir_for_io_methods):
     """
-    Tests the .update() method to ensure it loads and appends new data.
+    Tests the .append_latest() method to ensure it loads and appends new data.
     """
     initial_dir, update_dir, _ = data_dir_for_io_methods
     
     ds = read(initial_dir)
     assert ds.sizes['time'] == 1
     
-    ds_updated = ds.update(update_dir)
+    ds_updated = ds.append_latest(update_dir)
     
     assert isinstance(ds_updated, xsnowDataset)
     assert ds_updated.sizes['time'] == 2

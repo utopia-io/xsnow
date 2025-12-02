@@ -47,7 +47,7 @@ def data_dir_for_io_tests(tmp_path):
     update_dir = tmp_path / "update"
     update_dir.mkdir()
 
-    # Initial file for the .update() test
+    # Initial file for the .append_latest() test
     (initial_dir / "initial.pro").write_text("""
 [STATION_PARAMETERS]
 StationName= IO_STATION
@@ -56,7 +56,7 @@ StationName= IO_STATION
 0502,1,90
 """)
 
-    # New file for the .update() test
+    # New file for the .append_latest() test
     (update_dir / "update.pro").write_text("""
 [STATION_PARAMETERS]
 StationName= IO_STATION

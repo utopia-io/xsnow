@@ -3,7 +3,7 @@
 
 from .core import xsnowDataset, DatasetDecorator
 from .selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
-from .xsnow_io import read, update, to_pro, to_smet, to_netcdf
+from .xsnow_io import read, append_latest, to_pro, to_smet, to_netcdf
 from .plugin import register_xsnowDataset_method
 from .registry import registry
 from .sample_data import single_profile, single_profile_timeseries
@@ -19,7 +19,7 @@ except Exception:
 __all__ = [
     'xsnowDataset',
     'read',
-    'update',
+    'append_latest',
     'to_pro',
     'to_smet',
     'to_netcdf',

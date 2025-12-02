@@ -34,6 +34,7 @@ import multiprocessing
 import concurrent.futures
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Union, Tuple, Sequence, Mapping
+from datetime import datetime
 
 
 import numpy as np
@@ -51,6 +52,7 @@ from .selectors import (
     TimeLike, LocationLike, SlopeLike, RealizationLike
 )
 from .plugin import register_xsnowDataset_method
+from .combiners import concat as xsnow_concat
 
 # Configure a basic logger for this module
 logging.basicConfig(level=logging.INFO)
@@ -1835,198 +1837,80 @@ def _coerce_realization(sel: Optional[RealizationLike]) -> Optional[RealizationS
 # --------------------------------------------------------------------------- #
 
 @register_xsnowDataset_method
-def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xsnowDataset:
+def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path],
+                  from_time: Optional[Union[str, datetime, pd.Timestamp, np.datetime64]]=None,
+                  join: str='left', **kwargs,
+) -> xsnowDataset:
     """
-    Updates an existing xsnowDataset with new data from a source.
+    Incrementally extend a dataset by appending newer timestamps from files.
 
-    This method is designed for workflows where you load a cached dataset
-    (e.g., from NetCDF) and want to append new data from recent .pro or
-    .smet files. It finds the last timestamp in the current data and only
-    reads new data from the source that is more recent.
-    
-    Note: This method is optimized for adding new timestamps to existing data.
-    If the new data has different dimensions (e.g., different slopes), the result
-    may differ from loading all data together. For guaranteed consistency across
-    all dimensions, use a full reload instead.
+    This method is convenience wrapper for time selection, read, and concat.
+    Semantics:
+        1) Determine a start time:
+            - If `from_time` is None, use (max(existing time) + 1s).
+            - If `from_time` is provided, drop all times <= `from_time`
+              from `existing_ds` and start reading from `from_time` (inclusive).
+        2) Read `source` with that time filter.
+        3) Concatenate along `time` using `xsnow.concat`.
+            - `join` controls non-time dims (default: 'left' keeps existing domains).
+            - Time is always the union along the concat axis (no extra reindexing).
 
     Args:
-        existing_ds (xsnowDataset): The dataset instance to be updated.
-        source: Path to a file, a directory, or a list of files
-            containing the new data.
+        existing_ds: The dataset instance to extend.
+        source: Path(s) to files or directories to read new data from (calls `read` upon it).
+        from_time: Optional explicit lower bound for new data and trimming
+            of the existing dataset. Accepts str/pandas/np datetime or datetime.
+        join: Join mode for non-time dimensions forwarded to `xsnow.concat`.
+        **kwargs: Additional keyword args forwarded to `xsnow.concat` like `compat` or 
+            `combine_attrs`.
 
     Returns:
-        A new xsnowDataset instance with the combined data.
+        xsnowDataset with the appended data (or trimmed-only if nothing new).
     """
-    try:
-        pro_files, smet_files = _resolve_filepaths(source)
-        if not pro_files and not smet_files:
-            logger.warning("Update source contains no data files.")
-            return existing_ds
-        resolved_source = pro_files + smet_files
-    except (FileNotFoundError, TypeError) as e:
-        logger.error(e)
-        return existing_ds
+    base_data = existing_ds.data if existing_ds.data is not None else xr.Dataset()
+    base_filtered = base_data
 
-    if existing_ds.data is None or existing_ds.data.time.size == 0:
-        return read(resolved_source) or existing_ds
-    
-    last_timestamp = pd.to_datetime(existing_ds.data.time.max().values)
-
-    # Add 1 second to make it exclusive (avoid re-reading the last timestamp)
-    last_timestamp_exclusive = (last_timestamp + pd.Timedelta(seconds=1)).isoformat()
-    time_filter = TimeSelector(sel=slice(last_timestamp_exclusive, None))    
-    new_data_obj = read(resolved_source, time=time_filter)
-
-    if new_data_obj is None or new_data_obj.data.time.size == 0:
-        return existing_ds
-
-    # ========================================================================
-    # FIX: Handle string-based location coordinates properly
-    # ========================================================================
-    
-    # Get location names from both datasets
-    def _get_location_names(ds):
-        """Extract location names as strings, handling bytes if needed."""
-        return [loc.decode('utf-8') if isinstance(loc, bytes) else str(loc) 
-                for loc in ds.location.values]
-    
-    existing_locations = _get_location_names(existing_ds.data)
-    new_locations = _get_location_names(new_data_obj.data)
-    
-    # Find common and unique locations
-    common_locations = set(existing_locations) & set(new_locations)
-    only_in_existing = set(existing_locations) - set(new_locations)
-    only_in_new = set(new_locations) - set(existing_locations)
-    
-    logger.info(f"Update: {len(common_locations)} common, {len(only_in_new)} new locations")
-    
-    # Process based on whether we have common locations
-    if common_locations:
-        # Merge data for common locations along time dimension
-        merged_parts = []
-        
-        # 1. Handle locations that exist in both datasets
-        for loc_name in common_locations:
-            # Select data for this location from both datasets
-            existing_loc_data = existing_ds.data.sel(location=loc_name)
-            new_loc_data = new_data_obj.data.sel(location=loc_name)
-            
-            # Align dimensions (except time)
-            for dim in set(existing_loc_data.dims) | set(new_loc_data.dims):
-                if dim == 'time':
-                    continue
-                
-                existing_size = existing_loc_data.sizes.get(dim, 0)
-                new_size = new_loc_data.sizes.get(dim, 0)
-                
-                if existing_size != new_size and existing_size > 0 and new_size > 0:
-                    logger.warning(
-                        f"Location '{loc_name}' dimension mismatch in '{dim}': "
-                        f"existing={existing_size}, new={new_size}. Reindexing to match."
-                    )
-                    max_size = max(existing_size, new_size)
-                    
-                    if existing_size < max_size:
-                        existing_loc_data = existing_loc_data.reindex(
-                            {dim: range(max_size)}, fill_value=np.nan
-                        )
-                    if new_size < max_size:
-                        new_loc_data = new_loc_data.reindex(
-                            {dim: range(max_size)}, fill_value=np.nan
-                        )
-            
-            # BEFORE concat: Save coordinates from existing dataset
-            slope_coords_to_preserve = {}
-            for coord_name in ['inclination', 'azimuth']:
-                if coord_name in existing_loc_data.coords:
-                    slope_coords_to_preserve[coord_name] = existing_loc_data[coord_name]
-            
-            # Concatenate along time dimension for this location
-            merged_loc = xr.concat(
-                [existing_loc_data, new_loc_data],
-                dim='time',
-                coords='all',
-                compat='override'
-            )
-            
-            # Remove duplicate timestamps AFTER concat (handles overlapping data)
-            if 'time' in merged_loc.dims:
-                _, unique_idx = np.unique(merged_loc['time'].values, return_index=True)
-                merged_loc = merged_loc.isel(time=sorted(unique_idx))
-                               
-            # AFTER concat: Restore preserved coordinates
-            if slope_coords_to_preserve:
-                merged_loc = merged_loc.assign_coords(slope_coords_to_preserve)
-            
-            # Ensure location is preserved as a dimension
-            if 'location' not in merged_loc.dims:
-                # Drop location coordinate if it exists to avoid conflict
-                if 'location' in merged_loc.coords:
-                    merged_loc = merged_loc.drop_vars('location')  # ✅ Drop first
-                # Add location as a new dimension with the correct value
-                merged_loc = merged_loc.expand_dims(location=[loc_name])  # ✅ Then add
-
-            merged_parts.append(merged_loc)  
-                  
-        # 2. Add locations that only exist in existing dataset
-        for loc_name in only_in_existing:
-            loc_data = existing_ds.data.sel(location=loc_name)
-            if 'location' not in loc_data.dims:
-                loc_data = loc_data.expand_dims(location=[loc_name])
-            merged_parts.append(loc_data)
-        
-        # 3. Add locations that only exist in new dataset
-        for loc_name in only_in_new:
-            loc_data = new_data_obj.data.sel(location=loc_name)
-            if 'location' not in loc_data.dims:
-                loc_data = loc_data.expand_dims(location=[loc_name])
-            merged_parts.append(loc_data)
-        
-        # Combine all location data
-        combined = xr.concat(
-            merged_parts,
-            dim='location',
-            coords='all',
-            compat='override'
-        )
-                
+    # Determine start time for reading new data; optionally trim existing
+    time_start: Optional[str] = None
+    if from_time is None:
+        if "time" in base_data and base_data.time.size > 0:
+            last_ts = pd.to_datetime(base_data.time.max().values)
+            time_start = (last_ts + pd.Timedelta(seconds=1)).isoformat()
     else:
-        # No common locations - simple concatenation along location dimension
-        # Handle dimension mismatches
-        all_dims = set(existing_ds.data.dims) | set(new_data_obj.data.dims)
-        
-        for dim in all_dims:
-            if dim in ('time', 'location'):
-                continue
-                
-            existing_size = existing_ds.data.sizes.get(dim, 0)
-            new_size = new_data_obj.data.sizes.get(dim, 0)
-            
-            if existing_size != new_size and existing_size > 0 and new_size > 0:
-                logger.warning(
-                    f"Dimension mismatch in '{dim}': existing={existing_size}, new={new_size}. "
-                    f"Incremental update may differ from full reload."
-                )
-                max_size = max(existing_size, new_size)
-                
-                if existing_size < max_size:
-                    existing_ds.data = existing_ds.data.reindex(
-                        {dim: range(max_size)}, fill_value=np.nan
-                    )
-                if new_size < max_size:
-                    new_data_obj.data = new_data_obj.data.reindex(
-                        {dim: range(max_size)}, fill_value=np.nan
-                    )        
-        # Concatenate along location dimension (different stations)
-        combined = xr.concat(
-            [existing_ds.data, new_data_obj.data],
-            dim='location',
-            join='outer',
-            coords='all',
-            compat='override'
-        )
-            
-    return xsnowDataset(combined)
+        start_ts = pd.to_datetime(from_time)
+        time_start = start_ts.isoformat()
+        if "time" in base_data:
+            mask = base_data["time"] > start_ts
+            base_filtered = base_data.sel(time=mask)
+
+    time_sel = TimeSelector(sel=slice(time_start, None)) if time_start else None
+    new_ds = read(source, time=time_sel)
+
+    if new_ds is None or new_ds.data is None or "time" not in new_ds.data or new_ds.data.time.size == 0:
+        # Nothing to append; still return trimmed data if from_time was provided
+        return existing_ds.__class__(base_filtered)
+
+    new_data = new_ds.data
+
+    # Guard against unexpected overlapping timestamps
+    if "time" in base_filtered and "time" in new_data:
+        overlap = np.intersect1d(base_filtered["time"].values, new_data["time"].values)
+        if overlap.size:
+            raise ValueError(
+                "append_latest detected overlapping timestamps between existing "
+                "and new data; expected disjoint time domains. "
+                "This may indicate an incorrect from_time or a read filter bug. "
+                f"Example overlaps (up to 5): {overlap[:5]!r}"
+            )
+
+    combined = xsnow_concat(
+        [existing_ds.__class__(base_filtered), xsnowDataset(new_data)],
+        dim="time",
+        join=join,
+        **kwargs,
+    )
+
+    return combined if isinstance(combined, xsnowDataset) else xsnowDataset(combined)
 
 
 def _encode_mapping_attrs_for_netcdf(ds: xr.Dataset) -> xr.Dataset:

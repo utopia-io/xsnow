@@ -162,7 +162,7 @@ test_real_data_consistency_eager_vs_lazy()  # Mode comparison
 2. **Incremental Update**
    ```python
    ds = read('cache.nc')
-   ds_updated = ds.update('new_data/')
+   ds_updated = ds.append_latest('new_data/')
    ds_updated.to_netcdf('cache.nc')
    ```
 

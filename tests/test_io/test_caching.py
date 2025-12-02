@@ -2,7 +2,7 @@
 """
 Tests for NetCDF caching and incremental update workflow.
 
-Focus: Efficiency of incremental updates using .update() method.
+Focus: Efficiency of incremental updates using .append_latest() method.
 
 This is the KEY workflow for processing large archives:
 1. Load data → save to NetCDF cache
@@ -102,9 +102,9 @@ StationName= CACHE_TEST
 # ============================================================================
 
 @pytest.mark.real_data
-def test_update_only_loads_new_data(real_file_subset, tmp_path):
+def test_append_latest_only_loads_new_data(real_file_subset, tmp_path):
     """
-    KEY TEST: .update() should only read data after last cached timestamp.
+    KEY TEST: .append_latest() should only read data after last cached timestamp.
     
     This is the efficiency feature that makes incremental updates fast.
     """
@@ -133,7 +133,7 @@ def test_update_only_loads_new_data(real_file_subset, tmp_path):
     
     # Update
     ds_cached = read(cache_file)
-    ds_updated = ds_cached.update(new_dir)
+    ds_updated = ds_cached.append_latest(new_dir)
     
     # Should have more timestamps
     assert ds_updated.sizes['time'] >= ds_initial.sizes['time']
@@ -145,7 +145,7 @@ def test_update_only_loads_new_data(real_file_subset, tmp_path):
 
 
 @pytest.mark.synthetic
-def test_update_with_no_new_data(tmp_path, synthetic_pro):
+def test_append_latest_with_no_new_data(tmp_path, synthetic_pro):
     """
     Test update when source contains no new data.
     
@@ -171,14 +171,14 @@ StationName= UPDATE_TEST
     
     # Try to update with same data
     ds_cached = read(cache_file)
-    ds_updated = ds_cached.update(initial_dir)
+    ds_updated = ds_cached.append_latest(initial_dir)
     
     # Should be unchanged (same number of times)
     assert ds_updated.sizes['time'] == ds_initial.sizes['time']
 
 
 @pytest.mark.synthetic
-def test_update_with_time_gap(tmp_path, synthetic_pro):
+def test_append_latest_with_time_gap(tmp_path, synthetic_pro):
     """
     Test update when there's a gap between cached and new data.
     
@@ -214,7 +214,7 @@ StationName= GAP_TEST
     ds_old.to_netcdf(cache_file)
     
     ds_cached = read(cache_file)
-    ds_updated = ds_cached.update(new_dir)
+    ds_updated = ds_cached.append_latest(new_dir)
     
     # Should have 2 timestamps with 9-day gap
     assert ds_updated.sizes['time'] == 2
@@ -225,7 +225,7 @@ StationName= GAP_TEST
 
 
 @pytest.mark.synthetic
-def test_update_with_overlapping_times(tmp_path, synthetic_pro):
+def test_append_latest_with_overlapping_times(tmp_path, synthetic_pro):
     """
     Test update when new data overlaps with cached data.
     
@@ -267,7 +267,7 @@ StationName= OVERLAP_TEST
     ds_cached_data.to_netcdf(cache_file)
     
     ds_cached = read(cache_file)
-    ds_updated = ds_cached.update(new_dir)
+    ds_updated = ds_cached.append_latest(new_dir)
     
     # Should have 3 unique times (deduplicated)
     assert ds_updated.sizes['time'] == 3
@@ -278,7 +278,7 @@ StationName= OVERLAP_TEST
 
 
 @pytest.mark.real_data
-def test_update_preserves_data_integrity(real_file_subset, tmp_path, assert_physical_validity):
+def test_append_latest_preserves_data_integrity(real_file_subset, tmp_path, assert_physical_validity):
     """
     Test that update preserves data quality and physical validity.
     """
@@ -303,7 +303,7 @@ def test_update_preserves_data_integrity(real_file_subset, tmp_path, assert_phys
     (new_dir / all_files[1].name).write_text(all_files[1].read_text())
     
     ds_cached = read(cache_file)
-    ds_updated = ds_cached.update(new_dir)
+    ds_updated = ds_cached.append_latest(new_dir)
     
     # Validate
     assert_physical_validity(ds_updated)
@@ -334,6 +334,7 @@ def test_cache_is_faster_than_full_reload(real_file_subset, tmp_path, timer):
         (initial_dir / f.name).write_text(f.read_text())
     
     ds_initial = read(initial_dir)
+    ds_initial = ds_initial.isel(time=slice(0, 300))
     cache_file = tmp_path / "cache.nc"
     ds_initial.to_netcdf(cache_file)
     
@@ -345,7 +346,7 @@ def test_cache_is_faster_than_full_reload(real_file_subset, tmp_path, timer):
     # Method 1: Incremental update
     timer.start('incremental')
     ds_cached = read(cache_file)  # Fast: from NetCDF
-    ds_incremental = ds_cached.update(new_dir)  # Fast: only new file
+    ds_incremental = ds_cached.append_latest(new_dir, join='outer')  # Fast: only new file
     timer.stop('incremental')
     
     # Method 2: Full reload
@@ -363,10 +364,9 @@ def test_cache_is_faster_than_full_reload(real_file_subset, tmp_path, timer):
     # Both should produce same result for time dimension
     assert ds_incremental.sizes['time'] == ds_full.sizes['time']
     assert ds_incremental.sizes['location'] == ds_full.sizes['location']
-    
-    # Note: slope dimension may differ with incremental updates
-    # This is expected when different files have different slope configurations
-    
+    assert ds_incremental.sizes['layer'] == ds_full.sizes['layer']
+
+
     # Incremental should be faster (or at least competitive)
     incr_time = timer.get('incremental')
     full_time = timer.get('full_reload')
@@ -401,7 +401,7 @@ def test_netcdf_roundtrip_preserves_data(real_file_subset, tmp_path, compare_dat
 # ============================================================================
 
 @pytest.mark.synthetic
-def test_update_multi_station(tmp_path, synthetic_pro):
+def test_append_latest_multi_station(tmp_path, synthetic_pro):
     """
     Test update workflow with multiple stations.
     """
@@ -438,7 +438,7 @@ StationName= STATION_{i}
     
     # Update
     ds_cached = read(cache_file)
-    ds_updated = ds_cached.update(new_dir)
+    ds_updated = ds_cached.append_latest(new_dir)
     
     # Should have 2 locations, 2 times each
     assert ds_updated.sizes['location'] == 2
@@ -451,7 +451,7 @@ StationName= STATION_{i}
 
 @pytest.mark.synthetic
 @pytest.mark.edge_case
-def test_update_with_empty_source(tmp_path, synthetic_pro):
+def test_append_latest_with_empty_source(tmp_path, synthetic_pro):
     """
     Edge case: Updating with empty source directory.
     """
@@ -469,7 +469,7 @@ def test_update_with_empty_source(tmp_path, synthetic_pro):
     empty_dir.mkdir()
     
     ds_cached = read(cache_file)
-    ds_updated = ds_cached.update(empty_dir)
+    ds_updated = ds_cached.append_latest(empty_dir)
     
     # Should return unchanged dataset
     assert ds_updated.sizes['time'] == ds_initial.sizes['time']
@@ -477,7 +477,7 @@ def test_update_with_empty_source(tmp_path, synthetic_pro):
 
 @pytest.mark.synthetic
 @pytest.mark.edge_case
-def test_update_with_corrupted_new_data(tmp_path, synthetic_pro):
+def test_append_latest_with_corrupted_new_data(tmp_path, synthetic_pro):
     """
     Edge case: New data contains corrupted file.
     """
@@ -497,7 +497,7 @@ def test_update_with_corrupted_new_data(tmp_path, synthetic_pro):
     
     # Update should handle gracefully
     ds_cached = read(cache_file)
-    ds_updated = ds_cached.update(new_dir)
+    ds_updated = ds_cached.append_latest(new_dir)
     
     # Should not crash, may return original data
     assert ds_updated is not None
@@ -544,7 +544,7 @@ def test_realistic_caching_workflow(real_file_subset, tmp_path, timer):
         
         timer.start('day2')
         ds = read(cache_file)
-        ds = ds.update(day2_dir)
+        ds = ds.append_latest(day2_dir)
         ds.to_netcdf(cache_file)
         timer.stop('day2')
         
@@ -558,7 +558,7 @@ def test_realistic_caching_workflow(real_file_subset, tmp_path, timer):
         
         timer.start('day3')
         ds = read(cache_file)
-        ds = ds.update(day3_dir)
+        ds = ds.append_latest(day3_dir)
         ds.to_netcdf(cache_file)
         timer.stop('day3')
         
