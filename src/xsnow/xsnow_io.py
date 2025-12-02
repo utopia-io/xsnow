@@ -1858,8 +1858,9 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
     Args:
         existing_ds: The dataset instance to extend.
         source: Path(s) to files or directories to read new data from (calls `read` upon it).
-        from_time: Optional explicit lower bound for new data and trimming
-            of the existing dataset. Accepts str/pandas/np datetime or datetime.
+        from_time: Subset existing data to times `< from_time` and read new data starting 
+            with `from_time` (this will already be new data). (also read Semantics above)
+            Accepts str/pandas/np datetime or datetime.
         join: Join mode for non-time dimensions forwarded to `xsnow.concat`.
         **kwargs: Additional keyword args forwarded to `xsnow.concat` like `compat` or 
             `combine_attrs`.
@@ -1880,7 +1881,7 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
         start_ts = pd.to_datetime(from_time)
         time_start = start_ts.isoformat()
         if "time" in base_data:
-            mask = base_data["time"] > start_ts
+            mask = base_data["time"] < start_ts
             base_filtered = base_data.sel(time=mask)
 
     time_sel = TimeSelector(sel=slice(time_start, None)) if time_start else None

@@ -11,7 +11,8 @@ import pytest
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from xsnow import read
+import xarray as xr
+from xsnow import read, xsnowDataset
 
 
 @pytest.fixture
@@ -64,6 +65,22 @@ Altitude= 2500
 """)
     return data_dir
 
+
+
+def _make_simple_ts(location, times, values):
+    times = pd.to_datetime(times)
+    data = xr.Dataset(
+        {
+            "TA": (("location", "time", "slope", "realization"), values.reshape(1, -1, 1, 1)),
+        },
+        coords={
+            "location": [location],
+            "time": times,
+            "slope": [0],
+            "realization": [0],
+        },
+    )
+    return xsnowDataset(data)
 
 # ============================================================================
 # BASIC UPDATE WORKFLOW TESTS
@@ -180,6 +197,49 @@ def test_append_latest_preserves_data_integrity(initial_data, update_data, tmp_p
     assert all(times[i] <= times[i+1] for i in range(len(times)-1)), "Times should be sorted"
 
 
+def test_append_latest_from_time_trims_and_appends(tmp_path):
+    """from_time should drop older data and append newer data."""
+    t1 = pd.Timestamp("2025-01-01T00:00:00")
+    t2 = pd.Timestamp("2025-01-02T00:00:00")
+    t3 = pd.Timestamp("2025-01-03T00:00:00")
+
+    existing = _make_simple_ts("A", [t1, t2], np.array([1.0, 2.0]))
+    new = _make_simple_ts("A", [t2, t3], np.array([2.5, 3.0]))
+
+    new_path = tmp_path / "new.nc"
+    new.to_netcdf(new_path)
+
+    out = existing.append_latest(new_path, from_time=t2)
+
+    assert list(out.time.values) == [t1.to_datetime64(), t2.to_datetime64(), t3.to_datetime64()]
+    np.testing.assert_allclose(out["TA"].values.squeeze(), [1.0, 2.5, 3.0])
+
+
+
+def test_append_latest_non_outer_join_preserves_time_union(tmp_path):
+    """
+    join='left' should keep the time union while restricting non-concat dims
+    to the left domain (location 'A' only).
+    """
+    t1 = pd.Timestamp("2025-01-01T00:00:00")
+    t2 = pd.Timestamp("2025-01-02T00:00:00")
+
+    existing = _make_simple_ts("A", [t1], np.array([1.0]))
+    new = _make_simple_ts("B", [t2], np.array([5.0]))
+
+    new_path = tmp_path / "new_left.nc"
+    new.to_netcdf(new_path)
+
+    out = existing.append_latest(new_path, join="left")
+
+    # Time union is preserved even with join='left'
+    assert list(out.time.values) == [t1.to_datetime64(), t2.to_datetime64()]
+    # Location domain should be restricted to the left dataset
+    assert list(out.location.values) == ["A"]
+    # The new time exists, but data for dropped location should be NaN
+    assert np.isnan(out["TA"].sel(time=t2).values).all()
+
+
 # ============================================================================
 # EFFICIENCY TESTS
 # ============================================================================
@@ -209,7 +269,7 @@ def test_append_latest_is_faster_than_full_reload(initial_data, update_data, tmp
     print(f"  Full reload: {full_time:.3f}s")
     print(f"  Incremental: {update_time:.3f}s")
     print(f"  Speedup: {full_time/update_time:.2f}x")
-    
+
     # Incremental should be faster (or at least not much slower)
     # This is a soft check as timing can vary
     assert ds_full is not None
