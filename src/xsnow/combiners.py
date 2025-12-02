@@ -605,22 +605,19 @@ def concat(
         )
         return _wrap_and_attach_relaxed(out)
 
-    # 2. Align all datasets once according to requested join
-    aligned = xr.align(*xr_objs, join=join)
-
-    # 3. Reindex just the layer_dim to the union
+    # 2. Reindex just the layer_dim to the union; let xarray handle other dims
     reindexed = []
-    for ds in aligned:
+    for ds in xr_objs:
         if layer_dim in ds.dims:
             reindexed.append(ds.reindex({layer_dim: all_layers}))
         else:
             reindexed.append(ds)
 
-    # 4. Final concat
+    # 3. Final concat (join applies only to non-concat dims)
     out = xr.concat(
         reindexed,
         dim=dim,
-        join="left",  # inputs already aligned
+        join=join,
         compat=compat,
         combine_attrs=xr_combine_attrs,
         **kwargs,

@@ -116,13 +116,10 @@ def test_concat_inner_uses_inner_for_time_but_union_for_layer():
     assert result.dims["time"] == 1
     assert result.dims["layer"] == 3
 
+    # assert explicit values
     v = result["v"]
-    # For time=1 and layer=1 both have data, so both realizations have non-NaN
-    assert not np.isnan(v.isel(realization=0, time=0, layer=1))
-    assert not np.isnan(v.isel(realization=1, time=0, layer=1))
-    # For layers that didn't exist originally, at least some entries should be NaN
-    assert np.isnan(v.isel(realization=0, time=0, layer=0))
-    assert np.isnan(v.isel(realization=1, time=0, layer=2))
+    xr.testing.assert_allclose(v.isel(realization=0, time=0, layer=1), ds1['v'].isel(time=1, layer=1))
+    xr.testing.assert_allclose(v.isel(realization=1, time=0, layer=1), ds2['v'].isel(time=0, layer=0))
 
 
 @pytest.mark.synthetic
@@ -175,6 +172,38 @@ def test_concat_right_preserves_right_time_and_union_layer():
     # At time=2, only right dataset has data; left should be NaN there
     assert not np.isnan(v.isel(realization=1, time=1, layer=1))
     assert np.isnan(v.isel(realization=0, time=1, layer=1))
+
+
+@pytest.mark.synthetic
+def test_concat_time_axis_join_left_keeps_time_union():
+    """
+    When concatenating along 'time', join='left' must not drop time coords;
+    it should still produce the union of times while applying join to
+    non-concat dims only. Layer stays unioned.
+    """
+    ds_left = _make_profile_ds([0], [0, 1], value_offset=0)
+    ds_right = _make_profile_ds([10], [1, 2], value_offset=10)
+
+    result = xsnow.concat([ds_left, ds_right], dim="time", join="left")
+
+    assert list(result["time"].values) == [0, 10]
+    assert list(result["layer"].values) == [0, 1, 2]
+
+
+@pytest.mark.synthetic
+def test_concat_time_axis_join_right_keeps_time_union():
+    """
+    When concatenating along 'time', join='right' must not drop time coords;
+    it should still produce the union of times while applying join to
+    non-concat dims only. Layer stays unioned.
+    """
+    ds_left = _make_profile_ds([0], [0, 1], value_offset=0)
+    ds_right = _make_profile_ds([10], [1, 2], value_offset=10)
+
+    result = xsnow.concat([ds_left, ds_right], dim="time", join="right")
+
+    assert list(result["time"].values) == [0, 10]
+    assert list(result["layer"].values) == [0, 1, 2]
 
 
 @pytest.mark.synthetic
