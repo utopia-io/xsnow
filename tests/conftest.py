@@ -367,7 +367,7 @@ SlopeAzi= 180
 StationName= CORRUPTED
 [DATA]
 0500,01.01.2025 12:00:00
-0501,INVALID_DATA
+0501,2,INVALID_DATA
 """
         elif corruption_type == "empty":
             content = ""
