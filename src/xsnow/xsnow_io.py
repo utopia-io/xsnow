@@ -1772,9 +1772,9 @@ def _merge_and_finalize(
     if not final_xr_dataset.attrs:
         final_xr_dataset.attrs = {
             'Conventions': 'CF-1.8',
-            'title': 'SNOWPACK model output',
-            'source': 'SNOWPACK model output (.pro and .smet files)',
-            'history': f'{pd.Timestamp.now(tz="UTC").isoformat()}: Created by xsnow.',
+            # 'title': 'SNOWPACK model output',
+            # 'source': 'SNOWPACK model output (.pro and .smet files)',
+            # 'history': f'{pd.Timestamp.now(tz="UTC").isoformat()}: Created by xsnow.',
             'crs': 'EPSG:4326'
         }
 
