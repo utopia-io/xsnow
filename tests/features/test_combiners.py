@@ -189,6 +189,18 @@ def test_concat_right_preserves_right_time_and_union_layer():
 
 
 @pytest.mark.synthetic
+@pytest.mark.parametrize("combine_attrs_mode", ["no_conflicts", "no_conflicts_rlx"])
+def test_concat_time_timezone_conflict_raises(combine_attrs_mode):
+    ds1 = _make_profile_ds([0], [0])
+    ds1 = ds1.assign_coords(time=ds1.time.assign_attrs(timezone="UTC"))
+    ds2 = _make_profile_ds([1], [0])
+    ds2 = ds2.assign_coords(time=ds2.time.assign_attrs(timezone="CET"))
+
+    with pytest.raises(ValueError):
+        xsnow.concat([ds1, ds2], dim="time", combine_attrs=combine_attrs_mode)
+
+
+@pytest.mark.synthetic
 def test_concat_time_axis_join_left_keeps_time_union():
     """
     When concatenating along 'time', join='left' must not drop time coords;
