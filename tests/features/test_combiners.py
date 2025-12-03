@@ -253,70 +253,6 @@ def test_concat_without_layer_falls_back_to_xarray():
     xr.testing.assert_identical(result, expected)
 
 
-# ---------------------------------------------------------------------
-# xsnow.combine compat / combine_attrs tests (synthetic)
-# ---------------------------------------------------------------------
-
-
-@pytest.mark.synthetic
-def test_combine_compat_no_conflicts_raises_on_value_diff():
-    ds_left = _make_simple_scalar_ds(1.0, time=0)
-    ds_right = _make_simple_scalar_ds(2.0, time=0)
-
-    with pytest.raises(ValueError):
-        xsnow.combine([ds_left, ds_right], compat="no_conflicts")
-
-
-@pytest.mark.synthetic
-def test_combine_compat_override_prefers_left_even_if_different():
-    ds_left = _make_simple_scalar_ds(1.0, time=0)
-    ds_right = _make_simple_scalar_ds(2.0, time=0)
-
-    out = xsnow.combine([ds_left, ds_right], compat="override")
-    assert float(out["v"].values.squeeze()) == 1.0
-
-
-@pytest.mark.synthetic
-def test_combine_attrs_drop_conflicts_and_no_conflicts():
-    ds_left = _make_simple_scalar_ds(1.0, time=0, attrs={"a": 1, "b": 2})
-    ds_right = _make_simple_scalar_ds(1.0, time=1, attrs={"a": 1, "b": 3})
-
-    out_drop = xsnow.combine(
-        [ds_left, ds_right],
-        compat="override",
-        combine_attrs="drop_conflicts",
-    )
-    assert out_drop.attrs == {"a": 1}
-
-    with pytest.raises(ValueError):
-        xsnow.combine(
-            [ds_left, ds_right],
-            compat="override",
-            combine_attrs="no_conflicts",
-        )
-
-
-@pytest.mark.synthetic
-def test_combine_time_timezone_conflict_raises():
-    ds_left = _make_simple_scalar_ds(1.0, time=0)
-    ds_left = ds_left.assign_coords(time=ds_left.time.assign_attrs(timezone="UTC"))
-
-    ds_right = _make_simple_scalar_ds(2.0, time=1)
-    ds_right = ds_right.assign_coords(time=ds_right.time.assign_attrs(timezone="CET"))
-
-    with pytest.raises(ValueError):
-        xsnow.combine([ds_left, ds_right], compat="override", combine_attrs="override")
-
-
-@pytest.mark.synthetic
-def test_combine_crs_conflict_raises():
-    ds_left = _make_simple_scalar_ds(1.0, time=0, attrs={"crs": "EPSG:4326"})
-    ds_right = _make_simple_scalar_ds(2.0, time=1, attrs={"crs": "EPSG:3857"})
-
-    with pytest.raises(ValueError):
-        xsnow.combine([ds_left, ds_right], compat="override", combine_attrs="override")
-
-
 @pytest.mark.synthetic
 def test_concat_single_input_passthrough():
     """
@@ -428,6 +364,106 @@ def test_concat_realization_inner_keep_layer_union(snp_snowobs_sim_xs, snp_snowo
     assert ds.sizes["slope"] == 1
     assert ds.sizes["layer"] == xs_sim.sizes["layer"]
 
+
+# ---------------------------------------------------------------------
+# xsnow.combine compat / combine_attrs tests (synthetic)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.synthetic
+def test_combine_compat_no_conflicts_raises_on_value_diff():
+    ds_left = _make_simple_scalar_ds(1.0, time=0)
+    ds_right = _make_simple_scalar_ds(2.0, time=0)
+
+    with pytest.raises(ValueError):
+        xsnow.combine([ds_left, ds_right], compat="no_conflicts")
+
+
+@pytest.mark.synthetic
+def test_combine_compat_override_prefers_left_even_if_different():
+    ds_left = _make_simple_scalar_ds(1.0, time=0)
+    ds_right = _make_simple_scalar_ds(2.0, time=0)
+
+    out = xsnow.combine([ds_left, ds_right], compat="override")
+    assert float(out["v"].values.squeeze()) == 1.0
+
+
+@pytest.mark.synthetic
+def test_combine_attrs_drop_conflicts_and_no_conflicts():
+    ds_left = _make_simple_scalar_ds(1.0, time=0, attrs={"a": 1, "b": 2})
+    ds_right = _make_simple_scalar_ds(1.0, time=1, attrs={"a": 1, "b": 3})
+
+    out_drop = xsnow.combine(
+        [ds_left, ds_right],
+        compat="override",
+        combine_attrs="drop_conflicts",
+    )
+    assert out_drop.attrs == {"a": 1}
+
+    with pytest.raises(ValueError):
+        xsnow.combine(
+            [ds_left, ds_right],
+            compat="override",
+            combine_attrs="no_conflicts",
+        )
+
+
+@pytest.mark.synthetic
+def test_combine_time_timezone_conflict_raises():
+    ds_left = _make_simple_scalar_ds(1.0, time=0)
+    ds_left = ds_left.assign_coords(time=ds_left.time.assign_attrs(timezone="UTC"))
+
+    ds_right = _make_simple_scalar_ds(2.0, time=1)
+    ds_right = ds_right.assign_coords(time=ds_right.time.assign_attrs(timezone="CET"))
+
+    with pytest.raises(ValueError):
+        xsnow.combine([ds_left, ds_right], compat="override", combine_attrs="override")
+
+
+@pytest.mark.synthetic
+def test_combine_crs_conflict_raises():
+    ds_left = _make_simple_scalar_ds(1.0, time=0, attrs={"crs": "EPSG:4326"})
+    ds_right = _make_simple_scalar_ds(2.0, time=1, attrs={"crs": "EPSG:3857"})
+
+    with pytest.raises(ValueError):
+        xsnow.combine([ds_left, ds_right], compat="override", combine_attrs="override")
+
+
+@pytest.mark.synthetic
+def test_combine_data_var_attr_conflict_modes():
+    ds_left = _make_simple_scalar_ds(1.0, time=0)
+    ds_left["v"].attrs = {"units": "K"}
+    ds_right = _make_simple_scalar_ds(2.0, time=1)
+    ds_right["v"].attrs = {"units": "C"}
+
+    with pytest.raises(ValueError):
+        xsnow.combine([ds_left, ds_right], compat="override", combine_attrs="no_conflicts")
+
+    out_drop = xsnow.combine([ds_left, ds_right], compat="override", combine_attrs="drop_conflicts")
+    assert "units" not in out_drop["v"].attrs
+
+    out_override = xsnow.combine([ds_left, ds_right], compat="override", combine_attrs="override")
+    assert out_override["v"].attrs.get("units") == "K"
+
+
+@pytest.mark.synthetic
+def test_combine_reports_multiple_conflicts_together():
+    # Attr conflict on data_var and compat conflict on data values
+    ds_left = _make_simple_scalar_ds(1.0, time=0)
+    ds_left["v"].attrs = {"units": "K"}
+
+    ds_right = _make_simple_scalar_ds(2.0, time=0)
+    ds_right["v"].attrs = {"units": "C"}
+
+    with pytest.raises(ValueError) as exc:
+        xsnow.combine([ds_left, ds_right], compat="no_conflicts", combine_attrs="no_conflicts")
+
+    msg = str(exc.value)
+    assert "compat='no_conflicts'" in msg
+    assert "'v'" in msg
+    assert "combine_attrs='no_conflicts'" in msg
+    assert "'units'" in msg
+    assert "'K'" in msg
 
 
 

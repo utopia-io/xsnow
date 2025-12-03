@@ -153,12 +153,22 @@ def _combine_two(
       prefer-left semantics via `combine_first` (left wins where non-null,
       right fills gaps).
     """
+    attr_conflicts: list[str] = []
+    compat_conflicts: list[str] = []
+
     # Stash coord attrs before any reindexing (reindex can drop attrs)
     coord_attrs_pre: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
     for cname in set(left.coords) | set(right.coords):
         attrs_l = dict(left[cname].attrs) if cname in left.coords else {}
         attrs_r = dict(right[cname].attrs) if cname in right.coords else {}
         coord_attrs_pre[cname] = (attrs_l, attrs_r)
+
+    # Stash data_var attrs before alignment
+    var_attrs_pre: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
+    for vname in set(left.data_vars) | set(right.data_vars):
+        attrs_l = dict(left[vname].attrs) if vname in left.data_vars else {}
+        attrs_r = dict(right[vname].attrs) if vname in right.data_vars else {}
+        var_attrs_pre[vname] = (attrs_l, attrs_r)
 
     # 1) Reindex to target coords
     target_coords = _compute_target_coords_for_two(
@@ -258,9 +268,7 @@ def _combine_two(
             if both_valid.any():
                 diff = (var_left != var_right).where(both_valid, False)
                 if bool(diff.any()):
-                    raise ValueError(
-                        f"Incompatible values for variable '{name}' under compat='{compat}'."
-                    )
+                    compat_conflicts.append(f"'{name}'")
 
         if is_profile_var:
             # Profile-wise choice: never mix layers.
@@ -277,7 +285,20 @@ def _combine_two(
             continue
         out = out.assign_coords({cname: right.coords[cname]})
 
-    # 5) Merge coord attrs
+    # 5) Merge attrs: dataset, coords, data_vars
+    conflicts: list[str] = []
+
+    # Dataset-level attrs (including crs)
+    merged_ds_attrs = _merge_attrs(
+        left.attrs,
+        right.attrs,
+        combine_attrs,
+        ensure_no_conflicts_in=("crs",),
+        conflicts=attr_conflicts,
+    )
+    out.attrs = merged_ds_attrs
+
+    # Coord attrs (including timezone)
     merged_coords = {}
     for cname, coord in out.coords.items():
         attrs_left, attrs_right = coord_attrs_pre.get(cname, ({}, {}))
@@ -288,6 +309,7 @@ def _combine_two(
             attrs_right,
             combine_attrs,
             ensure_no_conflicts_in=ensure_keys,
+            conflicts=attr_conflicts,
         )
         coord_out = coord.copy()
         coord_out.attrs = merged_attrs
@@ -295,6 +317,33 @@ def _combine_two(
 
     if merged_coords:
         out = out.assign_coords(merged_coords)
+
+    # Data variable attrs
+    for vname in out.data_vars:
+        attrs_left, attrs_right = var_attrs_pre.get(vname, ({}, {}))
+        merged_attrs = _merge_attrs(
+            attrs_left,
+            attrs_right,
+            combine_attrs,
+            conflicts=attr_conflicts,
+        )
+        out[vname].attrs = merged_attrs
+
+    if attr_conflicts or compat_conflicts:
+        parts = []
+        if compat_conflicts:
+            parts.append(
+                f"Incompatible values under compat='{compat}': ["
+                + ", ".join(sorted(set(compat_conflicts)))
+                + "]"
+            )
+        if attr_conflicts:
+            parts.append(
+                f"Attribute conflicts under combine_attrs='{combine_attrs}': {'{'}"
+                + "; ".join(attr_conflicts)
+                + "}"
+            )
+        raise ValueError(" & ".join(parts))
 
     return out
 
@@ -314,6 +363,7 @@ def _merge_attrs(
     attrs_right: Mapping[str, Any],
     mode: str,
     ensure_no_conflicts_in: Iterable[str] | None = None,
+    conflicts: list[str] | None = None,
 ) -> dict[str, Any]:
     if mode not in {"drop", "no_conflicts", "drop_conflicts", "override"}:
         raise ValueError(f"Invalid combine_attrs mode: {mode!r}")
@@ -323,6 +373,7 @@ def _merge_attrs(
 
     out = dict(attrs_left)
     ensure_keys = set(ensure_no_conflicts_in or [])
+    conflicts_list = conflicts if conflicts is not None else []
 
     for key, right_val in attrs_right.items():
         if key not in out:
@@ -331,13 +382,19 @@ def _merge_attrs(
 
         left_val = out[key]
 
-        if _values_equal(left_val, right_val):
+        # For override we skip equality checks except for ensure_keys handled below
+        if mode != "override":
+            equal = _values_equal(left_val, right_val)
+        else:
+            equal = True  # treat as equal for normal keys
+
+        if equal:
             continue  # keep existing (left) value
 
         if mode == "override":
             continue  # keep left
         elif mode == "no_conflicts":
-            raise ValueError(f"Attribute conflict for key '{key}': {left_val!r} vs {right_val!r}")
+            conflicts_list.append(f"'{key}': {left_val!r} vs {right_val!r}")
         elif mode == "drop_conflicts":
             out.pop(key, None)
 
@@ -345,7 +402,7 @@ def _merge_attrs(
     for key in ensure_keys:
         if key in attrs_left and key in attrs_right:
             if not _values_equal(attrs_left[key], attrs_right[key]):
-                raise ValueError(f"Attribute conflict for key '{key}': {attrs_left[key]!r} vs {attrs_right[key]!r}")
+                conflicts_list.append(f"Attribute conflict for key '{key}': {attrs_left[key]!r} vs {attrs_right[key]!r}")
 
     return out
 
@@ -369,7 +426,8 @@ def combine(
     - explicit domain selection per core dimension
     - deterministic conflict resolution (“prefer left” semantics)
     - preservation of variables from all inputs.
-    - metadata handling as requested by user
+    - metadata handling (dataset, coords, and data_var attrs) with configurable
+      conflict policies.
 
     Parameters
     ----------
@@ -404,12 +462,13 @@ def combine(
         different non-null values.
 
     combine_attrs : {"drop", "no_conflicts", "drop_conflicts", "override"}, optional
-        How to reconcile Dataset-level- & coord- attrs across inputs. 
-        "override" keeps left attrs, "drop" removes all attrs,
-        "no_conflicts" raises on differences, "drop_conflicts" keeps only
-        keys with identical values. A conflicting `timezone` attribute (on `time` coord)
-        and a conflicting dataset-level `crs` attribute also raise for "override"/"drop_conflicts"
-        to prevent silent mismatches. No safety check is performed for "drop".
+        How to reconcile attrs across dataset, coords, and data_vars.
+        "override" keeps left attrs (only critical keys enforced), "drop"
+        removes all attrs, "no_conflicts" raises on any differing value,
+        "drop_conflicts" drops keys that differ. Conflicting `time.timezone`
+        and dataset-level `crs` always raise (except when combine_attrs="drop")
+        to prevent silent mismatches. Conflicts are accumulated and reported
+        together.
 
     Returns
     -------
@@ -481,14 +540,10 @@ def combine(
     jt = join_time
     js = join_slope
     jr = join_realization
-    base_attrs = dict(base_ds.attrs)
-
     if compat not in {"broadcast_equals", "no_conflicts", "override"}:
         raise ValueError(f"Invalid compat mode: {compat!r}")
     if combine_attrs not in {"drop", "no_conflicts", "drop_conflicts", "override"}:
         raise ValueError(f"Invalid combine_attrs mode: {combine_attrs!r}")
-    if combine_attrs == "drop":
-        base_attrs = {}
 
     for obj in iterator:
         ds_next = _as_xr_dataset(obj)
@@ -504,17 +559,6 @@ def combine(
             compat=compat,
             combine_attrs=combine_attrs,
         )
-        base_attrs = _merge_attrs(
-            base_attrs,
-            ds_next.attrs,
-            combine_attrs,
-            ensure_no_conflicts_in=("crs",),
-        )
-        base_ds.attrs = dict(base_attrs)
-
-    # Ensure attrs respect combine_attrs even when only one object was provided
-    base_ds.attrs = dict(base_attrs)
-
     # Wrap result in the same xsnowDataset class as the first wrapper
     return base_wrapper.__class__(base_ds)
 
