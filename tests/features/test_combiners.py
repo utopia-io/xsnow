@@ -48,6 +48,20 @@ def _make_profile_ds(time_vals, layer_vals, value_offset=0.0, name="v"):
     )
 
 
+def _make_simple_scalar_ds(value: float, time: int, attrs=None) -> xr.Dataset:
+    attrs = attrs or {}
+    return xr.Dataset(
+        {"v": (("location", "time", "slope", "realization"), np.array([[[[value]]]]))},
+        coords={
+            "location": ["A"],
+            "time": [time],
+            "slope": [0],
+            "realization": [0],
+        },
+        attrs=attrs,
+    )
+
+
 # =========================================================================
 # xsnow.concat tests -- SYNTHETIC DATA
 # =========================================================================
@@ -225,6 +239,70 @@ def test_concat_without_layer_falls_back_to_xarray():
     result = xsnow.concat([ds1, ds2], dim="realization", join="inner")
 
     xr.testing.assert_identical(result, expected)
+
+
+# ---------------------------------------------------------------------
+# xsnow.combine compat / combine_attrs tests (synthetic)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.synthetic
+def test_combine_compat_no_conflicts_raises_on_value_diff():
+    ds_left = _make_simple_scalar_ds(1.0, time=0)
+    ds_right = _make_simple_scalar_ds(2.0, time=0)
+
+    with pytest.raises(ValueError):
+        xsnow.combine([ds_left, ds_right], compat="no_conflicts")
+
+
+@pytest.mark.synthetic
+def test_combine_compat_override_prefers_left_even_if_different():
+    ds_left = _make_simple_scalar_ds(1.0, time=0)
+    ds_right = _make_simple_scalar_ds(2.0, time=0)
+
+    out = xsnow.combine([ds_left, ds_right], compat="override")
+    assert float(out["v"].values.squeeze()) == 1.0
+
+
+@pytest.mark.synthetic
+def test_combine_attrs_drop_conflicts_and_no_conflicts():
+    ds_left = _make_simple_scalar_ds(1.0, time=0, attrs={"a": 1, "b": 2})
+    ds_right = _make_simple_scalar_ds(1.0, time=1, attrs={"a": 1, "b": 3})
+
+    out_drop = xsnow.combine(
+        [ds_left, ds_right],
+        compat="override",
+        combine_attrs="drop_conflicts",
+    )
+    assert out_drop.attrs == {"a": 1}
+
+    with pytest.raises(ValueError):
+        xsnow.combine(
+            [ds_left, ds_right],
+            compat="override",
+            combine_attrs="no_conflicts",
+        )
+
+
+@pytest.mark.synthetic
+def test_combine_time_timezone_conflict_raises():
+    ds_left = _make_simple_scalar_ds(1.0, time=0)
+    ds_left = ds_left.assign_coords(time=ds_left.time.assign_attrs(timezone="UTC"))
+
+    ds_right = _make_simple_scalar_ds(2.0, time=1)
+    ds_right = ds_right.assign_coords(time=ds_right.time.assign_attrs(timezone="CET"))
+
+    with pytest.raises(ValueError):
+        xsnow.combine([ds_left, ds_right], compat="override", combine_attrs="override")
+
+
+@pytest.mark.synthetic
+def test_combine_crs_conflict_raises():
+    ds_left = _make_simple_scalar_ds(1.0, time=0, attrs={"crs": "EPSG:4326"})
+    ds_right = _make_simple_scalar_ds(2.0, time=1, attrs={"crs": "EPSG:3857"})
+
+    with pytest.raises(ValueError):
+        xsnow.combine([ds_left, ds_right], compat="override", combine_attrs="override")
 
 
 @pytest.mark.synthetic

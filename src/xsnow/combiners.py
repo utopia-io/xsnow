@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Optional, Literal, Union, Sequence, Dict, Any
+from typing import Iterable, Optional, Literal, Union, Sequence, Dict, Any, Mapping
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -132,6 +132,8 @@ def _combine_two(
     join_realization: Optional[str],
     core_dims: Sequence[str] = ("location", "time", "slope", "realization"),
     layer_dim: str = "layer",
+    compat: str = "no_conflicts",
+    combine_attrs: str = "override",
 ) -> xr.Dataset:
     """
     Combine two xarray.Datasets with profile-aware logic:
@@ -151,6 +153,13 @@ def _combine_two(
       prefer-left semantics via `combine_first` (left wins where non-null,
       right fills gaps).
     """
+    # Stash coord attrs before any reindexing (reindex can drop attrs)
+    coord_attrs_pre: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
+    for cname in set(left.coords) | set(right.coords):
+        attrs_l = dict(left[cname].attrs) if cname in left.coords else {}
+        attrs_r = dict(right[cname].attrs) if cname in right.coords else {}
+        coord_attrs_pre[cname] = (attrs_l, attrs_r)
+
     # 1) Reindex to target coords
     target_coords = _compute_target_coords_for_two(
         left,
@@ -243,6 +252,16 @@ def _combine_two(
         is_layered = layer_dim in var_left.dims
         is_profile_var = has_all_core_dims and is_layered
 
+        # Compatibility checks (only if requested and both have data)
+        if compat != "override":
+            both_valid = var_left.notnull() & var_right.notnull()
+            if both_valid.any():
+                diff = (var_left != var_right).where(both_valid, False)
+                if bool(diff.any()):
+                    raise ValueError(
+                        f"Incompatible values for variable '{name}' under compat='{compat}'."
+                    )
+
         if is_profile_var:
             # Profile-wise choice: never mix layers.
             merged = xr.where(mask_l, var_left, xr.where(mask_r, var_right, var_left))
@@ -258,6 +277,76 @@ def _combine_two(
             continue
         out = out.assign_coords({cname: right.coords[cname]})
 
+    # 5) Merge coord attrs
+    merged_coords = {}
+    for cname, coord in out.coords.items():
+        attrs_left, attrs_right = coord_attrs_pre.get(cname, ({}, {}))
+        ensure_keys = ["timezone"] if cname == "time" else None
+
+        merged_attrs = _merge_attrs(
+            attrs_left,
+            attrs_right,
+            combine_attrs,
+            ensure_no_conflicts_in=ensure_keys,
+        )
+        coord_out = coord.copy()
+        coord_out.attrs = merged_attrs
+        merged_coords[cname] = coord_out
+
+    if merged_coords:
+        out = out.assign_coords(merged_coords)
+
+    return out
+
+
+def _values_equal(a: Any, b: Any) -> bool:
+    try:
+        return bool(np.array_equal(a, b))
+    except Exception:
+        try:
+            return bool(a == b)
+        except Exception:
+            return False
+
+
+def _merge_attrs(
+    attrs_left: Mapping[str, Any],
+    attrs_right: Mapping[str, Any],
+    mode: str,
+    ensure_no_conflicts_in: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    if mode not in {"drop", "no_conflicts", "drop_conflicts", "override"}:
+        raise ValueError(f"Invalid combine_attrs mode: {mode!r}")
+
+    if mode == "drop":
+        return {}
+
+    out = dict(attrs_left)
+    ensure_keys = set(ensure_no_conflicts_in or [])
+
+    for key, right_val in attrs_right.items():
+        if key not in out:
+            out[key] = right_val
+            continue
+
+        left_val = out[key]
+
+        if _values_equal(left_val, right_val):
+            continue  # keep existing (left) value
+
+        if mode == "override":
+            continue  # keep left
+        elif mode == "no_conflicts":
+            raise ValueError(f"Attribute conflict for key '{key}': {left_val!r} vs {right_val!r}")
+        elif mode == "drop_conflicts":
+            out.pop(key, None)
+
+    # Explicitly enforce conflict checking for critical keys even under override
+    for key in ensure_keys:
+        if key in attrs_left and key in attrs_right:
+            if not _values_equal(attrs_left[key], attrs_right[key]):
+                raise ValueError(f"Attribute conflict for key '{key}': {attrs_left[key]!r} vs {attrs_right[key]!r}")
+
     return out
 
 
@@ -268,6 +357,8 @@ def combine(
     join_time: Optional[Literal["left", "right", "outer", "inner"]] = None,
     join_slope: Optional[Literal["left", "right", "outer", "inner"]] = None,
     join_realization: Optional[Literal["left", "right", "outer", "inner"]] = None,
+    compat: Literal["broadcast_equals", "no_conflicts", "override"] = "override",
+    combine_attrs: Literal["drop", "no_conflicts", "drop_conflicts", "override"] = "override",
 ) -> xsnowDataset:
     """
     Combine multiple xsnowDataset/xarray.Dataset objects into a single dataset
@@ -277,7 +368,8 @@ def combine(
     - profile-wise merging of variables (no layer mixing)
     - explicit domain selection per core dimension
     - deterministic conflict resolution (“prefer left” semantics)
-    - preservation of variables and metadata from all inputs.
+    - preservation of variables from all inputs.
+    - metadata handling as requested by user
 
     Parameters
     ----------
@@ -305,6 +397,20 @@ def combine(
                                              but time domain from the left dataset
         - join="inner" and no overrides    → intersection on all core dims
 
+    compat : {"broadcast_equals", "no_conflicts", "override"}, optional
+        Conflict policy for overlapping non-null values of the same variable.
+        "override" (default) keeps the left values without checking;
+        "no_conflicts" and "broadcast_equals" raise if both sides have
+        different non-null values.
+
+    combine_attrs : {"drop", "no_conflicts", "drop_conflicts", "override"}, optional
+        How to reconcile Dataset-level- & coord- attrs across inputs. 
+        "override" keeps left attrs, "drop" removes all attrs,
+        "no_conflicts" raises on differences, "drop_conflicts" keeps only
+        keys with identical values. A conflicting `timezone` attribute (on `time` coord)
+        and a conflicting dataset-level `crs` attribute also raise for "override"/"drop_conflicts"
+        to prevent silent mismatches. No safety check is performed for "drop".
+
     Returns
     -------
     xsnowDataset
@@ -322,26 +428,25 @@ def combine(
         Dimensions other than {'location', 'time', 'slope', 'realization'}:
 
         - are *not* controlled by the join/join_* settings.
-        - are aligned using xarray’s default `align(..., join="outer")`.
+        - are aligned using xarray's default `align(..., join="outer")`.
         - typically broadcast correctly if possible (e.g. ensemble members).
         - may raise xarray broadcasting/alignment errors if incompatible.
 
         This means additional dimensions such as:
 
-            "flavor_component", "ensemble_member",
-            "scenario", "alt_model_dim", ...
+            "run", "scenario", "alternative_model_dim", ...
 
         are supported naturally without special-case logic.
 
-        Users who require explicit domain control for a new dimension may add it
-        to the core-dimension list in the future.
+        Users who require explicit domain control for a new dimension may
+        request that feature in a gitlab issue.
 
     **3. Conflict resolution prefers the leftmost dataset.**
         In overlapping coordinates:
         - Missing data (NaNs) are filled from the right.
         - Non-missing conflicting values always favor the left dataset.
 
-        This provides deterministic behavior and matches xarray’s
+        This provides deterministic behavior and matches xarray's
         `combine_first` semantics but with controlled join domains.
 
     **4. Layer variables are never mixed.**
@@ -376,9 +481,18 @@ def combine(
     jt = join_time
     js = join_slope
     jr = join_realization
+    base_attrs = dict(base_ds.attrs)
+
+    if compat not in {"broadcast_equals", "no_conflicts", "override"}:
+        raise ValueError(f"Invalid compat mode: {compat!r}")
+    if combine_attrs not in {"drop", "no_conflicts", "drop_conflicts", "override"}:
+        raise ValueError(f"Invalid combine_attrs mode: {combine_attrs!r}")
+    if combine_attrs == "drop":
+        base_attrs = {}
 
     for obj in iterator:
         ds_next = _as_xr_dataset(obj)
+
         base_ds = _combine_two(
             base_ds,
             ds_next,
@@ -387,7 +501,19 @@ def combine(
             join_time=jt,
             join_slope=js,
             join_realization=jr,
+            compat=compat,
+            combine_attrs=combine_attrs,
         )
+        base_attrs = _merge_attrs(
+            base_attrs,
+            ds_next.attrs,
+            combine_attrs,
+            ensure_no_conflicts_in=("crs",),
+        )
+        base_ds.attrs = dict(base_attrs)
+
+    # Ensure attrs respect combine_attrs even when only one object was provided
+    base_ds.attrs = dict(base_attrs)
 
     # Wrap result in the same xsnowDataset class as the first wrapper
     return base_wrapper.__class__(base_ds)
@@ -630,6 +756,9 @@ def concat(
 def fill_gaps_with(
     self: xsnowDataset,
     other: Union[xsnowDataset, xr.Dataset],
+    *,
+    compat: Literal["broadcast_equals", "no_conflicts", "override"] = "override",
+    combine_attrs: Literal["drop", "no_conflicts", "drop_conflicts", "override"] = "override",
 ) -> xsnowDataset:
     """
     Fill gaps in this dataset using another dataset, without introducing
@@ -661,6 +790,10 @@ def fill_gaps_with(
     ----------
     other : xsnowDataset or xarray.Dataset
         Dataset from which gaps in `self` will be filled.
+    compat : {"broadcast_equals", "no_conflicts", "override"}, optional
+        Compatibility check for overlapping non-null values. (see `xsnow.combine?`)
+    combine_attrs : {"drop", "no_conflicts", "drop_conflicts", "override"}, optional
+        How to reconcile attrs across inputs. (see `xsnow.combine?`)
 
     Returns
     -------
@@ -670,6 +803,8 @@ def fill_gaps_with(
     combined = combine(
         objects=[self, other],
         join="left",
+        compat=compat,
+        combine_attrs=combine_attrs,
     )
     # Ensure we preserve the concrete xsnowDataset subclass of `self`
     return self.__class__(combined.data)
@@ -679,6 +814,9 @@ def fill_gaps_with(
 def overwrite_with(
     self: xsnowDataset,
     other: Union[xsnowDataset, xr.Dataset],
+    *,
+    compat: Literal["broadcast_equals", "no_conflicts", "override"] = "override",
+    combine_attrs: Literal["drop", "no_conflicts", "drop_conflicts", "override"] = "override",
 ) -> xsnowDataset:
     """
     Overwrite this dataset with another dataset on the union of coordinates.
@@ -710,6 +848,10 @@ def overwrite_with(
     other : xsnowDataset or xarray.Dataset
         Dataset whose information should overwrite or extend `self`.
         It is treated as “more recent / more authoritative” in overlaps.
+    compat : {"broadcast_equals", "no_conflicts", "override"}, optional
+        Compatibility check for overlapping non-null values. (see `xsnow.combine?`)
+    combine_attrs : {"drop", "no_conflicts", "drop_conflicts", "override"}, optional
+        How to reconcile attrs across inputs. (see `xsnow.combine?`)
 
     Returns
     -------
@@ -719,6 +861,8 @@ def overwrite_with(
     combined = combine(
         objects=[other, self],  # 'other' is leftmost --> preferred in combine()
         join="outer",
+        compat=compat,
+        combine_attrs=combine_attrs,
     )
     # Rewrap in the same xsnowDataset subclass as self
     return self.__class__(combined.data)
