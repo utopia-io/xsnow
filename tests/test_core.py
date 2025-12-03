@@ -12,6 +12,7 @@ import xarray as xr
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import time
 
 from xsnow import xsnowDataset, single_profile_timeseries
 
@@ -23,7 +24,9 @@ def sample_xr_dataset():
     layer_coords = [0, 1, 2]
     data = {
         'height': (('location', 'time', 'layer'), np.array([[[0.1, 0.2, 0.3]]])),
-        'density': (('location', 'time', 'layer'), np.array([[[100, 200, 300]]]))
+        'density': (('location', 'time', 'layer'), np.array([[[100, 200, 300]]])),
+        'profile_status': (('location', 'time'), np.array([[1]], dtype='i1')),
+        'HS': (('location', 'time'), np.array([[0.3]])),
     }
     coords = {
         'location': ['STATION_A'],
@@ -137,8 +140,34 @@ def test_dir(sample_xsnow_dataset):
 
 def test_repr(sample_xsnow_dataset):
     """Tests __repr__()"""
+    st = sample_xsnow_dataset.__repr__(force_details=True)
+    assert "Profiles" in st
+    assert "1 total | 1 valid | 1 with HS>0" in st
+
+def test_repr_skips_lazy_details(monkeypatch, sample_xsnow_dataset):
+    """__repr__ should avoid computing when details are flagged as lazy."""
+    monkeypatch.setattr(xsnowDataset, "_should_compute_repr_detail", lambda self, arr, force_details=False: False)
     st = repr(sample_xsnow_dataset)
-    assert 'Location' in st
+    assert "<lazy/uncomputed> valid" in st
+    assert "<lazy/uncomputed> with HS>0" in st
+    assert ".print(force_details=True)" in st
+
+def test_repr_respects_auto_compute_threshold(monkeypatch, sample_xsnow_dataset):
+    """repr should honor the auto-compute threshold and return quickly."""
+    max_secs = 0.05
+    monkeypatch.setattr(xsnowDataset, "_REPR_MAX_AUTO_COMPUTE_SECONDS", max_secs)
+    monkeypatch.setattr(xsnowDataset, "_is_lazy_dataarray", lambda self, arr: True)
+    monkeypatch.setattr(xsnowDataset, "_estimate_repr_seconds", lambda self, arr: max_secs * 10)
+    monkeypatch.setattr(xsnowDataset, "_compute_int_sum", lambda self, arr: (_ for _ in ()).throw(AssertionError("should not compute")))
+
+    t0 = time.time()
+    st = repr(sample_xsnow_dataset)
+    elapsed = time.time() - t0
+
+    assert "<lazy/uncomputed> valid" in st
+    assert "<lazy/uncomputed> with HS>0" in st
+    assert ".print(force_details=True)" in st
+    assert elapsed < 2 * max_secs
 
 def test_contains(sample_xsnow_dataset):
     """Tests __contains__()"""

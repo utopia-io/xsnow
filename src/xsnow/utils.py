@@ -6,6 +6,7 @@ These functions are designed to be used across different modules to reduce
 code duplication and improve maintainability.
 """
 
+import builtins
 import logging
 import os
 from typing import Union, Any, Optional
@@ -14,6 +15,7 @@ import numpy as np
 import xarray as xr
 
 from .core import xsnowDataset
+from .plugin import register_xsnowDataset_method
 
 LEVEL_PREFIX = {
     logging.DEBUG: "[d]",
@@ -187,3 +189,25 @@ def get_backend(array_like: Union[xsnowDataset, xr.Dataset, xr.DataArray]) -> An
             return np
             
     return np
+
+@register_xsnowDataset_method
+def print(*values: Any, force_details: bool = False, **kwargs: Any) -> None:
+    """
+    xsnow-aware print that can force detailed __repr__ on xsnowDataset objects.
+
+    Args:
+        *values: Values to print.
+        force_details: If True, call xsnowDataset.__repr__(force_details=True)
+            on any xsnowDataset arguments.
+        **kwargs: Passed through to built-in print (sep, end, file, flush).
+    """
+    rendered = []
+    for val in values:
+        if isinstance(val, xsnowDataset):
+            try:
+                rendered.append(val.__repr__(force_details=force_details))
+            except TypeError:
+                rendered.append(val.__repr__())
+        else:
+            rendered.append(val)
+    builtins.print(*rendered, **kwargs)

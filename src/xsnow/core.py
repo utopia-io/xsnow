@@ -62,6 +62,10 @@ class xsnowDataset:
     enabling seamless use of the powerful xarray API.
     """
 
+    _REPR_MAX_AUTO_COMPUTE_SECONDS = 3
+    _REPR_EST_BYTES_PER_SEC = 200 * 1024 * 1024  # heuristic throughput used for repr auto-compute
+    _REPR_DASK_BLOCK_OVERHEAD = 0.005  # assumed per-block scheduler overhead for lazy arrays
+
     def __init__(self, source: xr.Dataset):
         """
         Initializes the xsnowDataset from an existing xarray.Dataset.
@@ -96,7 +100,7 @@ class xsnowDataset:
         """Support unpickling for multiprocessing."""
         self.data = state['data']
         
-    def __repr__(self) -> str:
+    def __repr__(self, *, force_details: bool = False) -> str:
         """Provides a developer-friendly, summary representation of the dataset."""
         if self.data is None:
             return "<xsnowDataset (empty)>"
@@ -104,24 +108,28 @@ class xsnowDataset:
         try:
             locations = self.data.sizes.get('location', 0)
             times = self.data.sizes.get('time', 0)
-            start_time = pd.to_datetime(self.data.time.min().values).strftime('%Y-%m-%d') if times > 0 else 'N/A'
-            end_time = pd.to_datetime(self.data.time.max().values).strftime('%Y-%m-%d') if times > 0 else 'N/A'
+            time_range = self._format_time_range(times, force_details=force_details)
+            profile_summary, profile_note = self._format_profile_summary(force_details=force_details)
             
             xr_repr = repr(self.data).splitlines()
             xr_repr[0] = f"employing the {xr_repr[0]}"
             indented_xr_repr = "\n".join("    " + line for line in xr_repr)
 
+            profiles_line = f"  Profiles:   {profile_summary}"
+            if profile_note:
+                indent = " " * len("  Profiles:   ")
+                profiles_line = f"{profiles_line}\n{indent}{profile_note}"
+
             return (
                 f"<xsnowDataset>\n"
                 f"  Locations:  {locations}\n"
-                f"  Timestamps: {times} ({start_time}--{end_time})\n"
-                f"  Profiles:   NotImplementedYet\n"  # @Ron, we could sum up the profile status
-                                                      # tracker here to display sum of valid profiles
-                                                      # with snow on the ground
+                f"  Timestamps: {times} ({time_range})\n"
+                f"{profiles_line}\n"
                 f"\n{indented_xr_repr}"
             )
         except Exception:
             return "<xsnowDataset with data (exception occurred on summary)>"
+
 
     def __getattr__(self, name: str):
         """
@@ -243,6 +251,178 @@ class xsnowDataset:
             """Return a new xsnowDataset instance wrapping new_data."""
             return self.__class__(new_data)
 
+    def _format_time_range(self, times: int, force_details: bool) -> str:
+        """Return a cheap time range summary if possible."""
+        if times <= 0 or 'time' not in self.data:
+            return "N/A"
+
+        time_da = self.data['time']
+        if not self._should_compute_repr_detail(time_da, force_details):
+            return "lazy/uncomputed (use force_details=True)"
+
+        try:
+            start_da = self._maybe_compute(time_da.min())
+            end_da = self._maybe_compute(time_da.max())
+            start_time = self._to_datetime_str(start_da)
+            end_time = self._to_datetime_str(end_da)
+            return f"{start_time}--{end_time}"
+        except Exception:
+            return "unavailable"
+
+    def _format_profile_summary(self, force_details: bool) -> tuple[str, Optional[str]]:
+        """Return profile counts, avoiding heavy computation on lazy data."""
+        try:
+            profile_status = self.data['profile_status']
+            total_profiles = int(profile_status.size)
+        except Exception:
+            return "unavailable", None
+
+        lazy_detected = False
+        est_seconds: Optional[float] = None
+
+        if self._should_compute_repr_detail(profile_status, force_details):
+            valid_profiles = self._compute_int_sum(profile_status >= 1)
+            if valid_profiles is None:
+                valid_profiles = "unavailable"
+        else:
+            lazy_detected = True
+            est_seconds = self._estimate_repr_seconds(profile_status)
+            valid_profiles = "<lazy/uncomputed>"
+
+        try:
+            hs = self.data['HS']
+            if self._should_compute_repr_detail(hs, force_details):
+                hs_mask = (hs > 0)
+                try:
+                    hs_mask = hs_mask.broadcast_like(profile_status)
+                except Exception:
+                    hs_mask, _ = xr.align(hs_mask, profile_status, join="outer")
+                hs_positive_val = self._compute_int_sum(hs_mask)
+                hs_positive = hs_positive_val if hs_positive_val is not None else "unavailable"
+            else:
+                lazy_detected = True
+                est_hs = self._estimate_repr_seconds(hs)
+                if est_seconds is None:
+                    est_seconds = est_hs
+                elif est_hs is not None:
+                    est_seconds = max(est_seconds, est_hs)
+                hs_positive = "<lazy/uncomputed>"
+        except Exception:
+            hs_positive = "unavailable"
+
+        summary = f"{total_profiles} total | {valid_profiles} valid | {hs_positive} with HS>0"
+
+        note = None
+        if lazy_detected:
+            est_str = f"{est_seconds:.2f} s" if est_seconds is not None else "? s"
+            note = f"Compute profile sums with xsnowDataset.print(force_details=True) (estimated {est_str})"
+
+        return summary, note
+
+    def _should_compute_repr_detail(self, array: xr.DataArray, force_details: bool) -> bool:
+        """Decide whether to compute a detail for repr based on laziness and size."""
+        if force_details:
+            return True
+        if not self._is_lazy_dataarray(array):
+            return True
+
+        est_seconds = self._estimate_repr_seconds(array)
+        if est_seconds is None:
+            return False
+        return est_seconds <= self._REPR_MAX_AUTO_COMPUTE_SECONDS
+
+    def _maybe_compute(self, obj: Any) -> Any:
+        """Compute lazy objects if possible, otherwise return as-is."""
+        compute = getattr(obj, "compute", None)
+        if callable(compute):
+            try:
+                return compute()
+            except Exception:
+                return obj
+        return obj
+
+    def _compute_int_sum(self, array: xr.DataArray) -> Optional[int]:
+        """Compute a sum over a mask-like array, returning an int or None on failure."""
+        try:
+            summed = array.sum()
+            summed = self._maybe_compute(summed)
+            return self._to_int_scalar(summed)
+        except Exception:
+            return None
+
+    def _to_int_scalar(self, value: Any) -> Optional[int]:
+        """Extract an int from scalars, xarray, numpy, or dask objects."""
+        try:
+            return int(np.asarray(getattr(value, "values", value)).item())
+        except Exception:
+            try:
+                return int(np.asarray(value).item())
+            except Exception:
+                return None
+
+    def _to_datetime_str(self, value: Any) -> str:
+        """Convert a datetime-like scalar to a YYYY-MM-DD string."""
+        scalar = self._to_int_scalar(value)
+        if scalar is None:
+            try:
+                arr = np.asarray(getattr(value, "values", value))
+                scalar = arr.item()
+            except Exception:
+                scalar = None
+        try:
+            return pd.to_datetime(scalar).strftime('%Y-%m-%d')
+        except Exception:
+            return "unavailable"
+
+    def _is_lazy_dataarray(self, array: xr.DataArray) -> bool:
+        """Heuristic check for dask/lazy-backed arrays without importing dask."""
+        data = getattr(array, "data", array)
+        chunks = getattr(data, "chunks", None)
+        if chunks not in (None, ()):
+            return True
+
+        module_name = getattr(type(data), "__module__", "").lower()
+        if "dask" in module_name or "lazy" in module_name:
+            return True
+
+        return hasattr(data, "compute") and not isinstance(data, np.ndarray)
+
+    def _estimate_repr_seconds(self, array: xr.DataArray) -> Optional[float]:
+        """Estimate compute time from nbytes and chunk overhead for repr decisions."""
+        data = getattr(array, "data", array)
+
+        chunks = getattr(data, "chunks", None)
+        nblocks = None
+        if chunks not in (None, ()):
+            try:
+                nblocks = 1
+                for axis_chunks in chunks:
+                    nblocks *= len(axis_chunks)
+            except Exception:
+                nblocks = None
+
+        try:
+            dtype = getattr(array, "dtype", None)
+            size = getattr(array, "size", None)
+            nbytes = getattr(data, "nbytes", None)
+            if nbytes is None and (dtype is not None and size is not None):
+                nbytes = size * dtype.itemsize
+            base = (nbytes / self._REPR_EST_BYTES_PER_SEC) if nbytes is not None else None
+        except Exception:
+            base = None
+
+        if self._is_lazy_dataarray(array):
+            overhead = (nblocks * self._REPR_DASK_BLOCK_OVERHEAD) if nblocks is not None else None
+            if base is None and overhead is None:
+                return None
+            if base is None:
+                return overhead
+            if overhead is None:
+                return base
+            return base + overhead
+
+        return base
+
     def copy(self, deep: bool = False) -> 'xsnowDataset':
         """
         Returns a copy of the dataset.
@@ -271,8 +451,6 @@ class xsnowDataset:
             raise ValueError("Cannot copy an empty dataset.")
         copied_xr_dataset = self.data.copy(deep=deep)
         return self.__class__(copied_xr_dataset)
-
-# In core.py, inside the xsnowDataset class
 
     def merge_smet(
         self,
