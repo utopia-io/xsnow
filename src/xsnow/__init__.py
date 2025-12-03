@@ -28,5 +28,7 @@ __all__ = [
     'TimeSelector',
     'LocationSelector',
     'SlopeSelector',
-    'RealizationSelector'
+    'RealizationSelector',
+    'combine',
+    'concat',
 ]
