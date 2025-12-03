@@ -53,10 +53,7 @@ from .selectors import (
 )
 from .plugin import register_xsnowDataset_method
 from .combiners import concat as xsnow_concat
-
-# Configure a basic logger for this module
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from .utils import get_logger
 
 # --- Dynamic Mapping from Registry ---
 CODE_TO_NAME_MAP = {
@@ -143,9 +140,9 @@ def read(
         >>> # Force eager loading for quick access
         >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
     """
-# --- Step 1: Setup ---
-    if logger is None or logger is True:
-        logger = logging.getLogger(__name__)
+    # --- Step 1: Setup ---
+    logger_input = None if isinstance(logger, bool) else logger
+    logger = get_logger(__name__, logger=logger_input)
 
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
@@ -205,7 +202,7 @@ def read(
 
     # --- Step 5: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
-    return _merge_and_finalize(all_datasets, time_sel, location_sel, slope_sel, realization_sel)
+    return _merge_and_finalize(all_datasets, time_sel, location_sel, slope_sel, realization_sel, logger=logger)
 
 
 
@@ -689,7 +686,8 @@ def _sanitize_station_name(name: str) -> str:
 
 
 
-def _handle_duplicate_names(names: List[str]) -> List[str]:
+def _handle_duplicate_names(names: List[str], 
+                            logger: Optional[logging.Logger]=None) -> List[str]:
     """
     Ensure all station names are unique by appending indices to duplicates.
     
@@ -722,6 +720,9 @@ def _handle_duplicate_names(names: List[str]) -> List[str]:
     occurrence_counter = {}
     unique_names = []
     warned = set()
+
+    logger_input = None if isinstance(logger, bool) else logger
+    log = get_logger(__name__, logger=logger_input)
     
     for name in names:
         if name in duplicates:
@@ -731,8 +732,7 @@ def _handle_duplicate_names(names: List[str]) -> List[str]:
             
             # Warn once per duplicate name
             if name not in warned:
-                logger = logging.getLogger(__name__)
-                logger.warning(
+                log.warning(
                     f"Duplicate station name '{name}' found. "
                     f"Renaming all occurrences with indices (e.g., {name}_0, {name}_1, ...)."
                 )
@@ -762,8 +762,8 @@ def _read_pro_metadata(
     If the file cannot be read, falls back to filename-based station_name
     and NaNs for others.
     """
-    if logger is None:
-        logger = logging.getLogger(__name__)
+    logger_input = None if isinstance(logger, bool) else logger
+    logger = get_logger(__name__, logger=logger_input)
 
     file_path = Path(filepath)
 
@@ -965,8 +965,8 @@ def _read_pro_raw(
             - temp_profiles (List[Dict]): A list where each element is a
               dictionary representing a single snow profile at one timestamp.
     """
-    if logger is None:
-        logger = logging.getLogger(__name__)
+    logger_input = None if isinstance(logger, bool) else logger
+    logger = get_logger(__name__, logger=logger_input)
 
     file_path = Path(filepath)
     if not file_path.exists():
@@ -1453,8 +1453,8 @@ def read_smet(
         An xarray.Dataset containing the SMET data, or None if the file
         cannot be parsed or contains no data in the specified time range.
     """
-    if logger is None:
-        logger = logging.getLogger(__name__)
+    logger_input = None if isinstance(logger, bool) else logger
+    logger = get_logger(__name__, logger=logger_input)
 
     file_path = Path(filepath)
     if not file_path.exists():
@@ -1634,7 +1634,8 @@ def _merge_and_finalize(
     time: Optional[TimeSelector],
     location: Optional[LocationSelector],
     slope: Optional[SlopeSelector],
-    realization: Optional[RealizationSelector]
+    realization: Optional[RealizationSelector],
+    logger: Optional[logging.Logger],
 ) -> Optional[xsnowDataset]:
     """
     Merges, re-indexes, and applies final filters to the datasets.
@@ -1676,7 +1677,7 @@ def _merge_and_finalize(
     
     # HANDLE DUPLICATE STATION NAMES
     station_names = list(grouped_by_location.keys())
-    unique_names = _handle_duplicate_names(station_names)
+    unique_names = _handle_duplicate_names(station_names, logger=logger)
     
     # Rename locations if duplicates were found
     if unique_names != station_names:
