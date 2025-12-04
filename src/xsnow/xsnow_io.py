@@ -405,11 +405,12 @@ def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
             return _create_pro_dataset(metadata, profiles, max_layers, add_sh)
     except Exception as e:
         # Can't use logger in worker, just return None
-        logging.warning(f"Warning: Failed to process {filepath.name}: {e}")
+        logging.error(f"Failed to process {filepath.name}: {e}")
         try:
-            metadata = _read_pro_metadata(filepath)
+            metadata = _read_pro_metadata(filepath, throw=False)
             return _create_pro_dataset(metadata, [], max_layers, empty_profile_status_default=-1)
         except Exception as e:
+            logging.warning(f"Cannot even recover minimal metadata for {filepath.name}. Dropping from dataset. | {e}")
             return None
 
 
@@ -528,12 +529,13 @@ def _read_pro_files_lazy(
                         chunks=chunks
                     )
             except Exception as e:
-                logger.warning(f"Failed to process {fp.name}: {e}")
+                logger.error(f"Failed to process {fp.name}: {e}")
                 try:
-                    metadata = _read_pro_metadata(fp)
+                    metadata = _read_pro_metadata(fp, logger=logger, throw=False)
                     ds = _create_pro_dataset(metadata, [], max_layers_to_use, use_dask=True,
                                              chunks=chunks, empty_profile_status_default=-1)
                 except Exception as e:
+                    logger.warning(f"Cannot even recover minimal metadata for {fp.name}. Dropping from dataset. | {e}")
                     pass
             if ds is not None:
                 final_datasets.append(ds)
@@ -613,12 +615,12 @@ def _create_dataset_from_pro_file(
             
     except Exception as e:
         try:
-            metadata = _read_pro_metadata(filepath)
+            metadata = _read_pro_metadata(filepath, logger=logger, throw=False)
             ds = _create_pro_dataset(metadata, [], max_layers, empty_profile_status_default=-1)
-            logger.warning(f"Cannot parse {filepath.name}", exc_info=e)
+            logger.error(f"Cannot parse {filepath.name}", exc_info=e)
             return ds
         except Exception as e:
-            logger.error(f"Failed to create dataset from {filepath.name}", exc_info=e)
+            logger.warning(f"Warning: Cannot even recover minimal metadata for {filepath.name}. Dropping from dataset. | {e}")
 
     
     return None
@@ -744,6 +746,7 @@ def _handle_duplicate_names(names: List[str],
 def _read_pro_metadata(
     filepath: Union[str, Path],
     logger: Optional[logging.Logger] = None,
+    throw: bool = True,
 ) -> Dict[str, Any]:
     """
     Read minimal metadata from a .pro file header.
@@ -764,7 +767,7 @@ def _read_pro_metadata(
     file_path = Path(filepath)
 
     metadata: Dict[str, Any] = {
-        "station_name": _sanitize_station_name(file_path.stem),
+        "station_name": np.nan,
         "latitude": np.nan,
         "longitude": np.nan,
         "altitude": np.nan,
@@ -773,10 +776,15 @@ def _read_pro_metadata(
     }
 
     if not file_path.exists():
-        logger.error(f"File not found while reading metadata: {filepath}")
-        return metadata
+        if throw:
+            raise FileNotFoundError(f"File not found while reading metadata: {filepath}")
+        else:
+            metadata["station_name"] = _sanitize_station_name(file_path.stem)
+            return metadata
+
 
     in_header = False
+    has_header = False
 
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -786,6 +794,7 @@ def _read_pro_metadata(
                     continue
                 if line == "[STATION_PARAMETERS]":
                     in_header = True
+                    has_header = True
                     continue
                 if line.startswith('[') and line != "[STATION_PARAMETERS]":
                     # any other section ends header
@@ -800,9 +809,16 @@ def _read_pro_metadata(
         logger.warning(f"Error reading metadata from {file_path.name}: {exc}")
         # keep fallback metadata
 
-    # Station name fallback / sanitize
-    if not metadata.get("station_name"):
-        metadata["station_name"] = file_path.stem
+    if not has_header and throw:
+        raise ValueError(f"No declared header exists in {file_path.name}.")
+
+    name = metadata.get("station_name")
+    if name is None or pd.isna(name) or (isinstance(name, str) and not name.strip()):
+        if throw:
+            raise ValueError(f"No StationName found in {file_path.name}.")
+        else:
+            metadata["station_name"] = file_path.stem
+
     metadata["station_name"] = _sanitize_station_name(metadata["station_name"])
 
     return metadata
@@ -856,22 +872,23 @@ def _parse_pro_profiles_from_lines(
                         new_profile_data[key] = val
                 profile_data = new_profile_data
 
-        height_array = profile_data.get('height', np.array([]))
-        if height_array.size == 0:
-            return
+        parse_error = profile_data.get('_parse_error', False)
+        if not parse_error:
+            height_array = profile_data.get('height', np.array([]))
+            if height_array.size == 0:
+                return
+            has_snow = np.nanmax(height_array) > 0
+            sh_data = profile_data.get('SH_at_surface', np.array([]))
+            has_sh = add_surface_sh_as_layer and sh_data.size >= 3 and sh_data[0] > 0
 
-        has_snow = np.nanmax(height_array) > 0
-
-        sh_data = profile_data.get('SH_at_surface', np.array([]))
-        has_sh = add_surface_sh_as_layer and sh_data.size >= 3 and sh_data[0] > 0
-
-        if has_snow or has_sh:
+        if parse_error or has_snow or has_sh:
             temp_profiles.append(profile_data)
 
     def _parse_and_process_block(lines_block: List[str]):
         if not lines_block:
             return
         profile_dict: Dict[str, Any] = {}
+        parse_error = False
 
         # First line is timestamp line: "0500,<timestamp>"
         ts_line = lines_block[0]
@@ -888,10 +905,13 @@ def _parse_pro_profiles_from_lines(
                     data_values = data_parts[1:]  # skip declared layer count
                     profile_dict[param_name] = np.array(data_values, dtype=float)
             except (ValueError, IndexError):
-                logger.warning(
+                parse_error = True
+                logger.error(
                     f"Could not parse data in {file_path.name} at timestamp "
                     f"{profile_dict.get('timestamp', 'unknown')}. Line: '{profile_line}'"
                 )
+        if parse_error:
+            profile_dict['_parse_error'] = True
         _process_and_append_profile(profile_dict)
 
     current_profile_lines: List[str] = []
@@ -975,7 +995,7 @@ def _read_pro_raw(
         lines = f.readlines()
 
     # 1) metadata from header
-    metadata = _read_pro_metadata(filepath, logger=logger)
+    metadata = _read_pro_metadata(filepath, logger=logger, throw=True)
 
     # 2) profiles from data section
     temp_profiles = _parse_pro_profiles_from_lines(
@@ -1129,7 +1149,7 @@ def _create_pro_dataset(
 
     all_params = sorted({
         key for p in profiles for key in p
-        if key not in ['timestamp', 'SH_at_surface']
+        if key not in ['timestamp', 'SH_at_surface', '_parse_error']
     })
 
     data_vars: Dict[str, Any] = {}
@@ -1217,9 +1237,12 @@ def _create_pro_dataset(
 
     for i, profile in enumerate(profiles):
         status = 0  # default: no data otherwise proven differently
-        height = profile.get('height', None)
-        if height is not None and len(height) >= 1:
-            status = 1
+        if profile.get('_parse_error', False):
+            status = -1
+        else:
+            height = profile.get('height', None)
+            if height is not None and len(height) >= 1:
+                status = 1
         status_np[0, i, 0, 0] = status
 
     if use_dask:

@@ -358,14 +358,16 @@ StationName= GOOD
 StationName= BAD
 [DATA]
 0500,01.01.2025 12:00:00
-0501,CORRUPTED
+0501,2,CORRUPTED
 """)
     
     ds = read(tmp_path, lazy=False)
     
     # Should load only the good file
     assert ds is not None
-    assert ds.sizes['location'] == 1
+    assert ds.sizes['location'] == 2
+    assert (ds.profile_status>0).sum() == 1  # only 1 valid
+    assert ds.sel(location="BAD").profile_status.values == -1
 
 
 def test_eager_loading_empty_directory(tmp_path):

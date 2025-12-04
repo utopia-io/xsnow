@@ -323,14 +323,14 @@ class TestErrorRecoveryWorkflows:
         
         # Add corrupted file
         synthetic_pro.corrupted(tmp_path, corruption_type='malformed_data')
-        
+
         # Should load valid files
         ds = read(tmp_path, lazy=False)
         
         assert ds is not None
         assert ds.sizes['location'] == 6
-        assert ds.profile_status.sum() == 5  # only 5 valid
-        assert ds.sel(location="CORRUPTED").profile_status.values == 0
+        assert (ds.profile_status>0).sum() == 5  # only 5 valid
+        assert ds.sel(location="CORRUPTED").profile_status.values == -1
     
     def test_workflow_with_missing_optional_data(self, synthetic_pro, tmp_path):
         """Test workflow when optional data is missing."""

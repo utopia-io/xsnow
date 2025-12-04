@@ -284,14 +284,16 @@ StationName= GOOD_STATION
 StationName= BAD_STATION
 [DATA]
 0500,01.01.2025 12:00:00
-0501,CORRUPTED_DATA
+0501,2,CORRUPTED_DATA
 0502,2,100,200
 """)
     
     # Should still load the good file
     ds = read(tmp_path)
     assert ds is not None
-    assert ds.sizes['location'] == 1  # Only the good file
+    assert ds.sizes['location'] == 2
+    assert (ds.profile_status>0).sum() == 1  # only 1 valid
+    assert ds.sel(location="BAD_STATION").profile_status.values == -1
 
 
 def test_empty_file_handling(tmp_path):
@@ -311,7 +313,9 @@ StationName= GOOD_STATION
     
     ds = read(tmp_path)
     assert ds is not None
-    assert ds.sizes['location'] == 1
+    assert ds.sizes['location'] == 2
+    assert (ds.profile_status>0).sum() == 1  # only 1 valid
+    assert ds.sel(location='empty').profile_status.values == -1
 
 
 def test_file_with_no_valid_profiles(tmp_path):
@@ -358,7 +362,10 @@ StationName= STATION_{i}
     
     ds = read(tmp_path)
     assert ds is not None
-    assert ds.sizes['location'] == 3  # Only good files loaded
+    assert ds.sizes['location'] == 5
+    assert (ds.profile_status>0).sum() == 3  # only 3 valid
+    assert ds.sel(location='bad_1').profile_status.values == -1
+    assert ds.sel(location='bad_2').profile_status.values == -1
 
 
 # ============================================================================

@@ -293,13 +293,11 @@ def test_parse_empty_file(tmp_path, synthetic_pro):
     to ensure all datasets have proper identification.
     """
     empty = synthetic_pro.corrupted(tmp_path, "empty")
-    
-    metadata, profiles = _read_pro_raw(empty)
-    
-    # Should have fallback station name from filename
-    assert 'station_name' in metadata
-    assert metadata['station_name'] == 'corrupted_empty'
-    assert profiles == []
+
+    # Should raise: ValueError: No declared header exists in corrupted_empty.pro.
+    with pytest.raises(ValueError):
+        metadata, profiles = _read_pro_raw(empty)
+
 
 
 @pytest.mark.synthetic
@@ -568,10 +566,16 @@ Latitude= 46.5
         filepath = tmp_path / "my_station.pro"
         filepath.write_text(content)
         
-        from xsnow.xsnow_io import _read_pro_raw
-        metadata, profiles = _read_pro_raw(filepath)
-        
+        from xsnow.xsnow_io import _read_pro_raw, _read_pro_metadata
+        metadata = _read_pro_metadata(filepath, throw=False)
         assert metadata['station_name'] == 'my_station'
+
+        with pytest.raises(ValueError):
+            metadata, profiles = _read_pro_raw(filepath)
+
+        with pytest.raises(ValueError):
+            metadata = _read_pro_metadata(filepath)
+        
     
     def test_sanitize_on_parse(self, tmp_path):
         """Test that names are sanitized during parsing."""

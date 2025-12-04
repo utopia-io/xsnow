@@ -325,7 +325,9 @@ def test_lazy_with_single_file_empty_profiles(tmp_path, synthetic_pro):
     ds = read(tmp_path, lazy=True, n_cpus_use=2)
     
     # Should handle gracefully
-    assert ds is None or ds.sizes['time'] == 0
+    assert ds is not None
+    assert ds.sizes['time'] == 3
+    assert (ds.profile_status == -1).all().compute()
 
 
 # ============================================================================
