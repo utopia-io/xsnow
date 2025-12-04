@@ -141,8 +141,7 @@ def read(
         >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
     """
     # --- Step 1: Setup ---
-    logger_input = None if isinstance(logger, bool) else logger
-    logger = get_logger(__name__, logger=logger_input)
+    logger = get_logger(__name__, logger=logger)
 
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
@@ -163,7 +162,7 @@ def read(
     
     # Continue with normal .pro/.smet file processing
     try:
-        pro_files, smet_files = _resolve_filepaths(source, recursive)
+        pro_files, smet_files = _resolve_filepaths(source, recursive, logger)
     except (FileNotFoundError, TypeError) as e:
         logger.error(e)
         return None
@@ -710,6 +709,7 @@ def _handle_duplicate_names(names: List[str],
     """
     if len(names) == len(set(names)):
         return names
+    log = get_logger(__name__, logger=logger)
     
     # Find duplicates
     from collections import Counter
@@ -720,9 +720,6 @@ def _handle_duplicate_names(names: List[str],
     occurrence_counter = {}
     unique_names = []
     warned = set()
-
-    logger_input = None if isinstance(logger, bool) else logger
-    log = get_logger(__name__, logger=logger_input)
     
     for name in names:
         if name in duplicates:
@@ -762,8 +759,7 @@ def _read_pro_metadata(
     If the file cannot be read, falls back to filename-based station_name
     and NaNs for others.
     """
-    logger_input = None if isinstance(logger, bool) else logger
-    logger = get_logger(__name__, logger=logger_input)
+    logger = get_logger(__name__, logger=logger)
 
     file_path = Path(filepath)
 
@@ -965,8 +961,7 @@ def _read_pro_raw(
             - temp_profiles (List[Dict]): A list where each element is a
               dictionary representing a single snow profile at one timestamp.
     """
-    logger_input = None if isinstance(logger, bool) else logger
-    logger = get_logger(__name__, logger=logger_input)
+    logger = get_logger(__name__, logger=logger)
 
     file_path = Path(filepath)
     if not file_path.exists():
@@ -1584,7 +1579,7 @@ def read_smet(
     return ds
 
 def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]],
-                       recursive: bool = False
+                       recursive: bool = False, logger: Optional[logging.Logger]=None,
 ) -> Tuple[List[Path], List[Path]]:
     """
     Resolves the source argument into separate lists of .pro and .smet files.
@@ -1840,12 +1835,12 @@ def _coerce_realization(sel: Optional[RealizationLike]) -> Optional[RealizationS
 @register_xsnowDataset_method
 def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path],
                   from_time: Optional[Union[str, datetime, pd.Timestamp, np.datetime64]]=None,
-                  join: str='left', **kwargs,
+                  join: str='left', logger: Optional[logging.Logger]=None, **kwargs,
 ) -> xsnowDataset:
     """
     Incrementally extend a dataset by appending newer timestamps from files.
 
-    This method is convenience wrapper for time selection, read, and concat.
+    This method is a convenience wrapper for time selection, read, and concat.
     Semantics:
         1) Determine a start time:
             - If `from_time` is None, use (max(existing time) + 1s).
@@ -1863,14 +1858,21 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
             with `from_time` (this will already be new data). (also read Semantics above)
             Accepts str/pandas/np datetime or datetime.
         join: Join mode for non-time dimensions forwarded to `xsnow.concat`.
+        logger: Optional logger to use for status/warning messages. If None, a
+            logger is created.
         **kwargs: Additional keyword args forwarded to `xsnow.concat` like `compat` or 
             `combine_attrs`.
 
     Returns:
         xsnowDataset with the appended data (or trimmed-only if nothing new).
     """
+    logger = get_logger(__name__, logger=logger)
+
     base_data = existing_ds.data if existing_ds.data is not None else xr.Dataset()
     base_filtered = base_data
+    base_max_ts = None
+    if "time" in base_data and base_data.time.size > 0:
+        base_max_ts = pd.to_datetime(base_data.time.max().values)
 
     # Determine start time for reading new data; optionally trim existing
     time_start: Optional[str] = None
@@ -1881,18 +1883,54 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
     else:
         start_ts = pd.to_datetime(from_time)
         time_start = start_ts.isoformat()
+        if base_max_ts is not None and start_ts < base_max_ts:
+            logger.warning(
+                "append_latest called with from_time earlier than existing max time; "
+                "this trims existing data from that point onward and may introduce "
+                "time gaps if the new source does not fully cover that range."
+            )
         if "time" in base_data:
             mask = base_data["time"] < start_ts
             base_filtered = base_data.sel(time=mask)
 
     time_sel = TimeSelector(sel=slice(time_start, None)) if time_start else None
-    new_ds = read(source, time=time_sel)
+    new_ds = read(source, time=time_sel, logger=logger)
+    new_data = new_ds.data if new_ds is not None else None
 
-    if new_ds is None or new_ds.data is None or "time" not in new_ds.data or new_ds.data.time.size == 0:
+    def _new_coord_values(base: xr.Dataset, incoming: xr.Dataset) -> Dict[str, np.ndarray]:
+        new_coords: Dict[str, np.ndarray] = {}
+        for coord_name, coord in incoming.coords.items():
+            if coord_name == "time" or coord.ndim != 1:
+                continue
+            incoming_vals = np.asarray(coord.values).ravel()
+            base_vals = np.asarray(base[coord_name].values).ravel() if coord_name in base else np.array([])
+            incoming_vals = incoming_vals[~pd.isna(incoming_vals)]
+            base_vals = base_vals[~pd.isna(base_vals)]
+            diff = np.setdiff1d(incoming_vals, base_vals, assume_unique=True)
+            if diff.size:
+                new_coords[coord_name] = diff
+        return new_coords
+
+    def _preview(vals: np.ndarray) -> str:
+                    as_list = list(np.atleast_1d(vals))
+                    shown = ", ".join(map(repr, as_list[:5]))
+                    suffix = "..." if len(as_list) > 5 else ""
+                    return f"[{shown}{suffix}]"
+
+    if new_data is None or "time" not in new_data or new_data.time.size == 0:
+        if new_data is not None and join in {"outer", "right"}:
+            extra_coords = _new_coord_values(base_filtered, new_data)
+            if extra_coords:
+                preview = ", ".join(
+                    f"{name}: {_preview(vals)}" for name, vals in extra_coords.items()
+                )
+                logger.warning(
+                    "append_latest found no new time steps, but new coordinate values exist "
+                    f"that would be merged under join='{join}': {preview}. "
+                    "Check time filters or data completeness."
+                )
         # Nothing to append; still return trimmed data if from_time was provided
         return existing_ds.__class__(base_filtered)
-
-    new_data = new_ds.data
 
     # Guard against unexpected overlapping timestamps
     if "time" in base_filtered and "time" in new_data:
@@ -1911,6 +1949,17 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
         join=join,
         **kwargs,
     )
+    # Log
+    new_times = combined.time.where(combined.time >= pd.to_datetime(time_start), drop=True)
+    new_time_start = pd.to_datetime(new_times[0].values).isoformat()
+    new_time_end = pd.to_datetime(new_times.max().values).isoformat()
+    logger.info(f"Appended {len(new_times)} new timestamps: {new_time_start}--{new_time_end}")
+    extra_coords = _new_coord_values(base_filtered, combined)
+    if extra_coords:
+        preview = ", ".join(
+                        f"{name}: {_preview(vals)}" for name, vals in extra_coords.items()
+                    )
+        logger.debug(f"Added new coordinates: {preview}")
 
     return combined if isinstance(combined, xsnowDataset) else xsnowDataset(combined)
 
@@ -1938,7 +1987,8 @@ def _encode_mapping_attrs_for_netcdf(ds: xr.Dataset) -> xr.Dataset:
     return ds_out
 
 @register_xsnowDataset_method
-def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
+def to_netcdf(ds: xsnowDataset, path: Union[str, Path],
+              logger: Optional[logging.Logger]=None, **kwargs):
     """
     Saves the dataset to a NetCDF file.
 
@@ -1951,10 +2001,12 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     Args:
         ds (xsnowDataset): The dataset instance to save.
         path (Union[str, Path]): The destination file path for the .nc file.
+        logger (logging.Logger): An optional preconfigured logger instance.
         **kwargs: Additional keyword arguments passed to `xarray.Dataset.to_netcdf()`.
     """
     if ds.data is None:
         raise ValueError("Cannot save an empty dataset.")
+    logger = get_logger(__name__, logger=logger)
     
     # Create a copy to avoid modifying the original
     ds_to_save = ds.to_xarray().copy()
