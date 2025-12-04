@@ -837,6 +837,7 @@ def _parse_pro_profiles_from_lines(
     """Parse [DATA] section into temp_profiles list."""
     temp_profiles: List[Dict] = []
     in_data = False
+    has_data = False
 
     start_ts = pd.to_datetime(datetime_start, format='mixed') if datetime_start else None
     end_ts = pd.to_datetime(datetime_end, format='mixed') if datetime_end else None
@@ -921,6 +922,7 @@ def _parse_pro_profiles_from_lines(
             continue
         if stripped == '[DATA]':
             in_data = True
+            has_data = True
             continue
         if stripped.startswith('[') and stripped != '[DATA]':
             # any other section ends data region
@@ -937,6 +939,9 @@ def _parse_pro_profiles_from_lines(
                 current_profile_lines.append(stripped)
     # last block
     _parse_and_process_block(current_profile_lines)
+
+    if not has_data:
+        raise ValueError(f"No [DATA] section found in {file_path.name}.")
 
     return temp_profiles
 
