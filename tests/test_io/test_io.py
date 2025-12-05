@@ -204,7 +204,7 @@ def test_single_smet_file_metadata(data_directory):
     assert 'crs' in ds.attrs
     assert 'timezone' in ds['time'].attrs
     assert ds['time'].attrs['timezone'] == 'UTC+01:00'  # converted from int
-    for var in list(ds.variables):
+    for var in list(ds.data_vars):
         assert 'units' in ds[var].attrs
         assert 'standard_name' in ds[var].attrs
 
@@ -216,7 +216,7 @@ def test_single_pro_file_metadata(data_directory):
     ds = read(pro_file)
     assert ds.attrs
     assert 'crs' in ds.attrs
-    for var in list(ds.variables):
+    for var in list(ds.data_vars):
         assert 'units' in ds[var].attrs
         assert 'standard_name' in ds[var].attrs
     assert 'timezone' in ds['time'].attrs

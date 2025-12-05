@@ -21,7 +21,8 @@ from xsnow.xsnow_io import (
     _create_pro_dataset,
     read_smet,
     _scan_pro_for_max_layers,
-    _get_layer_count
+    _get_layer_count,
+    _read_pro_metadata
 )
 
 
@@ -308,11 +309,11 @@ def test_parse_file_no_data_section(tmp_path, synthetic_pro):
     """
     no_data = synthetic_pro.corrupted(tmp_path, "no_data_section")
     
-    metadata, profiles = _read_pro_raw(no_data)
-    
-    # Should parse headers but have no profiles
-    assert len(metadata) > 0  # Has station parameters
-    assert profiles == []  # No data
+    with pytest.raises(ValueError):
+        metadata, profiles = _read_pro_raw(no_data)
+
+    metadata = _read_pro_metadata(no_data, throw=False)
+    assert metadata['station_name'] == "NO_DATA"
 
 
 @pytest.mark.synthetic
@@ -548,7 +549,6 @@ Longitude= 10.5
         filepath = tmp_path / "test.pro"
         filepath.write_text(content)
         
-        from xsnow.xsnow_io import _read_pro_raw
         metadata, profiles = _read_pro_raw(filepath)
         
         assert metadata['station_name'] == 'TEST_STATION'
@@ -566,7 +566,6 @@ Latitude= 46.5
         filepath = tmp_path / "my_station.pro"
         filepath.write_text(content)
         
-        from xsnow.xsnow_io import _read_pro_raw, _read_pro_metadata
         metadata = _read_pro_metadata(filepath, throw=False)
         assert metadata['station_name'] == 'my_station'
 
@@ -590,7 +589,6 @@ StationName= Test Station@2024
         filepath = tmp_path / "test.pro"
         filepath.write_text(content)
         
-        from xsnow.xsnow_io import _read_pro_raw
         metadata, profiles = _read_pro_raw(filepath)
         
         assert '@' not in metadata['station_name']
