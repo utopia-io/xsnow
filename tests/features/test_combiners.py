@@ -486,6 +486,12 @@ def _prep_two_mergable_datasets(xs: xsnowDataset) -> tuple[xsnowDataset, xsnowDa
         * overwrite top layer at another overlap time
         * set all non-null density values to -999 during the overlap
     """
+    
+    reduce_dims = [d for d in xs.HS.dims if d != "time"]
+    mask = (xs.HS > 0).all(dim=reduce_dims)
+    first_all = xs["time"].where(mask, drop=True).min()
+    xs = xs.sel(time=slice(first_all, None))
+
     base = xs.data
     times = base["time"].values
     assert times.size >= 48, "Need at least 48 timestamps to create overlap windows."
