@@ -278,7 +278,7 @@ class SyntheticProGenerator:
         heights = ','.join(str(0.1 * i) for i in range(1, n_layers + 1))
         densities = ','.join(str(100 * i) for i in range(1, n_layers + 1))
         
-        content = f"""[STATION_PARAMETERS]
+        station_params = f"""[STATION_PARAMETERS]
 StationName= {station_name}
 Latitude= 46.5
 Longitude= 10.5
@@ -286,11 +286,22 @@ Altitude= 2500
 SlopeAngle= 35
 SlopeAzi= 180
 
+"""
+        if n_layers > 0:
+            data_sect = f"""
 [DATA]
 0500,{timestamp}
 0501,{n_layers},{heights}
 0502,{n_layers},{densities}
 """
+        else:
+            data_sect= f"""
+[DATA]
+0500,{timestamp}
+0501,{n_layers}
+0502,{n_layers}
+"""
+        content = station_params + data_sect
         filepath = tmp_path / f"{station_name}.pro"
         filepath.write_text(content)
         return filepath
@@ -374,8 +385,23 @@ StationName= CORRUPTED
             
         elif corruption_type == "no_data_section":
             content = """[STATION_PARAMETERS]
-StationName= NO_DATA
+StationName= NO_DATA_SECTION
 Latitude= 46.5
+"""
+        elif corruption_type == "empty_data_section":
+            content = """[STATION_PARAMETERS]
+StationName= EMPTY_DATA_SECTION
+Latitude= 46.5
+[DATA]
+"""
+        elif corruption_type == "good_and_bad_data":
+            content = """[STATION_PARAMETERS]
+StationName= GOOD_AND_BAD_TIME
+[DATA]
+0500,01.01.2025 12:00:00
+0501,2,0.1,0.2
+0500,01.01.2025 13:00:00
+0501,2,INVALID_DATA
 """
         elif corruption_type == "invalid_timestamp":
             content = """[STATION_PARAMETERS]

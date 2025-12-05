@@ -307,14 +307,28 @@ def test_parse_file_no_data_section(tmp_path, synthetic_pro):
     """
     Edge case: File with headers but no [DATA] section.
     """
-    no_data = synthetic_pro.corrupted(tmp_path, "no_data_section")
+    no_data_section = synthetic_pro.corrupted(tmp_path, "no_data_section")
     
     with pytest.raises(ValueError):
-        metadata, profiles = _read_pro_raw(no_data)
+        metadata, profiles = _read_pro_raw(no_data_section)
 
-    metadata = _read_pro_metadata(no_data, throw=False)
-    assert metadata['station_name'] == "NO_DATA"
+    metadata = _read_pro_metadata(no_data_section, throw=False)
+    assert metadata['station_name'] == "NO_DATA_SECTION"
 
+
+@pytest.mark.synthetic
+@pytest.mark.edge_case
+def test_parse_file_empty_data_section(tmp_path, synthetic_pro):
+    """
+    Edge case: File with headers and [DATA] section but no data content.
+    """
+    empty_data_section = synthetic_pro.corrupted(tmp_path, "empty_data_section")
+
+    with pytest.raises(ValueError):
+        metadata, profiles = _read_pro_raw(empty_data_section)
+
+    metadata = _read_pro_metadata(empty_data_section, throw=False)
+    assert metadata['station_name'] == "EMPTY_DATA_SECTION"
 
 @pytest.mark.synthetic
 def test_read_pro_raw_soil_removal_all_soil(tmp_path, synthetic_pro):

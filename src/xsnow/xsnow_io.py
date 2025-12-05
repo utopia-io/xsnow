@@ -873,17 +873,10 @@ def _parse_pro_profiles_from_lines(
                         new_profile_data[key] = val
                 profile_data = new_profile_data
 
-        parse_error = profile_data.get('_parse_error', False)
-        if not parse_error:
-            height_array = profile_data.get('height', np.array([]))
-            if height_array.size == 0:
-                return
-            has_snow = np.nanmax(height_array) > 0
-            sh_data = profile_data.get('SH_at_surface', np.array([]))
-            has_sh = add_surface_sh_as_layer and sh_data.size >= 3 and sh_data[0] > 0
-
-        if parse_error or has_snow or has_sh:
-            temp_profiles.append(profile_data)
+        height_array = profile_data.get('height', np.array([]))
+        if height_array.size == 0:
+            profile_data['height'] = np.array([np.nan])
+        temp_profiles.append(profile_data)
 
     def _parse_and_process_block(lines_block: List[str]):
         if not lines_block:
@@ -922,7 +915,6 @@ def _parse_pro_profiles_from_lines(
             continue
         if stripped == '[DATA]':
             in_data = True
-            has_data = True
             continue
         if stripped.startswith('[') and stripped != '[DATA]':
             # any other section ends data region
@@ -933,6 +925,7 @@ def _parse_pro_profiles_from_lines(
         if in_data:
             if stripped.startswith("0500,"):
                 # new block
+                has_data = True
                 _parse_and_process_block(current_profile_lines)
                 current_profile_lines = [stripped]
             else:
@@ -941,7 +934,7 @@ def _parse_pro_profiles_from_lines(
     _parse_and_process_block(current_profile_lines)
 
     if not has_data:
-        raise ValueError(f"No [DATA] section found in {file_path.name}.")
+        raise ValueError(f"[DATA] section non-existent or empty for {file_path.name}.")
 
     return temp_profiles
 

@@ -300,26 +300,43 @@ def test_read_directory_with_only_invalid_files(tmp_path, synthetic_pro):
 
 
 @pytest.mark.synthetic
-def test_read_mixed_valid_and_invalid_files(tmp_path, synthetic_pro):
+def test_read_mixed_files_intricate_profile_status(tmp_path, synthetic_pro):
     """
-    Test that valid files are read even when invalid files are present.
+    Test that a dir of valid/corrupt/now-snow files are being read correctly,
+    and that intricate profile_status expectations are met:
+    
+    VALID profile: [valid, NA] for [t1, t2] --> profile_status [1, 0]
+    CORRUPTED profile: [corrupt, NA] for [t1, t2] --> profile_status [-1, 0]
+    no_snow profile: [NA, valid/no-snow] for [t1, t2] --> profile_status [0, 1]
+
+    Note that the dataset needs to be created with two timestamps, although the second
+    timestamp only originates from the no-snow profile.
     """
-    pytest.skip("Semantically wrong/ambiguous test!")
-    # comment FH: The invalid file is actually not invalid, but resembles the file structure
-    #             of an emtpy timestamp. In this case, we want to read the data and
-    #             need to test for both locations below. Should rename the test and also adjust
-    #             the synthetic corrupt file assembly.
 
     # Create one valid file
-    synthetic_pro.basic(tmp_path, "VALID")
-    
-    # Create one corrupted file  
+    synthetic_pro.basic(tmp_path, "VALID", 3, "01.01.2025 12:00:00")
+    # Create one file with no snow
+    synthetic_pro.basic(tmp_path, "no_snow", 0, "01.01.2025 13:00:00")
+    # Create one corrupted file
     synthetic_pro.corrupted(tmp_path, "malformed_data")
     ds = read(tmp_path)
-    
-    # Should load the valid file
-    assert ds is not None
-    assert ds.sizes['location'] == 1
+
+    assert ds.sizes['location'] == 3
+    assert ds.sizes['time'] == 2
+    assert (ds.profile_status.sel(location='VALID').squeeze() == [1, 0]).all()
+    assert (ds.profile_status.sel(location='CORRUPTED').squeeze() == [-1, 0]).all()
+    assert (ds.profile_status.sel(location='no_snow').squeeze() == [0, 1]).all()
+
+
+@pytest.mark.synthetic
+@pytest.mark.edge_case
+def test_read_corrupted_file_good_and_bad_data(tmp_path, synthetic_pro):
+    """
+    Good and bad data for two different times. profile_status should identify.
+    """
+    corrupted = synthetic_pro.corrupted(tmp_path, "good_and_bad_data")
+    xs = read(corrupted)
+    assert (xs.profile_status.squeeze().values == [1, -1]).all()
 
 
 # ============================================================================
