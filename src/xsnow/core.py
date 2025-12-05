@@ -557,7 +557,16 @@ class xsnowDataset:
         if 'height' not in self.data: 
             raise ValueError("Missing 'height' variable to compute HS.")
         
-        hs = self.data['height'].max(dim='layer', skipna=True)
+        height = self.data['height']
+        # Handle empty layer dimension: if no layers, create HS full of NaN
+        if height.sizes.get('layer', 0) == 0:
+            core_dims = [d for d in height.dims if d != 'layer']
+            coords = {d: height.coords[d] for d in core_dims}
+            hs = xr.DataArray(np.full([height.sizes[d] for d in core_dims], np.nan, dtype=height.dtype),
+                              coords=coords, dims=tuple(core_dims))
+        else:
+            hs = self.data['height'].max(dim='layer', skipna=True)
+
         hs.attrs = {'units': 'm',
                     'long_name': 'Total Snow Height',
                     'standard_name': 'height_of_snow'}
