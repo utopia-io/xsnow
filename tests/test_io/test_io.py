@@ -590,6 +590,9 @@ def test_read_real_pro_with_mixed_sh(snp_gridded_sample_dir):
     # Iterate through each timestamp in the dataset
     for timestamp in ds.time.values:
         profile = ds.sel(time=timestamp).squeeze()
+
+        if profile.HS == 0:
+            continue  # Skip no-snow profiles
         
         # Drop padding to get the true profile for this timestamp
         true_profile = profile.dropna(dim='layer', how='all')

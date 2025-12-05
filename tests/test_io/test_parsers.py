@@ -55,11 +55,10 @@ def test_read_pro_raw_basic_real_file(sample_pro_file):
     for profile in profiles:
         assert 'timestamp' in profile
         assert 'height' in profile
-        assert 'density' in profile
-        
-        # Data should be numpy arrays
         assert isinstance(profile['height'], np.ndarray)
-        assert isinstance(profile['density'], np.ndarray)
+        if (profile['height'] > 0).any():
+            assert 'density' in profile
+            assert isinstance(profile['density'], np.ndarray)
 
 
 @pytest.mark.real_data
@@ -339,8 +338,9 @@ def test_read_pro_raw_soil_removal_all_soil(tmp_path, synthetic_pro):
     
     _, profiles = _read_pro_raw(filepath, remove_soil=True)
     
-    # Profiles with only soil should be filtered out
-    assert len(profiles) == 0
+    # Profiles with only soil should be kept, but contain no snow info
+    assert len(profiles) == 1
+    assert np.isnan(profiles[0]['height']).all()
 
 
 @pytest.mark.synthetic
