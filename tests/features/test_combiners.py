@@ -1268,6 +1268,18 @@ def test_overwrite_with_is_combine_outer_prefer_other(snp_gridded_xs):
     xr.testing.assert_identical(combined_fn.data, combined_direct.data)
 
 
+@pytest.mark.synthetic
+def test_xsnowdataset_update_raises():
+    ds = xsnowDataset(_make_simple_scalar_ds(1.0, time=0))
+    with pytest.raises(NotImplementedError):
+        ds.update(None)
+
+
+@pytest.mark.synthetic
+def test_xsnowdataset_combine_first_raises():
+    ds = xsnowDataset(_make_simple_scalar_ds(1.0, time=0))
+    with pytest.raises(NotImplementedError):
+        ds.combine_first(None)
 
 
 

@@ -910,3 +910,47 @@ def overwrite_with(
     )
     # Rewrap in the same xsnowDataset subclass as self
     return self.__class__(combined.data)
+
+
+@register_xsnowDataset_method
+def update(
+    self: xsnowDataset,
+    *args: Any,
+    **kwargs: Any,
+) -> xsnowDataset:
+    """
+    Placeholder to prevent accidental use of xarray's Dataset.update on xsnowDataset.
+
+    xsnowDataset provides purpose-built helpers for incremental workflows:
+      - `append_latest(...)` for appending newer data or reloading from a cutoff.
+      - `overwrite_with(...)` for preferring another dataset on overlaps.
+
+    Raises:
+        NotImplementedError: always; directs users to the xsnow-specific methods.
+    """
+    raise NotImplementedError(
+        "xsnowDataset.update is not supported. Use xsnowDataset.append_latest(...) "
+        "for incremental appends or xsnowDataset.overwrite_with(...) to prefer "
+        "another dataset on overlaps."
+    )
+
+
+@register_xsnowDataset_method
+def combine_first(
+    self: xsnowDataset,
+    *args: Any,
+    **kwargs: Any,
+) -> xsnowDataset:
+    """
+    Placeholder to prevent accidental use of xarray's Dataset.combine_first on xsnowDataset.
+
+    xsnowDataset provides `fill_gaps_with(...)` for profile-aware gap filling
+    without introducing new coordinates (except layers).
+
+    Raises:
+        NotImplementedError: always; directs users to xsnowDataset.fill_gaps_with().
+    """
+    raise NotImplementedError(
+        "xsnowDataset.combine_first is not supported. Use xsnowDataset.fill_gaps_with(...) "
+        "for profile-aware gap filling."
+    )
