@@ -558,7 +558,9 @@ class xsnowDataset:
             raise ValueError("Missing 'height' variable to compute HS.")
         
         hs = self.data['height'].max(dim='layer', skipna=True)
-        hs.attrs = {'long_name': 'Total Snow Height', 'units': 'm'}
+        hs.attrs = {'units': 'm',
+                    'long_name': 'Total Snow Height',
+                    'standard_name': 'height_of_snow'}
         
         return self.__class__(self.data.assign({'HS': hs}))
 
@@ -715,7 +717,15 @@ class xsnowDataset:
         }
         status_out.attrs = attrs
 
-        return self.__class__(self.data.assign(profile_status=status_out))
+        # Reattach the original coordinate objects (with attrs) to avoid dropping
+        # coord-level metadata during assignment.
+        status_out = status_out.assign_coords(
+            {d: self.data.coords[d] for d in status_out.dims if d in self.data.coords}
+        )
+
+        out = self.data.copy(deep=False)
+        out["profile_status"] = status_out
+        return self.__class__(out)
 
 
 
