@@ -33,7 +33,7 @@ import logging
 import multiprocessing
 import concurrent.futures
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Union, Tuple, Sequence, Mapping
+from typing import Dict, Optional, List, Any, Union, Tuple, Sequence, Mapping, cast, Literal
 from datetime import datetime
 
 
@@ -53,7 +53,7 @@ from .selectors import (
 )
 from .plugin import register_xsnowDataset_method
 from .combiners import concat as xsnow_concat
-from .utils import get_logger
+from .utils import get_logger, normalize_slope_coords
 
 # --- Dynamic Mapping from Registry ---
 CODE_TO_NAME_MAP = {
@@ -70,8 +70,34 @@ HEADER_MAP = {
     'Longitude=': 'longitude',
     'SlopeAngle=': 'slopeAngle',
     'SlopeAzi=': 'slopeAzi',
-    'StationName=': 'stationName'
+    'StationName=': 'stationName',
+    'tz ': 'tz',        # Format: "tz = 1" (space before =)
+    'tz=': 'tz',        # Format: "tz=1" (no space)
+    'TZ=': 'tz',
+    'TimeZone=': 'tz',
+    'timezone=': 'tz',
 }
+
+def _convert_timezone_offset(offset: Union[int, float, str]) -> str:
+    """
+    Convert timezone offset to UTC+HH:MM format.
+    
+    Args:
+        offset: Timezone offset as integer hours (e.g., 1 for UTC+1)
+               or float (e.g., 5.5 for UTC+5:30)
+    
+    Returns:
+        Formatted timezone string (e.g., 'UTC+01:00', 'UTC-05:30')
+    """
+    try:
+        offset_hours = float(offset)
+        sign = '+' if offset_hours >= 0 else '-'
+        abs_offset = abs(offset_hours)
+        hours = int(abs_offset)
+        minutes = int((abs_offset - hours) * 60)
+        return f'UTC{sign}{hours:02d}:{minutes:02d}'
+    except (ValueError, TypeError):
+        return 'UTC+00:00'  # Default fallback - normalize to +00:00 format
 
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
@@ -773,6 +799,7 @@ def _read_pro_metadata(
         "altitude": np.nan,
         "slopeAngle": np.nan,
         "slopeAzi": np.nan,
+        "tz": None,  # None means not specified in file
     }
 
     if not file_path.exists():
@@ -1246,7 +1273,7 @@ def _create_pro_dataset(
     if use_dask:
         status_arr = da.from_array(
             status_np,
-            chunks=(1, chunks['time'], 1, 1)
+            chunks=(1, chunks['time'], 1, 1) # type: ignore[arg-type]
         )  # type: ignore[arg-type]
     else:
         status_arr = status_np
@@ -1300,6 +1327,45 @@ def _create_pro_dataset(
             )
         }
     )
+    
+    # Attach metadata from registry to all variables
+    from .registry import registry
+    for var_name in ds.data_vars:
+        if reg_entry := registry.get(str(var_name)):
+            ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', str(var_name))
+            ds[var_name].attrs['units'] = reg_entry.get('si_units', '1')
+            ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', str(var_name)).replace('_', ' ')
+        else:
+            # Set default attributes for variables not in registry
+            if 'units' not in ds[var_name].attrs:
+                ds[var_name].attrs['units'] = '1'  # Default: dimensionless
+            if 'standard_name' not in ds[var_name].attrs:
+                ds[var_name].attrs['standard_name'] = str(var_name)
+            if 'long_name' not in ds[var_name].attrs:
+                ds[var_name].attrs['long_name'] = str(var_name).replace('_', ' ')
+    
+    # Add timezone attribute to time coordinate
+    if 'time' in ds.coords and 'timezone' not in ds['time'].attrs:
+        # Try to get timezone from metadata
+        tz_offset = metadata.get('tz')
+        if tz_offset is not None:
+            # Convert string to number if needed
+            try:
+                tz_offset = float(tz_offset)
+            except (ValueError, TypeError):
+                tz_offset = 0
+            ds['time'].attrs['timezone'] = _convert_timezone_offset(tz_offset)
+        else:
+            # No timezone in metadata, default to UTC+00:00
+            ds['time'].attrs['timezone'] = 'UTC+00:00'
+    
+    # Add mapping attribute to profile_status
+    if 'profile_status' in ds:
+        ds['profile_status'].attrs['mapping'] = {
+            -1: "error during parsing",
+            0: "no layer data",
+            1: "existing layer data",
+        }
 
     return ds
 
@@ -1359,7 +1425,10 @@ def _get_layer_count(profile_lines: List[str], add_sh: bool, remove_soil: bool =
     return final_count + 1 if sh_present else final_count
 
 
-def _scan_pro_for_max_layers(filepath: Path, add_sh: bool, remove_soil: bool = True) -> int:
+def _scan_pro_for_max_layers(filepath: Path, 
+                             add_sh: bool, 
+                             remove_soil: bool = True,
+                             logger: Optional[logging.Logger] = None) -> int:
     """
     Scans a single .pro file to find the maximum layer count across all profiles.
 
@@ -1375,6 +1444,7 @@ def _scan_pro_for_max_layers(filepath: Path, add_sh: bool, remove_soil: bool = T
     Returns:
         The maximum layer count found in the file.
     """
+    logger = logger or get_logger(__name__)  # Ensure it exists
     max_layers_in_file = 0
     current_profile_lines = []
     
@@ -1546,9 +1616,14 @@ def read_smet(
     tz_val = header.get('tz')
     if tz_val is not None:
         try:
-            ds['time'].tz.set_attr(int(tz_val))
+            # Convert timezone offset to UTC+HH:MM format
+            ds['time'].attrs['timezone'] = _convert_timezone_offset(int(tz_val))
         except (ValueError, TypeError):
             logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
+            ds['time'].attrs['timezone'] = 'UTC+00:00'
+    else:
+        # Set default timezone if not in header
+        ds['time'].attrs['timezone'] = 'UTC+00:00'
             
     station_name = header.get('station_name', header.get('station_id', file_path.stem))
     
@@ -1596,11 +1671,29 @@ def read_smet(
             'inclination': ('slope', [slope_incl]),
             'azimuth': ('slope', [slope_azi])
         })
+    
+    # Attach metadata from registry to all variables
+    from .registry import registry
+    for var_name in ds.data_vars:
+        if reg_entry := registry.get(str(var_name)):
+            ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', str(var_name))
+            ds[var_name].attrs['units'] = reg_entry.get('si_units', '1')
+            ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', str(var_name)).replace('_', ' ')
+        else:
+            # Set default attributes for variables not in registry (e.g., SMET meteorological vars)
+            if 'units' not in ds[var_name].attrs:
+                ds[var_name].attrs['units'] = '1'  # Default: dimensionless
+            if 'standard_name' not in ds[var_name].attrs:
+                ds[var_name].attrs['standard_name'] = str(var_name)
+            if 'long_name' not in ds[var_name].attrs:
+                ds[var_name].attrs['long_name'] = str(var_name).replace('_', ' ')
 
     return ds
 
-def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]],
-                       recursive: bool = False, logger: Optional[logging.Logger]=None,
+def _resolve_filepaths(source: Union[str, Path, 
+                       Sequence[Union[str, Path]]],
+                       recursive: bool = False, 
+                       logger: Optional[logging.Logger]=None,
 ) -> Tuple[List[Path], List[Path]]:
     """
     Resolves the source argument into separate lists of .pro and .smet files.
@@ -1616,6 +1709,7 @@ def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]],
     Raises:
         TypeError: If the source is of an unsupported type.
     """
+    logger = logger or get_logger(__name__)
     paths_to_process = []
     if isinstance(source, (str, Path)):
         paths_to_process.append(Path(source))
@@ -1671,6 +1765,8 @@ def _merge_and_finalize(
     Returns:
         A unified and filtered xsnowDataset, or None if no datasets were provided.
     """
+    logger = get_logger(__name__, logger=logger)
+    
     if not all_datasets:
         return None
 
@@ -1801,7 +1897,39 @@ def _merge_and_finalize(
             final_xr_dataset[var_name].attrs['standard_name'] = reg_entry.get('standard_name', 'unknown')
             final_xr_dataset[var_name].attrs['units'] = reg_entry.get('si_units', 'unknown')
             final_xr_dataset[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
+        else:
+            # Set defaults for variables not in registry if not already set
+            if var_name in final_xr_dataset.data_vars:
+                if 'units' not in final_xr_dataset[var_name].attrs:
+                    final_xr_dataset[var_name].attrs['units'] = '1'
+                if 'standard_name' not in final_xr_dataset[var_name].attrs:
+                    final_xr_dataset[var_name].attrs['standard_name'] = var_name
+                if 'long_name' not in final_xr_dataset[var_name].attrs:
+                    final_xr_dataset[var_name].attrs['long_name'] = var_name.replace('_', ' ')
 
+    # ========== NEW: Normalize slope coordinates ==========
+    # After merging multiple locations, slope coordinates (azimuth, inclination)
+    # may have dimensions (location, slope) when they should only have (slope).
+    # This fixes Issue A: ensures slope coords have only (slope) dimension.
+    if 'slope' in final_xr_dataset.dims:
+        try:
+            logger.debug("Normalizing slope coordinates...")
+            final_xr_dataset = normalize_slope_coords(
+                final_xr_dataset,
+                verify_consistency=True,
+                allow_per_location=True  # Allow slopes to vary by location
+            )
+            logger.debug("Slope coordinates normalized successfully")
+        except ValueError as e:
+            # This should rarely happen now with allow_per_location=True
+            # Only occurs if there's a true data structure problem
+            logger.error(
+                f"Failed to normalize slope coordinates: {e}\n"
+                f"This indicates a data structure issue that needs investigation."
+            )
+            # Re-raise instead of silently using first location's values
+            raise
+    # ========== END: Slope coordinate normalization ==========
     
     # The location coordinate is already meaningful strings
     # Apply final filters
@@ -1823,8 +1951,16 @@ def _merge_and_finalize(
 
     if 'z' not in final_dataset and 'height' in final_dataset:
         final_dataset = final_dataset.compute_z_depth()
+    
+    # Compute HS if not present
+    if 'HS' not in final_dataset and 'height' in final_dataset:
+        final_dataset = final_dataset.compute_HS()
 
     final_dataset = final_dataset.update_profile_status()
+    
+    # Ensure timezone attribute is set on time coordinate
+    if 'time' in final_dataset.data.coords and 'timezone' not in final_dataset.data['time'].attrs:
+        final_dataset.data['time'].attrs['timezone'] = 'UTC+00:00'
     
     return final_dataset
 
@@ -1911,7 +2047,7 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
                 "time gaps if the new source does not fully cover that range."
             )
         if "time" in base_data:
-            mask = base_data["time"] < start_ts
+            mask = base_data["time"].values < start_ts
             base_filtered = base_data.sel(time=mask)
 
     time_sel = TimeSelector(sel=slice(time_start, None)) if time_start else None
@@ -1929,7 +2065,7 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
             base_vals = base_vals[~pd.isna(base_vals)]
             diff = np.setdiff1d(incoming_vals, base_vals, assume_unique=True)
             if diff.size:
-                new_coords[coord_name] = diff
+                new_coords[str(coord_name)] = diff
         return new_coords
 
     def _preview(vals: np.ndarray) -> str:
@@ -1964,10 +2100,11 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
                 f"Example overlaps (up to 5): {overlap[:5]!r}"
             )
 
+    JoinMode = Literal["left", "right", "outer", "inner", "union"]
     combined = xsnow_concat(
         [existing_ds.__class__(base_filtered), xsnowDataset(new_data)],
         dim="time",
-        join=join,
+        join=cast(JoinMode, join),
         **kwargs,
     )
     # Log
@@ -1975,7 +2112,9 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
     new_time_start = pd.to_datetime(new_times[0].values).isoformat()
     new_time_end = pd.to_datetime(new_times.max().values).isoformat()
     logger.info(f"Appended {len(new_times)} new timestamps: {new_time_start}--{new_time_end}")
-    extra_coords = _new_coord_values(base_filtered, combined)
+    # Unwrap xsnowDataset if needed for type compatibility
+    combined_data = combined.data if isinstance(combined, xsnowDataset) else combined
+    extra_coords = _new_coord_values(base_filtered, combined_data)
     if extra_coords:
         preview = ", ".join(
                         f"{name}: {_preview(vals)}" for name, vals in extra_coords.items()

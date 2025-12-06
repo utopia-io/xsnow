@@ -76,6 +76,7 @@ local_scheme = "node-and-date"
 timeout = 300  # Kill any test taking longer than 5 minutes
 timeout_method = "thread"
 testpaths = ["tests"]
+norecursedirs = ["tests_backup"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

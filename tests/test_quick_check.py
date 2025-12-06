@@ -12,6 +12,9 @@ def test_string_coords_work(synthetic_pro, tmp_path):
     # Read
     ds = read(filepath)
     
+    print(ds.data_vars)  # What variables exist?
+    print(list(ds.coords))  # What coordinates exist?
+    
     # Verify
     assert ds is not None
     assert ds.data.location.dtype.kind in ('U', 'S', 'O')
@@ -21,4 +24,8 @@ def test_string_coords_work(synthetic_pro, tmp_path):
     print("✅ String coordinates working!")
 
 if __name__ == '__main__':
+    
+    
+    
+    
     pytest.main([__file__, '-v'])
