@@ -1891,13 +1891,12 @@ def _merge_and_finalize(
     # This fixes Issue A: ensures slope coords have only (slope) dimension.
     if 'slope' in final_xr_dataset.dims:
         try:
-            logger.debug("Normalizing slope coordinates...")
             final_xr_dataset = normalize_slope_coords(
                 final_xr_dataset,
                 verify_consistency=True,
-                allow_per_location=True  # Allow slopes to vary by location
+                allow_per_location=True,  # Allow slopes to vary by location
+                logger=logger
             )
-            logger.debug("Slope coordinates normalized successfully")
         except ValueError as e:
             # This should rarely happen now with allow_per_location=True
             # Only occurs if there's a true data structure problem
