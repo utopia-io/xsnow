@@ -365,7 +365,7 @@ def test_merge_smet_method(data_dir_for_io_methods):
     profile = ds_merged.sel(time='2025-02-09 12:00:00')
     assert np.isclose(profile.TA.item(), 270.0)
 
-@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
+#@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
 def test_read_merge_smet_snp_snowobs():
     """
     Tests merging SMET data with the snow observation sample dataset.

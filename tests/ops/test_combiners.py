@@ -319,7 +319,7 @@ def test_concat_two_locations_non_overlapping_layers_times_slopes(snp_gridded_xs
 
 
 @pytest.mark.real_data
-@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
+#@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
 def test_concat_realization_outer(snp_snowobs_sim_xs, snp_snowobs_obs_xs):
     """snp_snowobs_obs_xs
     Concat sim+obs along realization with custom Index labels: join='outer'
@@ -341,7 +341,7 @@ def test_concat_realization_outer(snp_snowobs_sim_xs, snp_snowobs_obs_xs):
 
 
 @pytest.mark.real_data
-@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
+#@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
 def test_concat_realization_inner_keep_layer_union(snp_snowobs_sim_xs, snp_snowobs_obs_xs):
     """
     join='inner' but xsnow.concat preserves union of 'layer',

@@ -115,7 +115,7 @@ def test_compute_hs(sample_xsnow_dataset):
     assert 'HS' in ds_with_hs.data
     assert np.isclose(ds_with_hs.data['HS'].item(), 0.3)
 
-@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
+#@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
 def test_compare_processed_hs_against_smet():
     """Compare whether the SMET file variable `HS_mod` agrees with the 
     HS calculated from the cumulative layer `height`

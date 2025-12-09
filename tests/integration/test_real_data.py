@@ -30,7 +30,7 @@ class TestReadRealSnowpackData:
         # Validate physical constraints
         assert_physical_validity(ds)
     
-    @pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
+    #@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
     def test_read_snp_snowobs_data(self, snowobs_pros_dir, assert_physical_validity):
         """Test reading snow observation SNOWPACK files."""
         ds = read(snowobs_pros_dir, lazy=False)

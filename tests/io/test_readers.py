@@ -108,7 +108,7 @@ def test_read_multiple_sources_list(snowobs_pros_dir, pit_pros_dir):
 
 
 @pytest.mark.real_data
-@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
+#@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
 def test_read_multiple_sources_pro_and_smet(snowobs_pros_dir, smet_files_dir):
     """
     Test reading both .pro and .smet files together.
