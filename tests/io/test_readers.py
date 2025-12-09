@@ -92,13 +92,13 @@ def test_read_directory_subset(real_file_subset):
 # ============================================================================
 
 @pytest.mark.real_data
-def test_read_multiple_sources_list(snowobs_pros_dir, pit_pros_dir):
+def test_read_multiple_sources_list(snowobs_pros_dir, snowobs_pits_dir):
     """
     Test reading from multiple directories passed as list.
     
     Combines observation runs with pit data.
     """
-    ds = read([snowobs_pros_dir, pit_pros_dir])
+    ds = read([snowobs_pros_dir, snowobs_pits_dir])
     
     assert ds is not None
     assert ds.sizes['location'] >= 1
@@ -108,7 +108,6 @@ def test_read_multiple_sources_list(snowobs_pros_dir, pit_pros_dir):
 
 
 @pytest.mark.real_data
-#@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
 def test_read_multiple_sources_pro_and_smet(snowobs_pros_dir, smet_files_dir):
     """
     Test reading both .pro and .smet files together.

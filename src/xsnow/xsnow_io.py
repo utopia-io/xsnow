@@ -78,26 +78,6 @@ HEADER_MAP = {
     'timezone=': 'tz',
 }
 
-def _convert_timezone_offset(offset: Union[int, float, str]) -> str:
-    """
-    Convert timezone offset to UTC+HH:MM format.
-    
-    Args:
-        offset: Timezone offset as integer hours (e.g., 1 for UTC+1)
-               or float (e.g., 5.5 for UTC+5:30)
-    
-    Returns:
-        Formatted timezone string (e.g., 'UTC+01:00', 'UTC-05:30')
-    """
-    try:
-        offset_hours = float(offset)
-        sign = '+' if offset_hours >= 0 else '-'
-        abs_offset = abs(offset_hours)
-        hours = int(abs_offset)
-        minutes = int((abs_offset - hours) * 60)
-        return f'UTC{sign}{hours:02d}:{minutes:02d}'
-    except (ValueError, TypeError):
-        return 'UTC+00:00'  # Default fallback - normalize to +00:00 format
 
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
@@ -149,8 +129,19 @@ def read(
                 Default: {'time': 100, 'layer': -1}                
                 Example: {'time': 50, 'layer': 100}                
         **parser_kwargs: Additional keyword arguments passed to the underlying
-            parser functions, such as `max_layers='auto'`, `remove_soil=True`,
-            `add_surface_sh_as_layer=True`.
+            parser functions:
+            - `max_layers`: Max layer dimension; `'auto'` (default) scans files to pick
+              the maximum, or set an int to force a fixed size.
+            - `remove_soil`: If True (default), drops soil layers during parsing.
+            - `add_surface_sh_as_layer`: If True (default), inserts a surface hoar
+              layer explicitly as layer when indicated by the PRO file special code for SH at surface.
+            - `norm_slopes`: Controls slope normalization in SNOWPACK parsing /
+              merging. Options:
+                * `'auto'` (default): normalize when slopes are consistent across
+                  locations; preserve per-location slopes when inconsistent.
+                * True: force normalization (collapse to `(slope,)` even if slopes
+                  vary by location).
+                * False: skip normalization entirely.
 
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
@@ -227,7 +218,15 @@ def read(
 
     # --- Step 5: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
-    return _merge_and_finalize(all_datasets, time_sel, location_sel, slope_sel, realization_sel, logger=logger)
+    return _merge_and_finalize(
+        all_datasets,
+        time_sel,
+        location_sel,
+        slope_sel,
+        realization_sel,
+        logger=logger,
+        norm_slopes=parser_kwargs.get('norm_slopes', 'auto'),
+    )
 
 
 
@@ -1349,15 +1348,14 @@ def _create_pro_dataset(
         # Try to get timezone from metadata
         tz_offset = metadata.get('tz')
         if tz_offset is not None:
-            # Convert string to number if needed
             try:
                 tz_offset = float(tz_offset)
             except (ValueError, TypeError):
-                tz_offset = 0
-            ds['time'].attrs['timezone'] = _convert_timezone_offset(tz_offset)
-        else:
-            # No timezone in metadata, default to UTC+00:00
-            ds['time'].attrs['timezone'] = 'UTC+00:00'
+                pass  # allow string input of timezone names
+            ds['time'].tz.set_attr(tz_offset)
+        # else:
+        #     # No timezone in metadata, we don't assume defaults
+        #     pass
     
     # Add mapping attribute to profile_status
     if 'profile_status' in ds:
@@ -1616,14 +1614,13 @@ def read_smet(
     tz_val = header.get('tz')
     if tz_val is not None:
         try:
-            # Convert timezone offset to UTC+HH:MM format
-            ds['time'].attrs['timezone'] = _convert_timezone_offset(int(tz_val))
+            tz_val = float(tz_val)
         except (ValueError, TypeError):
-            logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
-            ds['time'].attrs['timezone'] = 'UTC+00:00'
-    else:
-        # Set default timezone if not in header
-        ds['time'].attrs['timezone'] = 'UTC+00:00'
+            pass  # allow string input of timezone names
+        ds['time'].tz.set_attr(tz_val)
+    # else:
+    #     # No timezone metadata, we don't assume defaults
+    #     pass
             
     station_name = header.get('station_name', header.get('station_id', file_path.stem))
     
@@ -1741,11 +1738,12 @@ def _resolve_filepaths(source: Union[str, Path,
 
 def _merge_and_finalize(
     all_datasets: List[xr.Dataset],
-    time: Optional[TimeSelector],
-    location: Optional[LocationSelector],
-    slope: Optional[SlopeSelector],
-    realization: Optional[RealizationSelector],
-    logger: Optional[logging.Logger],
+    time: TimeSelector,
+    location: LocationSelector,
+    slope: SlopeSelector,
+    realization: RealizationSelector,
+    logger: logging.Logger,
+    norm_slopes: Union[bool, Literal['auto']] = 'auto',
 ) -> Optional[xsnowDataset]:
     """
     Merges, re-indexes, and applies final filters to the datasets.
@@ -1761,6 +1759,11 @@ def _merge_and_finalize(
         location: A LocationSelector for final location-based filtering.
         slope: A SlopeSelector for final slope-based filtering.
         realization: A RealizationSelector for final realization-based filtering.
+        norm_slopes: Controls slope normalization:
+            - 'auto' (default): normalize when slopes are consistent across locations;
+              preserve per-location slopes when inconsistent.
+            - True: force normalization to `(slope,)` even if values differ by location.
+            - False: do not call `normalize_slope_coords`.
 
     Returns:
         A unified and filtered xsnowDataset, or None if no datasets were provided.
@@ -1907,19 +1910,30 @@ def _merge_and_finalize(
                 if 'long_name' not in final_xr_dataset[var_name].attrs:
                     final_xr_dataset[var_name].attrs['long_name'] = var_name.replace('_', ' ')
 
-    # ========== NEW: Normalize slope coordinates ==========
+    # Normalize slope coordinates
     # After merging multiple locations, slope coordinates (azimuth, inclination)
     # may have dimensions (location, slope) when they should only have (slope).
-    # This fixes Issue A: ensures slope coords have only (slope) dimension.
     if 'slope' in final_xr_dataset.dims:
         try:
-            logger.debug("Normalizing slope coordinates...")
-            final_xr_dataset = normalize_slope_coords(
-                final_xr_dataset,
-                verify_consistency=True,
-                allow_per_location=True  # Allow slopes to vary by location
-            )
-            logger.debug("Slope coordinates normalized successfully")
+            if norm_slopes is True:
+                final_xr_dataset = normalize_slope_coords(
+                    final_xr_dataset,
+                    verify_consistency=False,  # Force reduction even if slopes differ by location
+                    allow_per_location=False,  # Always collapse to (slope,)
+                )
+            elif norm_slopes == 'auto':
+                final_xr_dataset = normalize_slope_coords(
+                    final_xr_dataset,
+                    verify_consistency=True,   # Only reduce when consistent
+                    allow_per_location=True,   # Preserve per-location slopes when inconsistent
+                )
+            elif norm_slopes is False:
+                pass  # Explicitly skip normalization
+            else:
+                raise ValueError(
+                    f"Unsupported norm_slopes value: {norm_slopes!r}. "
+                    "Use True, False, or 'auto'."
+                )
         except ValueError as e:
             # This should rarely happen now with allow_per_location=True
             # Only occurs if there's a true data structure problem
@@ -1929,7 +1943,6 @@ def _merge_and_finalize(
             )
             # Re-raise instead of silently using first location's values
             raise
-    # ========== END: Slope coordinate normalization ==========
     
     # The location coordinate is already meaningful strings
     # Apply final filters
@@ -1957,10 +1970,6 @@ def _merge_and_finalize(
         final_dataset = final_dataset.compute_HS()
 
     final_dataset = final_dataset.update_profile_status()
-    
-    # Ensure timezone attribute is set on time coordinate
-    if 'time' in final_dataset.data.coords and 'timezone' not in final_dataset.data['time'].attrs:
-        final_dataset.data['time'].attrs['timezone'] = 'UTC+00:00'
     
     return final_dataset
 

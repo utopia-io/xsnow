@@ -143,7 +143,10 @@ def test_labels_accessor_no_mapping_empty_dict(non_indexed_coord):
 
 
 ## ------- ICSSGAccessor ----------------------------------- ##
+<<<<<<< HEAD
 #@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
+=======
+>>>>>>> a7f9357486f2c1a813209785b0e95379d0a6be29
 def test_icssg_accessor_on_snowobs_data():
     snowobs_dir = snp_snowobs_dir()
     ds = xsnow.read(f"{snowobs_dir}/pros/snowobs")

@@ -403,7 +403,6 @@ def test_slope_filtering_real_data(real_gridded_dir):
 # COMBINED OPERATIONS WITH REAL DATA
 # ============================================================================
 
-#@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
 def test_multiple_sources_real_data(real_snowobs_dir, real_pit_dir):
     """
     Tests reading from multiple real data sources simultaneously.

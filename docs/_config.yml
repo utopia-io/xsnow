@@ -5,7 +5,7 @@ only_build_toc_files: true
 
 # Notebook execution (JB handles myst-nb under the hood)
 execute:
-  execute_notebooks: auto
+  execute_notebooks: force
   timeout: 120
 
 # MyST parsing options

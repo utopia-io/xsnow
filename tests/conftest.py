@@ -160,7 +160,7 @@ def snowobs_pros_dir() -> Path:
 def snowobs_pits_dir() -> Path:
     """Directory containing snow observation .pro files (converted from caaml)."""
     try:
-        return _get_dir_path("caamls")
+        return _get_dir_path("caamls/as_pro")
     except FileNotFoundError:
         pytest.skip("Snow observation data not available in test repo")
 
@@ -212,15 +212,6 @@ def snp_snowobs_obs_xs(snp_snowobs_netcdf: Path):
     """
     xs = read(snp_snowobs_netcdf[1], lazy=False)
     return xs
-
-
-@pytest.fixture(scope="session")
-def pit_pros_dir() -> Path:
-    """Directory containing manual snow pit .pro files."""
-    try:
-        return _get_dir_path("pits")
-    except FileNotFoundError:
-        pytest.skip("Pit data not available in test repo")
 
 
 @pytest.fixture(scope="session")

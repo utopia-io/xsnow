@@ -218,7 +218,8 @@ def normalize_slope_coords(
     ds: xr.Dataset,
     slope_coord_names: Optional[List[str]] = None,
     verify_consistency: bool = True,
-    allow_per_location: bool = False
+    allow_per_location: bool = False,
+    logger: Optional[logging.Logger]=None,
 ) -> xr.Dataset:
     """
     Normalize slope coordinates to have only 'slope' dimension.
@@ -247,6 +248,8 @@ def normalize_slope_coords(
         If True, when slopes vary by location, preserve the (location, slope)
         dimensions instead of forcing normalization. This is useful when
         different locations legitimately have different slope angles.
+    logger : logging.Logger, optional
+        Provide user configured logger, or create new one per default
     
     Returns
     -------
@@ -276,6 +279,7 @@ def normalize_slope_coords(
     variables unchanged. It's designed to be called after merging datasets
     from multiple locations.
     """
+    logger = logger or get_logger(__name__)
     if 'slope' not in ds.dims:
         # No slope dimension, nothing to normalize
         return ds
@@ -340,10 +344,9 @@ def normalize_slope_coords(
                         
                         # If we allow per-location slopes, skip normalization
                         if allow_per_location:
-                            warnings.warn(
+                            logger.info(
                                 f"Slope coordinate '{coord_name}' varies by location. "
-                                f"Preserving (location, slope) dimensions as allow_per_location=True.",
-                                UserWarning
+                                f"Preserving (location, slope) dimensions as allow_per_location=True."
                             )
                             # Don't add to coords_to_update - keep original dimensions
                             break
@@ -402,9 +405,8 @@ def normalize_slope_coords(
         
         # Log what was done
         coord_list = ", ".join(f"'{c}'" for c in coords_to_update.keys())
-        warnings.warn(
-            f"Normalized slope coordinates {coord_list} to have only 'slope' dimension",
-            UserWarning
+        logger.debug(
+            f"Normalized slope coordinates {coord_list} to have only 'slope' dimension"
         )
     
     return ds
