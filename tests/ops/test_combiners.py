@@ -466,6 +466,47 @@ def test_combine_reports_multiple_conflicts_together():
     assert "'K'" in msg
 
 
+@pytest.mark.real_data
+def test_combine_new_layer_var_missing_in_old(snp_gridded_xs):
+    """
+    Variable present only in new should be carried into the combined dataset.
+    Its values should remain non-null even when old has profile_status==1
+    at that time/location (because old lacks the variable altogether).
+    """
+    old, new = _prep_two_mergable_datasets(snp_gridded_xs)
+    _assert_complex_merge_invariants(old, new)
+
+    ds_old, ds_new = old.data, new.data
+    overlap_times = np.intersect1d(ds_old.time.values, ds_new.time.values)
+    assert overlap_times.size > 0
+
+    overlap_time = overlap_times[0]
+    ps_old = ds_old["profile_status"].sel(time=overlap_time)
+    assert (ps_old > 0).any(), "Expected old to have valid profiles at overlap_time"
+
+    # Pick a specific coord where old profile is valid
+    ps_mask = ps_old > 0
+    loc0 = str(ps_mask.location.values[ps_mask.any(dim=("slope", "realization"))][0])
+    slope0 = int(ps_mask.sel(location=loc0).slope.values[ps_mask.sel(location=loc0).any(dim="realization")][0])
+    real0 = int(ps_mask.sel(location=loc0, slope=slope0).realization.values[0])
+
+    # Add a new layered variable only to `new` at that coord/time
+    new_layer_var = xr.full_like(ds_new["density"], np.nan)
+    new_layer_var.loc[dict(location=loc0, slope=slope0, realization=real0, time=overlap_time)] = 7.5
+    ds_new = ds_new.assign(new_layer_var=new_layer_var)
+    new = xsnowDataset(ds_new)
+
+    combined = xsnow.combine([old, new], join="left")
+
+    assert "new_layer_var" in combined.data
+
+    combined_vals = combined.data["new_layer_var"].sel(
+        time=overlap_time, location=loc0, slope=slope0, realization=real0
+    )
+    # old had no such var; since old profile is valid, combined should keep NaN (prefer old)
+    assert np.isnan(combined_vals.values).all()
+
+
 
 # =========================================================================
 # Complex xsnow.combine behaviors on layered xsnowDatasets

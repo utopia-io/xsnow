@@ -236,8 +236,11 @@ def _combine_two(
             continue
 
         if not in_left and in_right:
-            # No conflict: take from right
-            out[name] = right[name]
+            # Var exists only in right; keep right values except where we prefer left profiles
+            var_right = right[name]
+            var_right, mask_left = xr.align(var_right, use_left_core, join="outer")
+            var_right = xr.where(mask_left, np.nan, var_right)
+            out[name] = var_right
             continue
 
         # Both have the variable -> need to merge
