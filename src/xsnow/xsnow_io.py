@@ -78,26 +78,6 @@ HEADER_MAP = {
     'timezone=': 'tz',
 }
 
-def _convert_timezone_offset(offset: Union[int, float, str]) -> str:
-    """
-    Convert timezone offset to UTC+HH:MM format.
-    
-    Args:
-        offset: Timezone offset as integer hours (e.g., 1 for UTC+1)
-               or float (e.g., 5.5 for UTC+5:30)
-    
-    Returns:
-        Formatted timezone string (e.g., 'UTC+01:00', 'UTC-05:30')
-    """
-    try:
-        offset_hours = float(offset)
-        sign = '+' if offset_hours >= 0 else '-'
-        abs_offset = abs(offset_hours)
-        hours = int(abs_offset)
-        minutes = int((abs_offset - hours) * 60)
-        return f'UTC{sign}{hours:02d}:{minutes:02d}'
-    except (ValueError, TypeError):
-        return 'UTC+00:00'  # Default fallback - normalize to +00:00 format
 
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
@@ -1349,15 +1329,14 @@ def _create_pro_dataset(
         # Try to get timezone from metadata
         tz_offset = metadata.get('tz')
         if tz_offset is not None:
-            # Convert string to number if needed
             try:
                 tz_offset = float(tz_offset)
             except (ValueError, TypeError):
-                tz_offset = 0
-            ds['time'].attrs['timezone'] = _convert_timezone_offset(tz_offset)
-        else:
-            # No timezone in metadata, default to UTC+00:00
-            ds['time'].attrs['timezone'] = 'UTC+00:00'
+                pass  # allow string input of timezone names
+            ds['time'].tz.set_attr(tz_offset)
+        # else:
+        #     # No timezone in metadata, we don't assume defaults
+        #     pass
     
     # Add mapping attribute to profile_status
     if 'profile_status' in ds:
@@ -1616,14 +1595,13 @@ def read_smet(
     tz_val = header.get('tz')
     if tz_val is not None:
         try:
-            # Convert timezone offset to UTC+HH:MM format
-            ds['time'].attrs['timezone'] = _convert_timezone_offset(int(tz_val))
+            tz_val = float(tz_val)
         except (ValueError, TypeError):
-            logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
-            ds['time'].attrs['timezone'] = 'UTC+00:00'
-    else:
-        # Set default timezone if not in header
-        ds['time'].attrs['timezone'] = 'UTC+00:00'
+            pass  # allow string input of timezone names
+        ds['time'].tz.set_attr(tz_val)
+    # else:
+    #     # No timezone metadata, we don't assume defaults
+    #     pass
             
     station_name = header.get('station_name', header.get('station_id', file_path.stem))
     
@@ -1957,10 +1935,6 @@ def _merge_and_finalize(
         final_dataset = final_dataset.compute_HS()
 
     final_dataset = final_dataset.update_profile_status()
-    
-    # Ensure timezone attribute is set on time coordinate
-    if 'time' in final_dataset.data.coords and 'timezone' not in final_dataset.data['time'].attrs:
-        final_dataset.data['time'].attrs['timezone'] = 'UTC+00:00'
     
     return final_dataset
 
