@@ -340,7 +340,6 @@ def test_concat_realization_outer(snp_snowobs_sim_xs, snp_snowobs_obs_xs):
 
 
 @pytest.mark.real_data
-@pytest.mark.skip(reason="Skipped due to timezone conflicts in snowobs sample data")
 def test_concat_realization_inner_keep_layer_union(snp_snowobs_sim_xs, snp_snowobs_obs_xs):
     """
     join='inner' but xsnow.concat preserves union of 'layer',

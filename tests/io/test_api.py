@@ -305,7 +305,6 @@ def test_read_sample_data_snp_gridded(gridded_data_integrity_check):
 def test_read_sample_data_snp_gridded_multiple():
     """
     Tests reading the gridded sample dataset from multiple directories.
-    Uses snp_gridded_dir to avoid timezone conflicts.
     """
     gridded_path = Path(snp_gridded_dir())
     
@@ -534,8 +533,6 @@ def test_gridded_files_merge_correctly(tmp_path):
     This test ensures that when the `read` function is pointed to a source
     containing multiple .pro files for different stations, it correctly groups
     and merges them into a single dataset.
-
-    Uses snp_gridded_dir to avoid timezone conflicts.
     """
     # 1. Setup paths to gridded sample data
     gridded_path = Path(snp_gridded_dir())
