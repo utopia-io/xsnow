@@ -236,10 +236,15 @@ def _combine_two(
             continue
 
         if not in_left and in_right:
-            # Var exists only in right; keep right values except where we prefer left profiles
+            # Var exists only in right
             var_right = right[name]
-            var_right, mask_left = xr.align(var_right, use_left_core, join="outer")
-            var_right = xr.where(mask_left, np.nan, var_right)
+            # If this is a layered/profile-resolved var, mask wherever we prefer left profiles.
+            is_layered_only = (layer_dim in var_right.dims) and all(
+                d in var_right.dims for d in core_dims if d in target_coords
+            )
+            if is_layered_only:
+                var_right, mask_left = xr.align(var_right, use_left_core, join="outer")
+                var_right = xr.where(mask_left, np.nan, var_right)
             out[name] = var_right
             continue
 

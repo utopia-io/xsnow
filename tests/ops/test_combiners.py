@@ -507,6 +507,46 @@ def test_combine_new_layer_var_missing_in_old(snp_gridded_xs):
     assert np.isnan(combined_vals.values).all()
 
 
+@pytest.mark.real_data
+def test_combine_new_nonlayer_var_missing_in_old(snp_gridded_xs):
+    """
+    Non-layer variable present only in new should be carried into the combined dataset
+    with its non-null values, even where old has valid profiles.
+    """
+    old, new = _prep_two_mergable_datasets(snp_gridded_xs)
+    _assert_complex_merge_invariants(old, new)
+
+    ds_old, ds_new = old.data, new.data
+    overlap_times = np.intersect1d(ds_old.time.values, ds_new.time.values)
+    assert overlap_times.size > 0
+    overlap_time = overlap_times[0]
+
+    ps_old = ds_old["profile_status"].sel(time=overlap_time)
+    assert (ps_old > 0).any(), "Expected old to have valid profiles at overlap_time"
+
+    # Pick a valid coord
+    ps_mask = ps_old > 0
+    loc0 = str(ps_mask.location.values[ps_mask.any(dim=("slope", "realization"))][0])
+    slope0 = int(ps_mask.sel(location=loc0).slope.values[ps_mask.sel(location=loc0).any(dim="realization")][0])
+    real0 = int(ps_mask.sel(location=loc0, slope=slope0).realization.values[0])
+
+    # Add a new non-layer var only to `new`
+    val = 42.0
+    new_nonlayer = xr.full_like(ds_new["HS"], np.nan)
+    new_nonlayer.loc[dict(location=loc0, slope=slope0, realization=real0, time=overlap_time)] = val
+    ds_new = ds_new.assign(new_nonlayer_var=new_nonlayer)
+    new = xsnowDataset(ds_new)
+
+    combined = xsnow.combine([old, new], join="left")
+
+    assert "new_nonlayer_var" in combined.data
+    combined_vals = combined.data["new_nonlayer_var"].sel(
+        time=overlap_time, location=loc0, slope=slope0, realization=real0
+    )
+    # Non-layer var missing in old should come through from new even when old has valid profiles
+    assert np.isclose(combined_vals.values, val, equal_nan=False).all()
+
+
 
 # =========================================================================
 # Complex xsnow.combine behaviors on layered xsnowDatasets
