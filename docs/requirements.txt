@@ -8,3 +8,6 @@ sphinx>=7
 sphinx-rtd-theme
 sphinx-autodoc-typehints
 sphinx-multitoc-numbering
+
+# not shipped with xsnow per default:
+matplotlib>=3.8
