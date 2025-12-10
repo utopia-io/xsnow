@@ -79,6 +79,17 @@ HEADER_MAP = {
 }
 
 
+def _round_coord(val: Any, ndigits: int = 6) -> float:
+    """Round coordinate-like value to `ndigits`, preserving NaN."""
+    try:
+        fval = float(val)
+    except (TypeError, ValueError):
+        return np.nan
+    if np.isnan(fval):
+        return np.nan
+    return round(fval, ndigits)
+
+
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
 # --------------------------------------------------------------------------- #
@@ -847,6 +858,11 @@ def _read_pro_metadata(
 
     metadata["station_name"] = _sanitize_station_name(metadata["station_name"])
 
+    # Normalize coordinates
+    for coord_key in ("latitude", "longitude"):
+        if coord_key in metadata:
+            metadata[coord_key] = _round_coord(metadata[coord_key])
+
     return metadata
 
 
@@ -1132,11 +1148,11 @@ def _create_pro_dataset(
                 'realization': [0],
                 'latitude': (
                     'location',
-                    [float(metadata.get('latitude', np.nan))]
+                    [_round_coord(metadata.get('latitude', np.nan))]
                 ),
                 'longitude': (
                     'location',
-                    [float(metadata.get('longitude', np.nan))]
+                    [_round_coord(metadata.get('longitude', np.nan))]
                 ),
                 'altitude': (
                     'location',
@@ -1298,11 +1314,11 @@ def _create_pro_dataset(
             'layer': np.arange(max_layers),
             'latitude': (
                 'location',
-                [float(metadata.get('latitude', np.nan))]
+                [_round_coord(metadata.get('latitude', np.nan))]
             ),
             'longitude': (
                 'location',
-                [float(metadata.get('longitude', np.nan))]
+                [_round_coord(metadata.get('longitude', np.nan))]
             ),
             'altitude': (
                 'location',
@@ -1560,6 +1576,11 @@ def read_smet(
         logger.error(f"SMET file {filepath} is missing 'fields' or '[DATA]' section.")
         return None
 
+    # Normalize coordinates early
+    for coord_key in ("latitude", "longitude"):
+        if coord_key in header:
+            header[coord_key] = _round_coord(header[coord_key])
+
     variable_heights = {
         key.replace('_height', ''): value.strip()
         for key, value in header.items() if '_height' in key
@@ -1639,8 +1660,8 @@ def read_smet(
     # Add coordinates if they don't exist
     if 'latitude' not in ds.coords:
         ds = ds.assign_coords({
-            'latitude': ('location', [float(header.get('latitude', np.nan))]),
-            'longitude': ('location', [float(header.get('longitude', np.nan))]),
+            'latitude': ('location', [_round_coord(header.get('latitude', np.nan))]),
+            'longitude': ('location', [_round_coord(header.get('longitude', np.nan))]),
             'altitude': ('location', [float(header.get('altitude', np.nan))]),
         })
     
