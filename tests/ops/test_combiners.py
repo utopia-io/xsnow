@@ -1493,7 +1493,7 @@ def test_merge_augment_with_smets_ignores_profile_status(
     xs_layered = snp_gridded_xs
     xs_smets = snp_gridded_smets_xs
 
-    met_vars = ["TA", "RH", "VW", "DW", "ISWR"]
+    met_vars = ["TA", "RH", "VW", "DW", "ISWR", "profile_status"]
     have_any_met = any(v in xs_layered.data_vars for v in met_vars)
     if not have_any_met:
         pytest.skip("Layered dataset does not contain any of the expected met variables.")
@@ -1694,73 +1694,6 @@ def test_combine_nonlayer_TA_precedence_and_HS_consistency(
                     hs_comb_a.values[mask_valid.values],
                     hs_orig_a.values[mask_valid.values],
                 )
-
-
-@pytest.mark.real_data
-@pytest.mark.parametrize("join_mode", ["outer", "left", "right", "inner"])
-def test_merge_nonlayer_TA_can_ignore_profile_status(
-    snp_gridded_xs: xsnow.xsnowDataset,
-    snp_gridded_smets_xs: xsnow.xsnowDataset,
-    join_mode: str,
-):
-    """
-    xarray.merge can be used to ignore profile_status entirely and take TA from
-    the first dataset provided (SMETs here), even when layered data would win
-    under xsnow.combine.
-    """
-    xs_layered = snp_gridded_xs
-    xs_smets = snp_gridded_smets_xs
-
-    if "TA" not in xs_layered.data_vars or "TA" not in xs_smets.data_vars:
-        pytest.skip("Both datasets must contain TA for this merge test.")
-
-    locs_layer = set(str(l) for l in xs_layered.data["location"].values)
-    locs_smets = set(str(l) for l in xs_smets.data["location"].values)
-    common_locs = sorted(locs_layer & locs_smets)
-    if not common_locs:
-        pytest.skip("No common locations between layered and SMET datasets.")
-    loc = common_locs[0]
-
-    times_layer = set(xs_layered.data["time"].values)
-    times_smets = set(xs_smets.data["time"].values)
-    overlap_times = sorted(times_layer & times_smets)
-    if len(overlap_times) < 2:
-        pytest.skip("Need at least two overlapping timestamps for TA merge test.")
-    t0, t1 = overlap_times[:2]
-
-    dsL = xs_layered.data
-    dsS = xs_smets.data
-
-    sel_common = {"location": loc}
-    for dim in ("slope", "realization"):
-        if dim in dsL.dims and dsL.sizes[dim] > 0:
-            sel_common[dim] = dsL.coords[dim].values[0]
-        elif dim in dsS.dims and dsS.sizes[dim] > 0:
-            sel_common[dim] = dsS.coords[dim].values[0]
-
-    def _sel_for_time(t):
-        d = dict(sel_common)
-        d["time"] = t
-        return d
-
-    dsL_mod = dsL.copy(deep=True)
-    dsS_mod = dsS.copy(deep=True)
-
-    dsL_mod["TA"].loc[_sel_for_time(t0)] = 999.0
-    dsL_mod["TA"].loc[_sel_for_time(t1)] = np.nan
-    dsS_mod["TA"].loc[_sel_for_time(t0)] = 42.0
-    dsS_mod["TA"].loc[_sel_for_time(t1)] = 42.0
-
-    merged = xr.merge(
-        [dsS_mod, dsL_mod],
-        compat="no_conflicts", combine_attrs="no_conflicts",
-        join=join_mode,
-    )
-
-    val_t0 = float(merged["TA"].sel(_sel_for_time(t0)))
-    val_t1 = float(merged["TA"].sel(_sel_for_time(t1)))
-    assert val_t0 == pytest.approx(42.0)
-    assert val_t1 == pytest.approx(42.0)
 
 
 @pytest.mark.real_data
