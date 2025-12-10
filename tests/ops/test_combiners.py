@@ -466,88 +466,6 @@ def test_combine_reports_multiple_conflicts_together():
     assert "'K'" in msg
 
 
-@pytest.mark.real_data
-def test_combine_new_layer_var_missing_in_old(snp_gridded_xs):
-    """
-    Variable present only in new should be carried into the combined dataset.
-    Its values should remain non-null even when old has profile_status==1
-    at that time/location (because old lacks the variable altogether).
-    """
-    old, new = _prep_two_mergable_datasets(snp_gridded_xs)
-    _assert_complex_merge_invariants(old, new)
-
-    ds_old, ds_new = old.data, new.data
-    overlap_times = np.intersect1d(ds_old.time.values, ds_new.time.values)
-    assert overlap_times.size > 0
-
-    overlap_time = overlap_times[0]
-    ps_old = ds_old["profile_status"].sel(time=overlap_time)
-    assert (ps_old > 0).any(), "Expected old to have valid profiles at overlap_time"
-
-    # Pick a specific coord where old profile is valid
-    ps_mask = ps_old > 0
-    loc0 = str(ps_mask.location.values[ps_mask.any(dim=("slope", "realization"))][0])
-    slope0 = int(ps_mask.sel(location=loc0).slope.values[ps_mask.sel(location=loc0).any(dim="realization")][0])
-    real0 = int(ps_mask.sel(location=loc0, slope=slope0).realization.values[0])
-
-    # Add a new layered variable only to `new` at that coord/time
-    new_layer_var = xr.full_like(ds_new["density"], np.nan)
-    new_layer_var.loc[dict(location=loc0, slope=slope0, realization=real0, time=overlap_time)] = 7.5
-    ds_new = ds_new.assign(new_layer_var=new_layer_var)
-    new = xsnowDataset(ds_new)
-
-    combined = xsnow.combine([old, new], join="left")
-
-    assert "new_layer_var" in combined.data
-
-    combined_vals = combined.data["new_layer_var"].sel(
-        time=overlap_time, location=loc0, slope=slope0, realization=real0
-    )
-    # old had no such var; since old profile is valid, combined should keep NaN (prefer old)
-    assert np.isnan(combined_vals.values).all()
-
-
-@pytest.mark.real_data
-def test_combine_new_nonlayer_var_missing_in_old(snp_gridded_xs):
-    """
-    Non-layer variable present only in new should be carried into the combined dataset
-    with its non-null values, even where old has valid profiles.
-    """
-    old, new = _prep_two_mergable_datasets(snp_gridded_xs)
-    _assert_complex_merge_invariants(old, new)
-
-    ds_old, ds_new = old.data, new.data
-    overlap_times = np.intersect1d(ds_old.time.values, ds_new.time.values)
-    assert overlap_times.size > 0
-    overlap_time = overlap_times[0]
-
-    ps_old = ds_old["profile_status"].sel(time=overlap_time)
-    assert (ps_old > 0).any(), "Expected old to have valid profiles at overlap_time"
-
-    # Pick a valid coord
-    ps_mask = ps_old > 0
-    loc0 = str(ps_mask.location.values[ps_mask.any(dim=("slope", "realization"))][0])
-    slope0 = int(ps_mask.sel(location=loc0).slope.values[ps_mask.sel(location=loc0).any(dim="realization")][0])
-    real0 = int(ps_mask.sel(location=loc0, slope=slope0).realization.values[0])
-
-    # Add a new non-layer var only to `new`
-    val = 42.0
-    new_nonlayer = xr.full_like(ds_new["HS"], np.nan)
-    new_nonlayer.loc[dict(location=loc0, slope=slope0, realization=real0, time=overlap_time)] = val
-    ds_new = ds_new.assign(new_nonlayer_var=new_nonlayer)
-    new = xsnowDataset(ds_new)
-
-    combined = xsnow.combine([old, new], join="left")
-
-    assert "new_nonlayer_var" in combined.data
-    combined_vals = combined.data["new_nonlayer_var"].sel(
-        time=overlap_time, location=loc0, slope=slope0, realization=real0
-    )
-    # Non-layer var missing in old should come through from new even when old has valid profiles
-    assert np.isclose(combined_vals.values, val, equal_nan=False).all()
-
-
-
 # =========================================================================
 # Complex xsnow.combine behaviors on layered xsnowDatasets
 # =========================================================================
@@ -1406,9 +1324,10 @@ def test_combine_augment_with_smets_preserves_layers_and_adds_TA(
     ------------
     * Layered variables (e.g. density) at VIR2A are identical to snp_gridded_xs
       after combine (no layer mixing / no changes from SMETs).
-    * TA at VIR2A in the combined dataset matches the SMET dataset (augmentation).
-    * HS in the combined dataset at VIR2A comes from the layered dataset, not
-      from SMETs, wherever the layered profile is valid (profile_status > 0).
+    * TA at VIR2A: NaN where layered profile_status is valid (left wins even
+      without TA); SMET values where layered profile_status is invalid.
+    * HS in the combined dataset at VIR2A comes from the layered dataset
+      wherever the layered profile is valid (profile_status > 0).
     """
     xs_layered = snp_gridded_xs
     xs_smets = snp_gridded_smets_xs
@@ -1438,7 +1357,9 @@ def test_combine_augment_with_smets_preserves_layers_and_adds_TA(
     #    - drop some met vars so SMETs can provide them uniquely
     # ------------------------------------------------------------------
     base_ds = xs_layered.data
-    ds_layered_mod = base_ds.sel(location=[l for l in locs_layer if l != "VIR1A"])
+    ds_layered_mod = base_ds.sel(location=[l for l in locs_layer if l != "VIR1A"]).copy(
+        deep=True
+    )
     ds_layered_mod = ds_layered_mod.drop_vars(
         [v for v in met_vars if v in ds_layered_mod.data_vars]
     )
@@ -1448,7 +1369,29 @@ def test_combine_augment_with_smets_preserves_layers_and_adds_TA(
     # ------------------------------------------------------------------
     # 2) Subset SMETs to VIR2A only, but KEEP the location dimension
     # ------------------------------------------------------------------
-    ds_smets_sub = xs_smets.data.sel(location=["VIR2A"])
+    ds_smets_sub = xs_smets.data.sel(location=["VIR2A"]).copy(deep=True)
+
+    # ------------------------------------------------------------------
+    # 2b) Craft profile_status masks to exercise both branches:
+    #     - layered valid at t_valid, invalid at t_invalid
+    #     - SMETs valid at t_invalid, invalid at t_valid
+    # ------------------------------------------------------------------
+    times = ds_layered_mod["time"].values
+    if times.size < 2:
+        pytest.skip("Need at least two timestamps to test profile-aware selection.")
+    t_valid, t_invalid = times[0], times[1]
+
+    ds_layered_mod["profile_status"] = ds_layered_mod["profile_status"].copy()
+    ds_layered_mod["profile_status"].loc[dict(location="VIR2A", time=t_valid)] = 1
+    ds_layered_mod["profile_status"].loc[dict(location="VIR2A", time=t_invalid)] = 0
+
+    ps_template = ds_layered_mod["profile_status"].sel(location=["VIR2A"])
+    ps_smets = xr.zeros_like(ps_template)
+    ps_smets.loc[dict(time=t_valid)] = 0
+    ps_smets.loc[dict(time=t_invalid)] = 1
+    ds_smets_sub = ds_smets_sub.assign(profile_status=ps_smets)
+
+    xs_layered_mod = xsnow.xsnowDataset(ds_layered_mod)
     xs_smets_sub = xsnow.xsnowDataset(ds_smets_sub)
 
     # ------------------------------------------------------------------
@@ -1478,20 +1421,33 @@ def test_combine_augment_with_smets_preserves_layers_and_adds_TA(
     xr.testing.assert_allclose(new_layer_a, old_layer_a)
 
     # ----------------------------
-    # b) TA at VIR2A matches SMETs
+    # b) TA at VIR2A: prefer layered where valid, SMETs where invalid
     # ----------------------------
     if "TA" not in xs_smets_sub.data_vars:
         pytest.skip("SMET dataset does not contain TA variable.")
 
     ta_smets = xs_smets_sub.data["TA"].sel(location="VIR2A")
     ta_comb = ds_comb["TA"].sel(location="VIR2A")
+    ps_layered = xs_layered_mod.data["profile_status"].sel(location="VIR2A")
 
-    ta_smets_a, ta_comb_a = xr.align(ta_smets, ta_comb, join="inner")
-    
-    # We only require that the *values* of TA match the SMETs input.
-    # Coordinate metadata on the slope dimension (inclination, azimuth, etc.)
-    # may come from whichever dataset is on the left of the combine call.
-    np.testing.assert_allclose(ta_comb_a.values, ta_smets_a.values)
+    ta_smets_a, ta_comb_a, ps_layered_a = xr.align(
+        ta_smets, ta_comb, ps_layered, join="inner"
+    )
+    ta_smets_b, ta_comb_b, ps_layered_b = xr.broadcast(
+        ta_smets_a, ta_comb_a, ps_layered_a
+    )
+
+    mask_layer_valid = ps_layered_b > 0
+    mask_layer_invalid = ~mask_layer_valid
+
+    if bool(mask_layer_valid.any()):
+        # Only evaluate entries where the mask is true
+        vals_valid = ta_comb_b.values[mask_layer_valid.values]
+        assert np.isnan(vals_valid).all()
+    if bool(mask_layer_invalid.any()):
+        vals_comb = ta_comb_b.values[mask_layer_invalid.values]
+        vals_smets = ta_smets_b.values[mask_layer_invalid.values]
+        np.testing.assert_allclose(vals_comb, vals_smets, equal_nan=False)
 
     # ----------------------------
     # c) HS at VIR2A comes from the layered dataset
@@ -1523,6 +1479,46 @@ def test_combine_augment_with_smets_preserves_layers_and_adds_TA(
             )
 
 
+@pytest.mark.real_data
+@pytest.mark.parametrize("join_mode", ["outer", "left", "right", "inner"])
+def test_merge_augment_with_smets_ignores_profile_status(
+    snp_gridded_xs: xsnow.xsnowDataset,
+    snp_gridded_smets_xs: xsnow.xsnowDataset,
+    join_mode: str,
+):
+    """
+    xarray.merge can be used to ignore profile_status entirely: TA from SMETs
+    should appear even where the layered dataset would otherwise win.
+    """
+    xs_layered = snp_gridded_xs
+    xs_smets = snp_gridded_smets_xs
+
+    met_vars = ["TA", "RH", "VW", "DW", "ISWR"]
+    have_any_met = any(v in xs_layered.data_vars for v in met_vars)
+    if not have_any_met:
+        pytest.skip("Layered dataset does not contain any of the expected met variables.")
+
+    locs_layer = [str(l) for l in xs_layered.data["location"].values]
+    locs_smets = [str(l) for l in xs_smets.data["location"].values]
+    if "VIR2A" not in locs_layer or "VIR2A" not in locs_smets:
+        pytest.skip("Location 'VIR2A' missing from one of the datasets.")
+
+    ds_layered_mod = xs_layered.data.sel(location=["VIR2A"]).drop_vars(
+        [v for v in met_vars if v in xs_layered.data_vars]
+    )
+    ds_smets_sub = xs_smets.data.sel(location=["VIR2A"])
+
+    merged = xr.merge(
+        [ds_smets_sub, ds_layered_mod],
+        compat="override", combine_attrs="override",
+        join=join_mode,
+    )
+
+    assert "TA" in merged.data_vars
+    ta_expected, ta_actual = xr.align(ds_smets_sub["TA"], merged["TA"], join="inner")
+    np.testing.assert_allclose(ta_actual.values, ta_expected.values)
+
+
 # 2) Precedence & gap-filling for non-layer variables (TA),
 #    HS consistency w.r.t. layered dataset
 @pytest.mark.real_data
@@ -1544,19 +1540,15 @@ def test_combine_nonlayer_TA_precedence_and_HS_consistency(
         * t1: left TA = NaN, right TA = 42      (gap to be filled)
     - Combine in both orders: [left, right] and [right, left].
 
-    Expectations
-    ------------
-    - combine([left, right], ...) : prefer left where finite, otherwise fill
-      from right:
-        * at t0 → 999
-        * at t1 → 42
-    - combine([right, left], ...) : same rule, but with swapped roles:
-        * at t0 → 42
-        * at t1 → 999
-    - Layered variables (e.g. density) are identical to the original
-      layered dataset in both combined outputs (no layer mixing).
-    - HS in both combined outputs comes from the layered dataset wherever
-      the original profile_status > 0.
+    Expectations (profile-aware, prefer-left with complementary profile_status):
+    - combine([left, right], ...):
+        * t0: left valid, right invalid → prefer left (999)
+        * t1: left invalid, right valid → prefer right (42)
+    - combine([right, left], ...):
+        * t0: right invalid, left valid → prefer left (999)
+        * t1: right valid, left invalid → prefer right (42)
+    - Layered variables (e.g. density) remain identical to the original
+      layered dataset; HS comes from layered wherever profile_status > 0.
     """
     xs_layered = snp_gridded_xs
     xs_smets = snp_gridded_smets_xs
@@ -1609,6 +1601,17 @@ def test_combine_nonlayer_TA_precedence_and_HS_consistency(
     dsL_mod["TA"].loc[_sel_for_time(t1)] = np.nan
     dsS_mod["TA"].loc[_sel_for_time(t1)] = 42.0
 
+    # Profile_status masks: left valid at t0, invalid at t1; SMETs vice-versa
+    dsL_mod["profile_status"] = dsL_mod["profile_status"].copy()
+    dsL_mod["profile_status"].loc[_sel_for_time(t0)] = 1
+    dsL_mod["profile_status"].loc[_sel_for_time(t1)] = 0
+
+    ps_template = dsL_mod["profile_status"].sel(location=[loc])
+    ps_smets = xr.zeros_like(ps_template)
+    ps_smets.loc[_sel_for_time(t0)] = 0
+    ps_smets.loc[_sel_for_time(t1)] = 1
+    dsS_mod = dsS_mod.assign(profile_status=ps_smets)
+
     xsL_mod = xsnow.xsnowDataset(dsL_mod)
     xsS_mod = xsnow.xsnowDataset(dsS_mod)
 
@@ -1628,7 +1631,7 @@ def test_combine_nonlayer_TA_precedence_and_HS_consistency(
                 d[dim] = sel_common[dim]
         return d
 
-    # Prefer-left semantics with NaN fill: [left, right]
+    # Prefer-left semantics with profile-aware masking: [left, right]
     val_LR_t0 = float(ds_LR["TA"].sel(_sel(ds_LR, t0)))
     val_LR_t1 = float(ds_LR["TA"].sel(_sel(ds_LR, t1)))
     assert val_LR_t0 == pytest.approx(999.0)
@@ -1637,7 +1640,7 @@ def test_combine_nonlayer_TA_precedence_and_HS_consistency(
     # Same rule, swapped roles: [right, left]
     val_RL_t0 = float(ds_RL["TA"].sel(_sel(ds_RL, t0)))
     val_RL_t1 = float(ds_RL["TA"].sel(_sel(ds_RL, t1)))
-    assert val_RL_t0 == pytest.approx(42.0)
+    assert val_RL_t0 == pytest.approx(999.0)
     assert val_RL_t1 == pytest.approx(42.0)
 
     # ----------------------------
@@ -1673,11 +1676,7 @@ def test_combine_nonlayer_TA_precedence_and_HS_consistency(
     # ----------------------------
     if "HS" in xs_layered.data_vars:
         hs_orig = xs_layered.data["HS"]
-        # profile_status from layered dataset (recompute if needed)
-        if "profile_status" in xs_layered.data_vars:
-            ps_orig = xs_layered.data["profile_status"]
-        else:
-            ps_orig = xs_layered.update_profile_status().data["profile_status"]
+        ps_expect = dsL_mod["profile_status"]
 
         for ds_comb in (ds_LR, ds_RL):
             if "HS" not in ds_comb.data_vars:
@@ -1685,13 +1684,193 @@ def test_combine_nonlayer_TA_precedence_and_HS_consistency(
 
             hs_comb = ds_comb["HS"]
 
-            hs_orig_a, ps_orig_a, hs_comb_a = xr.align(
-                hs_orig, ps_orig, hs_comb, join="inner"
+            hs_orig_a, ps_expect_a, hs_comb_a = xr.align(
+                hs_orig, ps_expect, hs_comb, join="inner"
             )
 
-            mask_valid = ps_orig_a > 0
+            mask_valid = ps_expect_a > 0
             if bool(mask_valid.any()):
                 np.testing.assert_allclose(
                     hs_comb_a.values[mask_valid.values],
                     hs_orig_a.values[mask_valid.values],
                 )
+
+
+@pytest.mark.real_data
+@pytest.mark.parametrize("join_mode", ["outer", "left", "right", "inner"])
+def test_merge_nonlayer_TA_can_ignore_profile_status(
+    snp_gridded_xs: xsnow.xsnowDataset,
+    snp_gridded_smets_xs: xsnow.xsnowDataset,
+    join_mode: str,
+):
+    """
+    xarray.merge can be used to ignore profile_status entirely and take TA from
+    the first dataset provided (SMETs here), even when layered data would win
+    under xsnow.combine.
+    """
+    xs_layered = snp_gridded_xs
+    xs_smets = snp_gridded_smets_xs
+
+    if "TA" not in xs_layered.data_vars or "TA" not in xs_smets.data_vars:
+        pytest.skip("Both datasets must contain TA for this merge test.")
+
+    locs_layer = set(str(l) for l in xs_layered.data["location"].values)
+    locs_smets = set(str(l) for l in xs_smets.data["location"].values)
+    common_locs = sorted(locs_layer & locs_smets)
+    if not common_locs:
+        pytest.skip("No common locations between layered and SMET datasets.")
+    loc = common_locs[0]
+
+    times_layer = set(xs_layered.data["time"].values)
+    times_smets = set(xs_smets.data["time"].values)
+    overlap_times = sorted(times_layer & times_smets)
+    if len(overlap_times) < 2:
+        pytest.skip("Need at least two overlapping timestamps for TA merge test.")
+    t0, t1 = overlap_times[:2]
+
+    dsL = xs_layered.data
+    dsS = xs_smets.data
+
+    sel_common = {"location": loc}
+    for dim in ("slope", "realization"):
+        if dim in dsL.dims and dsL.sizes[dim] > 0:
+            sel_common[dim] = dsL.coords[dim].values[0]
+        elif dim in dsS.dims and dsS.sizes[dim] > 0:
+            sel_common[dim] = dsS.coords[dim].values[0]
+
+    def _sel_for_time(t):
+        d = dict(sel_common)
+        d["time"] = t
+        return d
+
+    dsL_mod = dsL.copy(deep=True)
+    dsS_mod = dsS.copy(deep=True)
+
+    dsL_mod["TA"].loc[_sel_for_time(t0)] = 999.0
+    dsL_mod["TA"].loc[_sel_for_time(t1)] = np.nan
+    dsS_mod["TA"].loc[_sel_for_time(t0)] = 42.0
+    dsS_mod["TA"].loc[_sel_for_time(t1)] = 42.0
+
+    merged = xr.merge(
+        [dsS_mod, dsL_mod],
+        compat="override", combine_attrs="override",
+        join=join_mode,
+    )
+
+    val_t0 = float(merged["TA"].sel(_sel_for_time(t0)))
+    val_t1 = float(merged["TA"].sel(_sel_for_time(t1)))
+    assert val_t0 == pytest.approx(42.0)
+    assert val_t1 == pytest.approx(42.0)
+
+
+@pytest.mark.real_data
+def test_combine_new_layer_var_missing_in_old(snp_gridded_xs):
+    """
+    Variable present only in new should be carried into the combined dataset.
+    With profile-aware semantics:
+    - if old has a valid profile_status, the new var should be kept as NaN
+      (prefer old even though it lacks the var);
+    - if old is invalid, values from new should flow through.
+    """
+    old, new = _prep_two_mergable_datasets(snp_gridded_xs)
+    _assert_complex_merge_invariants(old, new)
+
+    ds_old, ds_new = old.data.copy(deep=True), new.data
+    overlap_times = np.intersect1d(ds_old.time.values, ds_new.time.values)
+    if overlap_times.size < 2:
+        pytest.skip("Need at least two overlap times to test both valid/invalid paths.")
+
+    overlap_time_valid = overlap_times[0]
+    overlap_time_invalid = overlap_times[1]
+
+    ps_old = ds_old["profile_status"].sel(time=overlap_time_valid)
+    assert (ps_old > 0).any(), "Expected old to have valid profiles at overlap_time"
+
+    # Pick a specific coord where old profile is valid
+    ps_mask = ps_old > 0
+    loc0 = str(ps_mask.location.values[ps_mask.any(dim=("slope", "realization"))][0])
+    slope0 = int(ps_mask.sel(location=loc0).slope.values[ps_mask.sel(location=loc0).any(dim="realization")][0])
+    real0 = int(ps_mask.sel(location=loc0, slope=slope0).realization.values[0])
+
+    # Force old to be invalid at the second overlap time to exercise new propagation
+    ds_old["profile_status"].loc[dict(location=loc0, time=overlap_time_invalid)] = 0
+
+    # Add a new layered variable only to `new` at two times
+    new_layer_var = xr.full_like(ds_new["density"], np.nan)
+    new_layer_var.loc[dict(location=loc0, slope=slope0, realization=real0, time=overlap_time_valid)] = 7.5
+    new_layer_var.loc[dict(location=loc0, slope=slope0, realization=real0, time=overlap_time_invalid)] = 3.3
+    ds_new = ds_new.assign(new_layer_var=new_layer_var)
+    new = xsnowDataset(ds_new.copy(deep=True))
+    old = xsnowDataset(ds_old.copy(deep=True))
+
+    combined = xsnow.combine([old, new], join="left")
+
+    assert "new_layer_var" in combined.data
+
+    combined_vals = combined.data["new_layer_var"].sel(
+        time=overlap_time_valid, location=loc0, slope=slope0, realization=real0
+    )
+    # old had no such var; since old profile is valid, combined should keep NaN (prefer old)
+    assert np.isnan(combined_vals.values).all()
+
+    combined_vals_fill = combined.data["new_layer_var"].sel(
+        time=overlap_time_invalid, location=loc0, slope=slope0, realization=real0
+    )
+    # old invalid -> new should flow through
+    assert np.isclose(combined_vals_fill.values, 3.3, equal_nan=False).all()
+
+
+@pytest.mark.real_data
+def test_combine_new_nonlayer_var_missing_in_old(snp_gridded_xs):
+    """
+    Non-layer variable present only in new should be carried into the combined dataset.
+    Prefer-old semantics:
+    - where old profile_status is valid -> expect NaNs (old wins despite missing var)
+    - where old profile_status is invalid -> expect new values to flow through
+    """
+    old, new = _prep_two_mergable_datasets(snp_gridded_xs)
+    _assert_complex_merge_invariants(old, new)
+
+    ds_old, ds_new = old.data.copy(deep=True), new.data
+    overlap_times = np.intersect1d(ds_old.time.values, ds_new.time.values)
+    if overlap_times.size < 2:
+        pytest.skip("Need at least two overlap times to test both valid/invalid paths.")
+    overlap_time_valid = overlap_times[0]
+    overlap_time_invalid = overlap_times[1]
+
+    ps_old = ds_old["profile_status"].sel(time=overlap_time_valid)
+    assert (ps_old > 0).any(), "Expected old to have valid profiles at overlap_time"
+
+    # Pick a valid coord
+    ps_mask = ps_old > 0
+    loc0 = str(ps_mask.location.values[ps_mask.any(dim=("slope", "realization"))][0])
+    slope0 = int(ps_mask.sel(location=loc0).slope.values[ps_mask.sel(location=loc0).any(dim="realization")][0])
+    real0 = int(ps_mask.sel(location=loc0, slope=slope0).realization.values[0])
+
+    # Make old invalid at a second time to allow new to contribute
+    ds_old["profile_status"].loc[dict(location=loc0, time=overlap_time_invalid)] = 0
+
+    # Add a new non-layer var only to `new`
+    val = 42.0
+    val_invalid = 84.0
+    new_nonlayer = xr.full_like(ds_new["HS"], np.nan)
+    new_nonlayer.loc[dict(location=loc0, slope=slope0, realization=real0, time=overlap_time_valid)] = val
+    new_nonlayer.loc[dict(location=loc0, slope=slope0, realization=real0, time=overlap_time_invalid)] = val_invalid
+    ds_new = ds_new.assign(new_nonlayer_var=new_nonlayer)
+    new = xsnowDataset(ds_new.copy(deep=True))
+    old = xsnowDataset(ds_old.copy(deep=True))
+
+    combined = xsnow.combine([old, new], join="left")
+
+    assert "new_nonlayer_var" in combined.data
+    combined_vals = combined.data["new_nonlayer_var"].sel(
+        time=overlap_time_valid, location=loc0, slope=slope0, realization=real0
+    )
+    # Non-layer var missing in old: prefers old (valid) -> expect NaN here
+    assert np.isnan(combined_vals.values).all()
+
+    combined_vals_new = combined.data["new_nonlayer_var"].sel(
+        time=overlap_time_invalid, location=loc0, slope=slope0, realization=real0
+    )
+    # Old invalid -> should take the new value
+    assert np.isclose(combined_vals_new.values, val_invalid, equal_nan=False).all()

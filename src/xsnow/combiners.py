@@ -121,6 +121,12 @@ def _compute_target_coords_for_two(
     return target_coords
 
 
+def _nan_like(ref: xr.DataArray) -> xr.DataArray:
+    """Return a NaN array with the same shape/coords as ref."""
+    arr = xr.zeros_like(ref, dtype="float64")
+    return arr * np.nan
+
+
 def _combine_two(
     left: xr.Dataset,
     right: xr.Dataset,
@@ -231,26 +237,16 @@ def _combine_two(
         in_left = name in left.data_vars
         in_right = name in right.data_vars
 
-        if in_left and not in_right:
-            # Already in out via left.copy()
-            continue
+        if in_left:
+            var_left = left[name]
+        else:
+            ref = right[name] if in_right else xr.DataArray(np.array(np.nan))
+            var_left = _nan_like(ref)
 
-        if not in_left and in_right:
-            # Var exists only in right
+        if in_right:
             var_right = right[name]
-            # If this is a layered/profile-resolved var, mask wherever we prefer left profiles.
-            is_layered_only = (layer_dim in var_right.dims) and all(
-                d in var_right.dims for d in core_dims if d in target_coords
-            )
-            if is_layered_only:
-                var_right, mask_left = xr.align(var_right, use_left_core, join="outer")
-                var_right = xr.where(mask_left, np.nan, var_right)
-            out[name] = var_right
-            continue
-
-        # Both have the variable -> need to merge
-        var_left = left[name]
-        var_right = right[name]
+        else:
+            var_right = _nan_like(var_left)
 
         # Align on union of coords for this variable plus the profile masks
         var_left, var_right, mask_l, mask_r = xr.align(
@@ -261,15 +257,6 @@ def _combine_two(
             join="outer",
         )
 
-        # Determine if this variable is "profile-resolved":
-        #   - must be defined on all core dims that participate in this combine, and
-        #   - have a layer dimension.
-        var_core_dims = [d for d in core_dims if d in var_left.dims]
-        core_dims_present = [d for d in core_dims if d in target_coords]
-        has_all_core_dims = len(var_core_dims) == len(core_dims_present)
-        is_layered = layer_dim in var_left.dims
-        is_profile_var = has_all_core_dims and is_layered
-
         # Compatibility checks (only if requested and both have data)
         if compat != "override":
             both_valid = var_left.notnull() & var_right.notnull()
@@ -278,12 +265,8 @@ def _combine_two(
                 if bool(diff.any()):
                     compat_conflicts.append(f"'{name}'")
 
-        if is_profile_var:
-            # Profile-wise choice: never mix layers.
-            merged = xr.where(mask_l, var_left, xr.where(mask_r, var_right, var_left))
-        else:
-            # Fallback: element-wise prefer-left semantics (gap fill from right)
-            merged = var_left.combine_first(var_right)
+        # Uniform profile-aware selection for all vars
+        merged = xr.where(mask_l, var_left, xr.where(mask_r, var_right, var_left))
 
         out[name] = merged
 
