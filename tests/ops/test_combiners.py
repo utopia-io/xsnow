@@ -1510,7 +1510,7 @@ def test_merge_augment_with_smets_ignores_profile_status(
 
     merged = xr.merge(
         [ds_smets_sub, ds_layered_mod],
-        compat="override", combine_attrs="override",
+        compat="no_conflicts", combine_attrs="no_conflicts",
         join=join_mode,
     )
 
@@ -1753,7 +1753,7 @@ def test_merge_nonlayer_TA_can_ignore_profile_status(
 
     merged = xr.merge(
         [dsS_mod, dsL_mod],
-        compat="override", combine_attrs="override",
+        compat="no_conflicts", combine_attrs="no_conflicts",
         join=join_mode,
     )
 
