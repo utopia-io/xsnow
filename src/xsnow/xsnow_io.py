@@ -78,26 +78,17 @@ HEADER_MAP = {
     'timezone=': 'tz',
 }
 
-def _convert_timezone_offset(offset: Union[int, float, str]) -> str:
-    """
-    Convert timezone offset to UTC+HH:MM format.
-    
-    Args:
-        offset: Timezone offset as integer hours (e.g., 1 for UTC+1)
-               or float (e.g., 5.5 for UTC+5:30)
-    
-    Returns:
-        Formatted timezone string (e.g., 'UTC+01:00', 'UTC-05:30')
-    """
+
+def _round_coord(val: Any, ndigits: int = 6) -> float:
+    """Round coordinate-like value to `ndigits`, preserving NaN."""
     try:
-        offset_hours = float(offset)
-        sign = '+' if offset_hours >= 0 else '-'
-        abs_offset = abs(offset_hours)
-        hours = int(abs_offset)
-        minutes = int((abs_offset - hours) * 60)
-        return f'UTC{sign}{hours:02d}:{minutes:02d}'
-    except (ValueError, TypeError):
-        return 'UTC+00:00'  # Default fallback - normalize to +00:00 format
+        fval = float(val)
+    except (TypeError, ValueError):
+        return np.nan
+    if np.isnan(fval):
+        return np.nan
+    return round(fval, ndigits)
+
 
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
@@ -115,7 +106,6 @@ def read(
     n_cpus_use: Optional[int] = None,
     logger: Optional[logging.Logger] = None,
     chunks: Optional[Dict[str, int]] = None,
-    on_conflict: str = 'warn',
     **parser_kwargs: Any
 ) -> Optional[xsnowDataset]:
     """
@@ -148,15 +138,21 @@ def read(
         chunks: Chunk sizes for dask arrays when lazy=True.       
                 Dict with keys 'time' and 'layer'.                  
                 Default: {'time': 100, 'layer': -1}                
-                Example: {'time': 50, 'layer': 100}
-        on_conflict: How to handle data conflicts when merging files.
-                'strict': Raise error on any conflict with comprehensive report
-                'warn': Allow conflicts but log warnings (default)
-                'ignore': Silently override conflicts (last file wins)
-                Conflicts can occur when merging files with overlapping data.
+                Example: {'time': 50, 'layer': 100}                
         **parser_kwargs: Additional keyword arguments passed to the underlying
-            parser functions, such as `max_layers='auto'`, `remove_soil=True`,
-            `add_surface_sh_as_layer=True`.
+            parser functions:
+            - `max_layers`: Max layer dimension; `'auto'` (default) scans files to pick
+              the maximum, or set an int to force a fixed size.
+            - `remove_soil`: If True (default), drops soil layers during parsing.
+            - `add_surface_sh_as_layer`: If True (default), inserts a surface hoar
+              layer explicitly as layer when indicated by the PRO file special code for SH at surface.
+            - `norm_slopes`: Controls slope normalization in SNOWPACK parsing /
+              merging. Options:
+                * `'auto'` (default): normalize when slopes are consistent across
+                  locations; preserve per-location slopes when inconsistent.
+                * True: force normalization (collapse to `(slope,)` even if slopes
+                  vary by location).
+                * False: skip normalization entirely.
 
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
@@ -174,13 +170,6 @@ def read(
     """
     # --- Step 1: Setup ---
     logger = get_logger(__name__, logger=logger)
-    
-    # Validate on_conflict parameter
-    valid_conflict_modes = ['strict', 'warn', 'ignore']
-    if on_conflict not in valid_conflict_modes:
-        raise ValueError(
-            f"on_conflict must be one of {valid_conflict_modes}, got '{on_conflict}'"
-        )
 
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
@@ -241,13 +230,13 @@ def read(
     # --- Step 5: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
     return _merge_and_finalize(
-        all_datasets, 
-        time_sel, 
-        location_sel, 
-        slope_sel, 
-        realization_sel, 
-        on_conflict=on_conflict,
-        logger=logger
+        all_datasets,
+        time_sel,
+        location_sel,
+        slope_sel,
+        realization_sel,
+        logger=logger,
+        norm_slopes=parser_kwargs.get('norm_slopes', 'auto'),
     )
 
 
@@ -869,6 +858,11 @@ def _read_pro_metadata(
 
     metadata["station_name"] = _sanitize_station_name(metadata["station_name"])
 
+    # Normalize coordinates
+    for coord_key in ("latitude", "longitude"):
+        if coord_key in metadata:
+            metadata[coord_key] = _round_coord(metadata[coord_key])
+
     return metadata
 
 
@@ -1154,11 +1148,11 @@ def _create_pro_dataset(
                 'realization': [0],
                 'latitude': (
                     'location',
-                    [float(metadata.get('latitude', np.nan))]
+                    [_round_coord(metadata.get('latitude', np.nan))]
                 ),
                 'longitude': (
                     'location',
-                    [float(metadata.get('longitude', np.nan))]
+                    [_round_coord(metadata.get('longitude', np.nan))]
                 ),
                 'altitude': (
                     'location',
@@ -1320,11 +1314,11 @@ def _create_pro_dataset(
             'layer': np.arange(max_layers),
             'latitude': (
                 'location',
-                [float(metadata.get('latitude', np.nan))]
+                [_round_coord(metadata.get('latitude', np.nan))]
             ),
             'longitude': (
                 'location',
-                [float(metadata.get('longitude', np.nan))]
+                [_round_coord(metadata.get('longitude', np.nan))]
             ),
             'altitude': (
                 'location',
@@ -1370,15 +1364,14 @@ def _create_pro_dataset(
         # Try to get timezone from metadata
         tz_offset = metadata.get('tz')
         if tz_offset is not None:
-            # Convert string to number if needed
             try:
                 tz_offset = float(tz_offset)
             except (ValueError, TypeError):
-                tz_offset = 0
-            ds['time'].attrs['timezone'] = _convert_timezone_offset(tz_offset)
-        else:
-            # No timezone in metadata, default to UTC+00:00
-            ds['time'].attrs['timezone'] = 'UTC+00:00'
+                pass  # allow string input of timezone names
+            ds['time'].tz.set_attr(tz_offset)
+        # else:
+        #     # No timezone in metadata, we don't assume defaults
+        #     pass
     
     # Add mapping attribute to profile_status
     if 'profile_status' in ds:
@@ -1583,6 +1576,11 @@ def read_smet(
         logger.error(f"SMET file {filepath} is missing 'fields' or '[DATA]' section.")
         return None
 
+    # Normalize coordinates early
+    for coord_key in ("latitude", "longitude"):
+        if coord_key in header:
+            header[coord_key] = _round_coord(header[coord_key])
+
     variable_heights = {
         key.replace('_height', ''): value.strip()
         for key, value in header.items() if '_height' in key
@@ -1637,14 +1635,13 @@ def read_smet(
     tz_val = header.get('tz')
     if tz_val is not None:
         try:
-            # Convert timezone offset to UTC+HH:MM format
-            ds['time'].attrs['timezone'] = _convert_timezone_offset(int(tz_val))
+            tz_val = float(tz_val)
         except (ValueError, TypeError):
-            logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
-            ds['time'].attrs['timezone'] = 'UTC+00:00'
-    else:
-        # Set default timezone if not in header
-        ds['time'].attrs['timezone'] = 'UTC+00:00'
+            pass  # allow string input of timezone names
+        ds['time'].tz.set_attr(tz_val)
+    # else:
+    #     # No timezone metadata, we don't assume defaults
+    #     pass
             
     station_name = header.get('station_name', header.get('station_id', file_path.stem))
     
@@ -1663,8 +1660,8 @@ def read_smet(
     # Add coordinates if they don't exist
     if 'latitude' not in ds.coords:
         ds = ds.assign_coords({
-            'latitude': ('location', [float(header.get('latitude', np.nan))]),
-            'longitude': ('location', [float(header.get('longitude', np.nan))]),
+            'latitude': ('location', [_round_coord(header.get('latitude', np.nan))]),
+            'longitude': ('location', [_round_coord(header.get('longitude', np.nan))]),
             'altitude': ('location', [float(header.get('altitude', np.nan))]),
         })
     
@@ -1762,12 +1759,12 @@ def _resolve_filepaths(source: Union[str, Path,
 
 def _merge_and_finalize(
     all_datasets: List[xr.Dataset],
-    time: Optional[TimeSelector],
-    location: Optional[LocationSelector],
-    slope: Optional[SlopeSelector],
-    realization: Optional[RealizationSelector],
-    on_conflict: str = 'warn',
-    logger: Optional[logging.Logger] = None,
+    time: TimeSelector,
+    location: LocationSelector,
+    slope: SlopeSelector,
+    realization: RealizationSelector,
+    logger: logging.Logger,
+    norm_slopes: Union[bool, Literal['auto']] = 'auto',
 ) -> Optional[xsnowDataset]:
     """
     Merges, re-indexes, and applies final filters to the datasets.
@@ -1783,8 +1780,11 @@ def _merge_and_finalize(
         location: A LocationSelector for final location-based filtering.
         slope: A SlopeSelector for final slope-based filtering.
         realization: A RealizationSelector for final realization-based filtering.
-        on_conflict: How to handle data conflicts ('strict', 'warn', 'ignore').
-        logger: Optional logger instance.
+        norm_slopes: Controls slope normalization:
+            - 'auto' (default): normalize when slopes are consistent across locations;
+              preserve per-location slopes when inconsistent.
+            - True: force normalization to `(slope,)` even if values differ by location.
+            - False: do not call `normalize_slope_coords`.
 
     Returns:
         A unified and filtered xsnowDataset, or None if no datasets were provided.
@@ -1826,43 +1826,7 @@ def _merge_and_finalize(
         grouped_by_location = new_grouped
     
     merged_datasets = []
-    for loc_name, dsets in grouped_by_location.items():
-        # ========== OPTION 1: Normalize coordinates EARLY ==========
-        # Normalize slope coordinates before any merging to avoid conflicts
-        # This ensures inclination/azimuth are consistent across datasets
-        dsets_normalized = []
-        for ds in dsets:
-            if 'slope' in ds.dims:
-                try:
-                    ds = normalize_slope_coords(
-                        ds, 
-                        verify_consistency=True,
-                        allow_per_location=False  # Strict - coordinates must match
-                    )
-                except ValueError as e:
-                    # Coordinate normalization failed - this is a data quality issue
-                    if on_conflict == 'strict':
-                        raise ValueError(
-                            f"Coordinate normalization failed for location '{loc_name}':\n{e}\n\n"
-                            f"This typically indicates:\n"
-                            f"  • Multiple files have different slope configurations\n"
-                            f"  • Data quality issue in source files\n\n"
-                            f"Resolution:\n"
-                            f"  1. Fix source files to have consistent slope coordinates\n"
-                            f"  2. Use on_conflict='warn' to continue with warnings\n"
-                            f"  3. Read files separately and combine manually"
-                        ) from e
-                    elif on_conflict == 'warn':
-                        logger.warning(
-                            f"Slope coordinate normalization failed for '{loc_name}': {e}\n"
-                            f"Continuing with override (last dataset wins)..."
-                        )
-                    # For 'ignore' or 'warn', continue without normalization
-            dsets_normalized.append(ds)
-        
-        # Use normalized datasets for merging
-        dsets = dsets_normalized
-        
+    for loc_name, dsets in grouped_by_location.items():    
         profile_dsets = [ds for ds in dsets if 'layer' in ds.dims]
         timeseries_dsets = [ds for ds in dsets if 'layer' not in ds.dims]
 
@@ -1896,56 +1860,7 @@ def _merge_and_finalize(
                 
                 # Extract underlying xarray Datasets before concat (xr.concat doesn't accept xsnowDataset)
                 profile_xr_datasets = [ds.data if hasattr(ds, 'data') else ds for ds in profile_dsets_cleaned]
-                
-                # ========== OPTION 3: Strict checking with comprehensive reports ==========
-                compat_mode = 'override' if on_conflict == 'ignore' else 'no_conflicts'
-                
-                try:
-                    combined_profiles_ds = xr.concat(
-                        profile_xr_datasets, 
-                        dim='slope', 
-                        join='outer', 
-                        coords='all',
-                        compat=compat_mode
-                    )
-                except xr.MergeError as e:
-                    # Conflict detected during slope concatenation
-                    if on_conflict == 'warn':
-                        logger.warning(
-                            f"Conflicts detected when concatenating slopes for '{loc_name}':\n{e}\n"
-                            f"Using override mode (last slope wins)..."
-                        )
-                        # Retry with override
-                        combined_profiles_ds = xr.concat(
-                            profile_xr_datasets, 
-                            dim='slope', 
-                            join='outer', 
-                            coords='all',
-                            compat='override'
-                        )
-                    else:  # strict mode
-                        # Try xsnow.concat for comprehensive report
-                        try:
-                            from .combiners import concat
-                            concat(profile_xr_datasets, dim='slope', compat='no_conflicts')
-                        except Exception as concat_error:
-                            conflict_details = str(concat_error)
-                        else:
-                            conflict_details = str(e)
-                        
-                        raise ValueError(
-                            f"Failed to concatenate slopes for location '{loc_name}':\n\n"
-                            f"{conflict_details}\n\n"
-                            f"Common causes:\n"
-                            f"  • Multiple files have overlapping but different data\n"
-                            f"  • Same slope appears in multiple files with different values\n\n"
-                            f"Resolution:\n"
-                            f"  1. Fix source files to remove conflicts\n"
-                            f"  2. Use on_conflict='warn' to continue with warnings\n"
-                            f"  3. Use on_conflict='ignore' to silently override\n"
-                            f"  4. Read files separately: ds1=read(f1); ds2=read(f2);\n"
-                            f"     then combine: xsnow.concat([ds1,ds2], compat='override')"
-                        ) from e
+                combined_profiles_ds = xr.concat(profile_xr_datasets, dim='slope', join='outer', coords='all')
                 combined_profiles_ds = combined_profiles_ds.assign_coords(slope=np.arange(combined_profiles_ds.sizes['slope']))
                 
                 # Restore location-level coordinates (without slope dimension)
@@ -1968,58 +1883,7 @@ def _merge_and_finalize(
             continue
 
         if len(all_to_merge) > 1:
-            # ========== OPTION 3: Strict checking with comprehensive reports ==========
-            compat_mode = 'override' if on_conflict == 'ignore' else 'no_conflicts'
-            combine_attrs_mode = 'drop_conflicts' if on_conflict == 'ignore' else 'no_conflicts'
-            
-            try:
-                merged_loc_ds = xr.merge(
-                    all_to_merge, 
-                    compat=compat_mode,
-                    join='outer', 
-                    combine_attrs=combine_attrs_mode
-                )
-            except xr.MergeError as e:
-                # Conflict detected during merge
-                if on_conflict == 'warn':
-                    logger.warning(
-                        f"Conflicts detected when merging datasets for '{loc_name}':\n{e}\n"
-                        f"Using override mode (last dataset wins)..."
-                    )
-                    # Retry with override
-                    merged_loc_ds = xr.merge(
-                        all_to_merge,
-                        compat='override',
-                        join='outer',
-                        combine_attrs='drop_conflicts'
-                    )
-                else:  # strict mode
-                    # Try xsnow.combine for comprehensive report
-                    try:
-                        from .combiners import combine
-                        combine(all_to_merge, compat='no_conflicts', combine_attrs='no_conflicts')
-                    except Exception as combine_error:
-                        conflict_details = str(combine_error)
-                    else:
-                        conflict_details = str(e)
-                    
-                    raise ValueError(
-                        f"Failed to merge datasets for location '{loc_name}':\n\n"
-                        f"{conflict_details}\n\n"
-                        f"Common causes:\n"
-                        f"  • .pro and .smet files have overlapping variables with different values\n"
-                        f"  • Multiple files for same location have conflicting data\n"
-                        f"  • Attributes differ between files\n\n"
-                        f"Resolution:\n"
-                        f"  1. Fix source data files to resolve conflicts\n"
-                        f"  2. Use on_conflict='warn' to continue with warnings\n"
-                        f"  3. Use on_conflict='ignore' to silently override\n"
-                        f"  4. Read files separately:\n"
-                        f"     ds1 = xsnow.read('file1.pro')\n"
-                        f"     ds2 = xsnow.read('file2.smet')\n"
-                        f"     result = xsnow.combine([ds1, ds2], compat='override')"
-                    ) from e
-            
+            merged_loc_ds = xr.merge(all_to_merge, compat='override', join='outer', combine_attrs='no_conflicts')
             merged_datasets.append(merged_loc_ds)
         else:
             merged_datasets.append(all_to_merge[0])
@@ -2030,105 +1894,15 @@ def _merge_and_finalize(
     # Sort by station name for consistent ordering
     merged_datasets.sort(key=lambda ds: str(ds.location.values[0]))
     
-    # Extract location-level coordinates BEFORE concat
-    # These coordinates should have (location,) dimension only
-    location_names = []
-    latitude_vals = []
-    longitude_vals = []
-    altitude_vals = []
-    
-    for ds in merged_datasets:
-        # Get location name
-        loc_name = str(ds.location.values[0])
-        location_names.append(loc_name)
-        
-        # Extract scalar coordinate values
-        for coord_name, coord_list in [('latitude', latitude_vals), 
-                                        ('longitude', longitude_vals), 
-                                        ('altitude', altitude_vals)]:
-            if coord_name in ds.coords:
-                coord_val = ds[coord_name].values
-                # Handle if it's already an array - take first value
-                if hasattr(coord_val, '__iter__') and not isinstance(coord_val, str):
-                    coord_val = float(coord_val.flat[0])
-                else:
-                    coord_val = float(coord_val)
-                coord_list.append(coord_val)
-            else:
-                coord_list.append(np.nan)
-    
     # Extract .data from merged datasets (xr.concat needs plain xarray Datasets)
     merged_xr_datasets = [ds.data if hasattr(ds, 'data') else ds for ds in merged_datasets]
-    
-    # ========== OPTION 3: Strict checking with comprehensive reports ==========
-    # Concat without location-level coordinates (they'll be added back correctly)
-    compat_mode = 'override' if on_conflict == 'ignore' else 'no_conflicts'
-    
-    try:
-        final_xr_dataset = xr.concat(
-            merged_xr_datasets,
-            dim='location', 
-            join='outer', 
-            coords='minimal',  # Only include dimension coordinates
-            compat=compat_mode
-        )
-    except xr.MergeError as e:
-        # Conflict detected during final location concatenation
-        if on_conflict == 'warn':
-            location_names_str = ', '.join(location_names[:5])
-            if len(location_names) > 5:
-                location_names_str += f" ... and {len(location_names)-5} more"
-            
-            logger.warning(
-                f"Conflicts detected when concatenating {len(merged_xr_datasets)} locations:\n{e}\n"
-                f"Locations: {location_names_str}\n"
-                f"Using override mode (last location wins)..."
-            )
-            # Retry with override
-            final_xr_dataset = xr.concat(
-                merged_xr_datasets,
-                dim='location',
-                join='outer',
-                coords='minimal',
-                compat='override'
-            )
-        else:  # strict mode
-            # Try xsnow.concat for comprehensive report
-            try:
-                from .combiners import concat
-                concat(merged_xr_datasets, dim='location', compat='no_conflicts')
-            except Exception as concat_error:
-                conflict_details = str(concat_error)
-            else:
-                conflict_details = str(e)
-            
-            location_names_str = ', '.join(location_names[:5])
-            if len(location_names) > 5:
-                location_names_str += f" ... and {len(location_names)-5} more"
-            
-            raise ValueError(
-                f"Failed to concatenate {len(merged_xr_datasets)} locations:\n\n"
-                f"{conflict_details}\n\n"
-                f"Locations: {location_names_str}\n\n"
-                f"Common causes:\n"
-                f"  • Different locations have incompatible coordinate values\n"
-                f"  • Variables have different shapes/dimensions across locations\n"
-                f"  • Attributes conflict between locations\n\n"
-                f"Resolution:\n"
-                f"  1. Fix source files to ensure consistency\n"
-                f"  2. Use on_conflict='warn' to continue with warnings\n"
-                f"  3. Use on_conflict='ignore' to silently override\n"
-                f"  4. Read locations separately:\n"
-                f"     locs = [xsnow.read(f) for f in files]\n"
-                f"     result = xsnow.concat(locs, dim='location', compat='override')"
-            ) from e
-    
-    # Now assign location-level coordinates properly with (location,) dimension
-    final_xr_dataset = final_xr_dataset.assign_coords({
-        'latitude': ('location', latitude_vals),
-        'longitude': ('location', longitude_vals),
-        'altitude': ('location', altitude_vals)
-    })
+    final_xr_dataset = xr.concat(
+        merged_xr_datasets,
+        dim='location', 
+        join='outer', 
+        coords='all',
+        compat='override'
+    )
     
     # Preserve CF-compliant metadata
     if not final_xr_dataset.attrs:
@@ -2157,19 +1931,30 @@ def _merge_and_finalize(
                 if 'long_name' not in final_xr_dataset[var_name].attrs:
                     final_xr_dataset[var_name].attrs['long_name'] = var_name.replace('_', ' ')
 
-    # ========== NEW: Normalize slope coordinates ==========
+    # Normalize slope coordinates
     # After merging multiple locations, slope coordinates (azimuth, inclination)
     # may have dimensions (location, slope) when they should only have (slope).
-    # This fixes Issue A: ensures slope coords have only (slope) dimension.
     if 'slope' in final_xr_dataset.dims:
         try:
-            logger.debug("Normalizing slope coordinates...")
-            final_xr_dataset = normalize_slope_coords(
-                final_xr_dataset,
-                verify_consistency=True,
-                allow_per_location=True  # Allow slopes to vary by location
-            )
-            logger.debug("Slope coordinates normalized successfully")
+            if norm_slopes is True:
+                final_xr_dataset = normalize_slope_coords(
+                    final_xr_dataset,
+                    verify_consistency=False,  # Force reduction even if slopes differ by location
+                    allow_per_location=False,  # Always collapse to (slope,)
+                )
+            elif norm_slopes == 'auto':
+                final_xr_dataset = normalize_slope_coords(
+                    final_xr_dataset,
+                    verify_consistency=True,   # Only reduce when consistent
+                    allow_per_location=True,   # Preserve per-location slopes when inconsistent
+                )
+            elif norm_slopes is False:
+                pass  # Explicitly skip normalization
+            else:
+                raise ValueError(
+                    f"Unsupported norm_slopes value: {norm_slopes!r}. "
+                    "Use True, False, or 'auto'."
+                )
         except ValueError as e:
             # This should rarely happen now with allow_per_location=True
             # Only occurs if there's a true data structure problem
@@ -2179,7 +1964,6 @@ def _merge_and_finalize(
             )
             # Re-raise instead of silently using first location's values
             raise
-    # ========== END: Slope coordinate normalization ==========
     
     # The location coordinate is already meaningful strings
     # Apply final filters
@@ -2207,10 +1991,6 @@ def _merge_and_finalize(
         final_dataset = final_dataset.compute_HS()
 
     final_dataset = final_dataset.update_profile_status()
-    
-    # Ensure timezone attribute is set on time coordinate
-    if 'time' in final_dataset.data.coords and 'timezone' not in final_dataset.data['time'].attrs:
-        final_dataset.data['time'].attrs['timezone'] = 'UTC+00:00'
     
     return final_dataset
 
