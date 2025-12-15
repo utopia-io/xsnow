@@ -374,8 +374,12 @@ def normalize_slope_coords(
             
             # Only normalize if consistent or if we're not checking
             if is_consistent or not verify_consistency:
-                # Take first location and drop the location coordinate
-                normalized = coord.isel(location=0).drop_vars('location', errors='ignore')
+                # Take first location, drop its attached coords (lat/lon/alt), keep only slope dim
+                normalized = (
+                    coord
+                    .isel(location=0, drop=True)
+                    .reset_coords(drop=True)
+                )
                 coords_to_update[coord_name] = normalized
             
         else:
@@ -393,6 +397,8 @@ def normalize_slope_coords(
                 # Drop the coordinate to avoid scalar dimension conflicts
                 normalized = normalized.drop_vars(dim, errors='ignore')
             
+            # Remove any remaining non-dimension coords (e.g., latitude) before reassigning
+            normalized = normalized.reset_coords(drop=True)
             coords_to_update[coord_name] = normalized
     
     # Apply updates if any

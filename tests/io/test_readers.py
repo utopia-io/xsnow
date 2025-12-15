@@ -123,8 +123,8 @@ def test_read_smets_dir_snowobs(snowobs_smets_dir_nowcast):
     assert ds.latitude.notnull().any()
     assert ds.longitude.notnull().any()
     assert ds.altitude.notnull().any()
-    assert ds.azimuth.notnull().any()
-    assert ds.inclination.notnull().any()
+    assert ds.azimuth.isnull().all()
+    assert ds.inclination.isnull().all()
 
     assert 'TA' in ds.data_vars
     assert ds.TA.dims == ('location', 'time', 'slope', 'realization')
@@ -134,21 +134,22 @@ def test_read_smets_dir_snowobs(snowobs_smets_dir_nowcast):
 def test_read_normalize_slope_dim_smet_dir(snowobs_smets_dir_nowcast):
     """
     Test reading multiple SMET files and adjust slope normalization behavior
+    The difference to PRO files is, that SMET files have no inclination/azimuth info!
     """
     ds = read(snowobs_smets_dir_nowcast, norm_slopes=True)
     assert ds.azimuth.dims == ('slope',) == ds.inclination.dims
-    assert ds.azimuth.notnull().any()
-    assert ds.inclination.notnull().any()
+    assert ds.azimuth.isnull().all()
+    assert ds.inclination.isnull().all()
     
     ds = read(snowobs_smets_dir_nowcast, norm_slopes=False)
     assert ds.azimuth.dims == ('location', 'slope',) == ds.inclination.dims
-    assert ds.azimuth.notnull().any()
-    assert ds.inclination.notnull().any()
+    assert ds.azimuth.isnull().all()
+    assert ds.inclination.isnull().all()
     
     ds = read(snowobs_smets_dir_nowcast, norm_slopes='auto')
-    assert ds.azimuth.dims == ('location', 'slope',) == ds.inclination.dims
-    assert ds.azimuth.notnull().any()
-    assert ds.inclination.notnull().any()
+    assert ds.azimuth.dims == ('slope',) == ds.inclination.dims
+    assert ds.azimuth.isnull().all()
+    assert ds.inclination.isnull().all()
 
 
 @pytest.mark.real_data
@@ -202,7 +203,7 @@ def test_read_multiple_pro_and_smet(snowobs_pros_dir):
     # Read directory of .pro and .smet files:
     ds = read(snowobs_pros_dir)
 
-    assert 'time' is ds.coords
+    assert 'time' in ds.coords
     assert 'timezone' in ds.time.attrs
     assert 'density' in ds.data_vars
     assert 'HS' in ds.data_vars       # from .pro file
