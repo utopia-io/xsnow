@@ -567,9 +567,14 @@ class xsnowDataset:
         else:
             hs = self.data['height'].max(dim='layer', skipna=True)
 
-        hs.attrs = {'units': 'm',
-                    'long_name': 'Total Snow Height',
-                    'standard_name': 'height_of_snow'}
+        # Attach metadata from registry when available, otherwise sensible defaults
+        reg_entry = registry.get('HS', {})
+        hs.attrs = {
+            'standard_name': reg_entry.get('standard_name', 'height_of_snow'),
+            'long_name': reg_entry.get('long_name', 'Total snow height'),
+            'units': reg_entry.get('si_units', 'm'),
+            'description': 'Total depth of snowpack (maximum height above ground)',
+        }
         
         return self.__class__(self.data.assign({'HS': hs}))
 

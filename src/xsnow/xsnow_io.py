@@ -1989,7 +1989,7 @@ def _merge_and_finalize(
     
     # Compute HS if not present
     if 'HS' not in final_dataset and 'height' in final_dataset:
-        final_dataset = final_dataset.compute_HS()
+        final_dataset = final_dataset.compute_hs()
 
     final_dataset = final_dataset.update_profile_status()
     
