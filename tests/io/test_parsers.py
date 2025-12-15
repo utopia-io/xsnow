@@ -198,13 +198,13 @@ def test_create_pro_dataset_real_data(sample_pro_file):
 # ============================================================================
 
 @pytest.mark.real_data
-def test_read_smet_basic_real_data(smet_files_dir):
+def test_read_smet_basic_real_data(snowobs_smets_dir_nowcast):
     """
     Test SMET parsing with real meteorological data.
     
     Validates extraction of time series data.
     """
-    smet_files = list(smet_files_dir.glob("*.smet"))
+    smet_files = list(snowobs_smets_dir_nowcast.glob("*.smet"))
     if not smet_files:
         pytest.skip("No SMET files available")
     
@@ -223,11 +223,11 @@ def test_read_smet_basic_real_data(smet_files_dir):
 
 
 @pytest.mark.real_data
-def test_read_smet_metadata_real_data(smet_files_dir):
+def test_read_smet_metadata_real_data(snowobs_smets_dir_nowcast):
     """
     Test that SMET metadata is correctly parsed and stored.
     """
-    smet_files = list(smet_files_dir.glob("*.smet"))
+    smet_files = list(snowobs_smets_dir_nowcast.glob("*.smet"))
     if not smet_files:
         pytest.skip("No SMET files available")
     

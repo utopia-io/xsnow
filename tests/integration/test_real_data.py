@@ -58,9 +58,9 @@ class TestReadRealSnowpackData:
         
         assert_physical_validity(ds)
     
-    def test_read_real_smet(self, smet_files_dir):
+    def test_read_real_smet(self, snowobs_smets_dir_nowcast):
         """Test reading real SMET meteorological files."""
-        ds = read(smet_files_dir)
+        ds = read(snowobs_smets_dir_nowcast)
         
         if ds is None:
             pytest.skip("No SMET files found in test data")

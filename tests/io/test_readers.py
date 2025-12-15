@@ -19,7 +19,7 @@ from xsnow.selectors import TimeSelector, LocationSelector, SlopeSelector, Reali
 
 
 # ============================================================================
-# REAL DATA TESTS - SINGLE FILE
+# REAL DATA TESTS - SINGLE SOURCE
 # ============================================================================
 
 @pytest.mark.real_data
@@ -39,11 +39,11 @@ def test_read_single_pro_file(sample_pro_file):
 
 
 @pytest.mark.real_data
-def test_read_single_smet_file(smet_files_dir):
+def test_read_single_smet_file(snowobs_smets_dir_nowcast):
     """
     Test reading a single SMET file.
     """
-    smet_files = list(smet_files_dir.glob("*.smet"))
+    smet_files = list(snowobs_smets_dir_nowcast.glob("*.smet"))
     if not smet_files:
         pytest.skip("No SMET files available")
     
@@ -66,13 +66,30 @@ def test_read_directory_gridded(gridded_pros_dir):
     Tests multi-file processing and merging.
     """
     ds = read(gridded_pros_dir)
-    
+
     assert ds is not None
-    assert ds.sizes['location'] > 0
-    
-    # Gridded data has multiple slopes
-    if 'slope' in ds.dims:
-        assert ds.sizes['slope'] > 1
+    assert isinstance(ds, xsnowDataset)
+    assert 'time' in ds.sizes
+    assert 'timezone' in ds.time.attrs
+    assert 'crs' in ds.attrs
+
+    assert ds.sizes['location'] > 1
+    assert ds.sizes['location'] == ds.latitude.size == ds.longitude.size == ds.altitude.size
+    assert ds.sizes['slope'] == 5
+    assert ds.azimuth.dims == ('slope',) == ds.inclination.dims
+    assert ds.sizes['slope'] == ds.azimuth.size == ds.inclination.size
+
+    assert ds.latitude.notnull().any()
+    assert ds.longitude.notnull().any()
+    assert ds.altitude.notnull().any()
+    assert ds.azimuth.notnull().any()
+    assert ds.inclination.notnull().any()
+    assert 'z' in ds.coords
+
+    assert 'density' in ds.data_vars
+    assert ds.density.dims == ('location', 'time', 'slope', 'realization', 'layer')
+    assert 'TA' in ds.data_vars
+    assert ds.TA.dims == ('location', 'time', 'slope', 'realization')
 
 
 @pytest.mark.real_data
@@ -85,6 +102,74 @@ def test_read_directory_subset(real_file_subset):
     assert ds is not None
     assert ds.sizes['location'] > 0
     assert ds.sizes['time'] > 0
+
+
+@pytest.mark.real_data
+def test_read_smets_dir_snowobs(snowobs_smets_dir_nowcast):
+    """
+    Test reading directory of SMET files.
+    """
+    ds = read(snowobs_smets_dir_nowcast)
+    
+    assert ds is not None
+    assert isinstance(ds, xsnowDataset)
+    assert 'time' in ds.dims
+    assert 'timezone' in ds.time.attrs
+    assert 'crs' in ds.attrs
+
+    assert ds.sizes['location'] > 1
+    assert ds.sizes['location'] == ds.latitude.size == ds.longitude.size == ds.altitude.size
+    
+    assert ds.latitude.notnull().any()
+    assert ds.longitude.notnull().any()
+    assert ds.altitude.notnull().any()
+    assert ds.azimuth.notnull().any()
+    assert ds.inclination.notnull().any()
+
+    assert 'TA' in ds.data_vars
+    assert ds.TA.dims == ('location', 'time', 'slope', 'realization')
+
+
+@pytest.mark.real_data
+def test_read_normalize_slope_dim_smet_dir(snowobs_smets_dir_nowcast):
+    """
+    Test reading multiple SMET files and adjust slope normalization behavior
+    """
+    ds = read(snowobs_smets_dir_nowcast, norm_slopes=True)
+    assert ds.azimuth.dims == ('slope',) == ds.inclination.dims
+    assert ds.azimuth.notnull().any()
+    assert ds.inclination.notnull().any()
+    
+    ds = read(snowobs_smets_dir_nowcast, norm_slopes=False)
+    assert ds.azimuth.dims == ('location', 'slope',) == ds.inclination.dims
+    assert ds.azimuth.notnull().any()
+    assert ds.inclination.notnull().any()
+    
+    ds = read(snowobs_smets_dir_nowcast, norm_slopes='auto')
+    assert ds.azimuth.dims == ('location', 'slope',) == ds.inclination.dims
+    assert ds.azimuth.notnull().any()
+    assert ds.inclination.notnull().any()
+
+
+@pytest.mark.real_data
+def test_read_normalize_slope_dim_pro_dir(snowobs_pros_dir):
+    """
+    Test reading dir of .pro and .smet files and adjust slope normalization behavior
+    """
+    ds = read(snowobs_pros_dir, norm_slopes=True)
+    assert ds.azimuth.dims == ('slope',) == ds.inclination.dims
+    assert ds.azimuth.notnull().any()
+    assert ds.inclination.notnull().any()
+    
+    ds = read(snowobs_pros_dir, norm_slopes=False)
+    assert ds.azimuth.dims == ('location', 'slope',) == ds.inclination.dims
+    assert ds.azimuth.notnull().any()
+    assert ds.inclination.notnull().any()
+    
+    ds = read(snowobs_pros_dir, norm_slopes='auto')
+    assert ds.azimuth.dims == ('location', 'slope',) == ds.inclination.dims
+    assert ds.azimuth.notnull().any()
+    assert ds.inclination.notnull().any()
 
 
 # ============================================================================
@@ -108,26 +193,39 @@ def test_read_multiple_sources_list(snowobs_pros_dir, snowobs_pits_dir):
 
 
 @pytest.mark.real_data
-def test_read_multiple_sources_pro_and_smet(snowobs_pros_dir, smet_files_dir):
+def test_read_multiple_pro_and_smet(snowobs_pros_dir):
     """
     Test reading both .pro and .smet files together.
     
     Should merge profile and time series data.
     """
-    # Read .pro files
+    # Read directory of .pro and .smet files:
     ds = read(snowobs_pros_dir)
-    
-    if ds is None:
-        pytest.skip("No snowobs data available")
-    
-    # Now merge SMET data
-    smet_files = list(smet_files_dir.glob("*.smet"))
-    if smet_files:
-        # Read first SMET for same station
-        ds_merged = ds.merge_smet(smet_files[0])
-        
-        assert ds_merged is not None
-        # Should have both profile and time series variables
+
+    assert 'time' is ds.coords
+    assert 'timezone' in ds.time.attrs
+    assert 'density' in ds.data_vars
+    assert 'HS' in ds.data_vars       # from .pro file
+    assert 'ski_pen' in ds.data_vars  # from .smet file
+
+
+@pytest.mark.real_data
+def test_read_conflicting_pro_smet_dirs(snowobs_pros_dir, snowobs_smets_dir_nowcast):
+    """
+    Test reading two directories with different timezones, should raise
+    """
+    with pytest.raises(ValueError):
+        ds = read([snowobs_pros_dir, snowobs_smets_dir_nowcast])
+
+
+@pytest.mark.real_data
+def test_merge_conflicting_smet_dir(snowobs_pros_dir, snowobs_smets_dir_nowcast):
+    """
+    Read a pro dir, then try merge_smet with a conflicting timezone, should raise
+    """
+    ds = read(snowobs_pros_dir)
+    with pytest.raises(ValueError):
+        ds.merge_smet(snowobs_smets_dir_nowcast)
 
 
 # ============================================================================
@@ -356,11 +454,11 @@ def test_auto_detect_file_type_pro(sample_pro_file):
 
 
 @pytest.mark.real_data  
-def test_auto_detect_file_type_smet(smet_files_dir):
+def test_auto_detect_file_type_smet(snowobs_smets_dir_nowcast):
     """
     Test that .smet files are automatically detected and routed correctly.
     """
-    smet_files = list(smet_files_dir.glob("*.smet"))
+    smet_files = list(snowobs_smets_dir_nowcast.glob("*.smet"))
     if not smet_files:
         pytest.skip("No SMET files available")
     

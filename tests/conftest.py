@@ -157,6 +157,15 @@ def snowobs_pros_dir() -> Path:
 
 
 @pytest.fixture(scope="session")
+def snowobs_smets_dir_nowcast() -> Path:
+    """Directory containing snow observation SNOWPACK .smet files (nowcast forcing)."""
+    try:
+        return _get_dir_path("smets/snowobs/nowcast")
+    except FileNotFoundError:
+        pytest.skip("Snow observation data not available in test repo")
+
+
+@pytest.fixture(scope="session")
 def snowobs_pits_dir() -> Path:
     """Directory containing snow observation .pro files (converted from caaml)."""
     try:
@@ -212,15 +221,6 @@ def snp_snowobs_obs_xs(snp_snowobs_netcdf: Path):
     """
     xs = read(snp_snowobs_netcdf[1], lazy=False)
     return xs
-
-
-@pytest.fixture(scope="session")
-def smet_files_dir() -> Path:
-    """Directory containing SMET meteorological forcing files."""
-    try:
-        return _get_dir_path("smets")
-    except FileNotFoundError:
-        pytest.skip("SMET data not available in test repo")
 
 
 @pytest.fixture
