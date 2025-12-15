@@ -9,7 +9,8 @@ code duplication and improve maintainability.
 import builtins
 import logging
 import os
-from typing import Union, Any, Optional, List
+from collections import OrderedDict
+from typing import Union, Any, Optional, List, Sequence
 
 import numpy as np
 import xarray as xr
@@ -414,7 +415,7 @@ def normalize_slope_coords(
         logger.debug(
             f"Normalized slope coordinates {coord_list} to have only 'slope' dimension"
         )
-    
+
     return ds
 
 
@@ -492,6 +493,63 @@ def detect_slope_coord_issues(ds: xr.Dataset) -> dict:
         )
     
     return diagnostics
+
+
+def reorder_dims(
+    ds: Union[xsnowDataset, xr.Dataset],
+    preferred_order: Sequence[str] = ("location", "time", "slope", "realization", "layer"),
+    last_dims: Optional[Sequence[str]] = None,
+) -> Union[xsnowDataset, xr.Dataset]:
+    """
+    Reorder dataset dimensions without dropping data, coords, or attrs.
+    
+    Parameters
+    ----------
+    ds : xsnowDataset or xr.Dataset
+        Dataset to reorder.
+    preferred_order : sequence of str
+        Dimensions to place first in the given order.
+    last_dims : sequence of str, optional
+        Dimensions to force to the end in the given order.
+
+    Notes
+    -----
+    - Any dimensions not in ``preferred_order`` or ``last_dims`` keep their
+      original relative order and are placed between the two groups.
+    - All coordinates, data variables, attrs, and encoding are preserved.
+    - Rebuilds the dataset to enforce deterministic discovery order for ``ds.dims``.
+    """
+    input_is_xsnow = isinstance(ds, xsnowDataset)
+    base_ds: xr.Dataset = ds.data if input_is_xsnow else ds
+
+    tail = list(last_dims) if last_dims is not None else []
+    dims = list(base_ds.dims)
+
+    final: List[str] = [d for d in preferred_order if d in dims]
+    seen = set(final)
+
+    tail_set = set(tail)
+    extras = [d for d in dims if d not in seen and d not in tail_set]
+    final.extend(extras)
+
+    for d in tail:
+        if d in dims and d not in final:
+            final.append(d)
+
+    transposed = base_ds.transpose(*final, missing_dims="ignore")
+
+    def _var_sort_key(var: xr.Variable) -> int:
+        idxs = [final.index(d) for d in var.dims if d in final]
+        return min(idxs) if idxs else len(final) + 1
+
+    ordered_vars = OrderedDict(
+        sorted(transposed.variables.items(), key=lambda item: (_var_sort_key(item[1]), item[0]))
+    )
+    rebuilt = xr.Dataset(ordered_vars, attrs=transposed.attrs)
+    rebuilt = rebuilt.set_coords(transposed.coords.keys())
+
+    final_ds = rebuilt.transpose(*final, missing_dims="ignore")
+    return xsnowDataset(final_ds) if input_is_xsnow else final_ds
 
 
 @register_xsnowDataset_method

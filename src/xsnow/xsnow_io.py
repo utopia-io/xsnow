@@ -53,7 +53,7 @@ from .selectors import (
 )
 from .plugin import register_xsnowDataset_method
 from .combiners import concat as xsnow_concat
-from .utils import get_logger, normalize_slope_coords
+from .utils import get_logger, normalize_slope_coords, reorder_dims
 
 # --- Dynamic Mapping from Registry ---
 CODE_TO_NAME_MAP = {
@@ -313,7 +313,7 @@ def _decode_mapping_attrs_from_netcdf(ds: xr.Dataset) -> xr.Dataset:
             var.attrs["mapping"] = decoded
             del var.attrs["mapping_json"]
 
-    return ds
+    return reorder_dims(ds)
 
 # --------------------------------------------------------------------------- #
 #                    EAGER LOADING WITH MULTIPROCESSING                       #
@@ -1684,7 +1684,7 @@ def read_smet(
             slope_azi = float(slope_azi) if slope_azi is not None else np.nan
         except (ValueError, TypeError):
             slope_azi = np.nan
-        
+
         ds = ds.assign_coords({
             'inclination': ('slope', [slope_incl]),
             'azimuth': ('slope', [slope_azi])
@@ -1976,6 +1976,7 @@ def _merge_and_finalize(
     if realization: 
         final_xr_dataset = realization.apply(final_xr_dataset)
 
+    final_xr_dataset = reorder_dims(final_xr_dataset)
     final_dataset = xsnowDataset(final_xr_dataset)
     
     # DEBUG: Check slope coordinates after merge
