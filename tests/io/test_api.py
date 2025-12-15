@@ -383,14 +383,12 @@ def test_read_merge_smet_snp_snowobs():
 
     # The rest of the test proceeds only if ds is a valid dataset
     assert isinstance(ds, xsnowDataset)
-    ds_merged = ds.merge_smet([
-        snowobs_dir / "smets" / "snowobs" / "nowcast",
-        snowobs_dir / "smets" / "snowobs" /"forecast"
-    ], realization=1, var_prefix='input.')
-    
-    # Add assertions to verify the merge was successful
-    assert isinstance(ds_merged, xsnowDataset)
-    assert ('input.TA' in ds_merged.data)
+    with pytest.raises(ValueError):
+        ds_merged = ds.merge_smet([
+            snowobs_dir / "smets" / "snowobs" / "nowcast",
+            snowobs_dir / "smets" / "snowobs" /"forecast"
+        ], realization=1, var_prefix='input.')
+
     
 @pytest.fixture(scope="module")
 def pro_data_with_soil():

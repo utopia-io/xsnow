@@ -229,6 +229,38 @@ def test_merge_conflicting_smet_dir(snowobs_pros_dir, snowobs_smets_dir_nowcast)
         ds.merge_smet(snowobs_smets_dir_nowcast)
 
 
+@pytest.mark.real_data
+def test_merge_smets_snowobs(snowobs_pros_dir):
+    """
+    Read all pros from dir, then merge_smet
+    """
+    pro_files = list(snowobs_pros_dir.glob("*.pro"))
+    smet_files = list(snowobs_pros_dir.glob("*.smet"))
+    ds = read(pro_files)
+    ds = ds.merge_smet(smet_files, var_prefix='input_')
+
+    assert 'time' in ds.sizes
+    assert 'timezone' in ds.time.attrs
+    assert 'crs' in ds.attrs
+
+    assert ds.sizes['location'] > 1
+    assert ds.sizes['location'] == ds.latitude.size == ds.longitude.size == ds.altitude.size
+    assert ds.sizes['slope'] >= 1
+
+    assert ds.latitude.notnull().any()
+    assert ds.longitude.notnull().any()
+    assert ds.altitude.notnull().any()
+    assert ds.azimuth.notnull().any()
+    assert ds.inclination.notnull().any()
+    assert 'z' in ds.coords
+
+    assert 'density' in ds.data_vars
+    assert ds.density.dims == ('location', 'time', 'slope', 'realization', 'layer')
+    assert 'input_ski_pen' in ds.data_vars
+    assert ds.input_ski_pen.dims == ('location', 'time', 'slope', 'realization')
+
+
+
 # ============================================================================
 # REAL DATA TESTS - NETCDF
 # ============================================================================

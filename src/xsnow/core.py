@@ -501,14 +501,26 @@ class xsnowDataset:
                 for name in smet_xarray.data_vars
             }
             smet_xarray = smet_xarray.rename(rename_mapping)
+        # Avoid conflicts on profile_status (timeseries SMETs don't carry layer info)
+        if 'profile_status' in smet_xarray:
+            smet_xarray['profile_status'] = smet_xarray['profile_status'] * np.nan
+
+        try:
+            smet_timezone = smet_xarray['time'].tz.get_attr()
+        except KeyError:
+            smet_timezone = None
 
         # Merge the (potentially renamed) SMET data into the existing dataset
         combined = xr.merge(
             [self.data, smet_xarray],
-            compat='override',
+            compat='no_conflicts', combine_attrs="no_conflicts",
             join='outer'
         )
-        return xsnowDataset(combined)
+        # If base lacked timezone but SMET provided one, keep it
+        if 'time' in combined and 'timezone' not in combined.time.attrs and smet_timezone is not None:
+            combined.time.tz.set_attr(smet_timezone)
+
+        return self.__class__(combined)
             
     def to_xarray(self) -> xr.Dataset:
         """
