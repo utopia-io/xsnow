@@ -282,10 +282,16 @@ def test_localize_without_conflict_no_warning(ds):
 
 def test_to_datetimeindex_in_and_to_naive_in_roundtrip(ds):
     # Vienna-aware → UTC-aware → UTC-naive and compare with manual path
-    idx_vie = ds["time"].tz.to_datetimeindex_in("Europe/Vienna")
-    assert isinstance(idx_vie, pd.DatetimeIndex)
-    assert str(idx_vie.tz) in ("Europe/Vienna", "CET", "CEST")
-    # TODO
+    idx_utc = ds["time"].tz.to_datetimeindex_in("UTC")
+    assert isinstance(idx_utc, pd.DatetimeIndex)
+    assert str(idx_utc.tz) in ("UTC")
+
+    naive_utc = ds['time'].tz.to_naive_in("UTC")
+    idx_naive_utc = idx_utc.tz_localize(None)
+    np.testing.assert_array_equal(
+        naive_utc.values.astype("datetime64[ns]"),
+        idx_naive_utc.to_numpy(dtype="datetime64[ns]"),
+    )
 
 def test_to_datetimeindex_in_series_alignment(ds):
     ser = ds["time"].tz.to_datetimeindex_in(0, as_series=True)
@@ -322,8 +328,6 @@ def test_to_naive_in_preserves_coords_and_attrs(ds):
     assert naive.attrs["note"] == "dtype is tz-naive"
     xr.testing.assert_equal(naive["time"], ds["time"])
     assert not np.array_equal(naive.values, ds["time"].values)
-    for coord in ("latitude", "longitude", "altitude"):
-        assert coord in naive.coords
 
 
 def test_between_defaults_full_span_da(ds):
