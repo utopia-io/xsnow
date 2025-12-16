@@ -752,6 +752,15 @@ class xsnowDataset:
         out = self.data.copy(deep=False)
         out["profile_status"] = status_out
         return self.__class__(out)
+    
+
+    def profile_status_summary(self) -> None:
+        """Print a summary table of profile_status occurrences"""
+        if self is not None and 'profile_status' in self:
+            print(self['profile_status']
+                .to_dataframe().groupby('profile_status')['profile_status'].count())
+        else:
+            print("No profile status available")
 
 
 
