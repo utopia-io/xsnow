@@ -247,9 +247,38 @@ class xsnowDataset:
             raise KeyError("Dataset is not loaded.")
         return key in self.data
 
-    def _rewrap(self, new_data: xr.Dataset) -> "xsnowDataset":
-            """Return a new xsnowDataset instance wrapping new_data."""
-            return self.__class__(new_data)
+    @staticmethod
+    def _unwrap_xr(value: Union[xr.Dataset, "xsnowDataset"]) -> xr.Dataset:
+        """
+        Return the underlying ``xarray.Dataset`` from a dataset-like input.
+
+        This exists mainly for internal convenience: extension code and helper
+        methods sometimes already have an ``xsnowDataset`` (or decorated) object
+        and sometimes a raw ``xarray.Dataset``. ``xsnow`` consistently stores
+        the concrete data in ``.data`` as an ``xarray.Dataset``.
+        """
+        if isinstance(value, xr.Dataset):
+            return value
+        if isinstance(value, xsnowDataset):
+            return value.data
+        raise TypeError(
+            "Expected an xarray.Dataset or xsnowDataset (decorated is fine); "
+            f"got {type(value)!r}."
+        )
+
+    def _rewrap(self, new_data: Union[xr.Dataset, "xsnowDataset"]) -> "xsnowDataset":
+        """
+        Return a new wrapper instance around *new_data*.
+
+        Notes
+        -----
+        This is a small internal helper used to keep wrapper types stable when
+        an operation produces a new dataset. ``new_data`` can be either a raw
+        ``xarray.Dataset`` or any ``xsnowDataset``-like wrapper; in the latter
+        case its ``.data`` is used.
+        """
+        xr_ds = self._unwrap_xr(new_data)
+        return self.__class__(xr_ds)
 
     def _format_time_range(self, times: int, force_details: bool) -> str:
         """Return a cheap time range summary if possible."""
@@ -822,10 +851,49 @@ class xsnowDataset:
 
 class DatasetDecorator(xsnowDataset):
     """
-    A decorator that *is also* an xsnowDataset (subclassing), so it exposes the
-    same API as the base wrapper, plus any extra methods/properties that will be added.
+    Base class for extension "decorators" that layer functionality onto an ``xsnowDataset``.
+
+    A ``DatasetDecorator`` is itself an ``xsnowDataset`` (it subclasses it) so it exposes
+    the normal wrapper API (and the underlying ``xarray.Dataset`` via ``self.data``),
+    but it also keeps a reference to another dataset wrapper in ``self.base``.
+
+    The ``base`` reference is what makes the *decorator chain* work: a decorator can wrap
+    either a plain ``xsnowDataset`` or another ``DatasetDecorator``. This allows multiple
+    extensions to be stacked while still delegating higher-level functionality to the
+    wrapped object.
+
+    The keyword-only ``data`` parameter in ``__init__`` is intentionally *not* part of the
+    public end-user API. It exists so internal machinery (primarily ``_rewrap`` and
+    ``__getattr__`` forwarding) can create a new decorated instance around a new dataset
+    produced by an xarray operation (e.g. ``sel``, ``drop_vars``, ``assign``) without
+    mutating any existing instances.
     """
-    def __init__(self, base: "xsnowDataset", *, data: Optional[xr.Dataset] = None):
+    def __init__(self, base: "xsnowDataset", *, data: Optional[Union[xr.Dataset, "xsnowDataset"]] = None):
+        """
+        Initialize a decorator instance.
+
+        Parameters
+        ----------
+        base:
+            The wrapped dataset object (either a plain ``xsnowDataset`` or another
+            ``DatasetDecorator``). ``base`` is required so that:
+              - attribute access can delegate to the already-configured wrapper chain
+                (including previously applied extensions), and
+              - ``_rewrap()`` can rebuild that chain around a new ``xarray.Dataset``
+                when an xarray operation returns a new dataset.
+
+        data:
+            The concrete ``xarray.Dataset`` to expose as ``self.data`` for *this* wrapper
+            instance. When omitted, the decorator uses ``base.data``.
+
+            This is primarily an internal hook used by ``_rewrap()``: when an operation
+            produces a new dataset, the decorator chain is rebuilt with ``base`` updated
+            to wrap the new dataset, and ``data`` is passed explicitly so that the newly
+            returned object consistently points at that same dataset.
+
+            For convenience, ``data`` may also be an ``xsnowDataset`` (including another
+            decorator instance). In that case its underlying ``.data`` is used.
+        """
         self._base = base
         super().__init__(data if data is not None else base.data)
         
@@ -834,29 +902,38 @@ class DatasetDecorator(xsnowDataset):
         self._decorator_kwargs = getattr(base, "_decorator_kwargs", {})
     
     @property
-    def base(self):
+    def base(self) -> "xsnowDataset":
         """Return the underlying xsnowDataset being decorated."""
         return self._base
 
-    def _rewrap(self, new_data: xr.Dataset):
+    def _rewrap(self, new_data: Union[xr.Dataset, "xsnowDataset"]):
         """
         Return a new instance of *this* decorator class around new_data.
-        Rebuild the base chain so base.data == new_data (no mutation).
+
+        ``new_data`` can be either a raw ``xarray.Dataset`` or any ``xsnowDataset``-like
+        wrapper; in the latter case its ``.data`` is used.
+
+        This is primarily intended for extension authors. End users typically do not
+        need to call ``_rewrap`` directly because xarray operations performed through
+        the wrapper are automatically re-wrapped.
+
+        Rebuild the base chain so ``base.data`` matches the coerced dataset (no mutation).
         """
+        xr_ds = self._unwrap_xr(new_data)
         base = self._base
 
         if isinstance(base, DatasetDecorator):
             # Rebuild the entire decorator chain under us with new_data
-            new_base = base._rewrap(new_data)
+            new_base = base._rewrap(xr_ds)
         elif isinstance(base, xsnowDataset):
             # Plain base wrapper → rebuild it around new_data
-            new_base = base._rewrap(new_data)
+            new_base = base._rewrap(xr_ds)
         else:
             # Fallback (shouldn't happen in your design)
-            new_base = xsnowDataset(new_data)
+            new_base = xsnowDataset(xr_ds)
 
         # Create a fresh instance of *this* decorator with the rebuilt base
-        new = self.__class__(new_base, data=new_data)
+        new = self.__class__(new_base, data=xr_ds)
 
         # Optional: keep args/kwargs consistent for future rewraps
         new._decorator_args = (new_base,)
@@ -867,7 +944,16 @@ class DatasetDecorator(xsnowDataset):
     def __getattr__(self, name):
         # 1) Prefer the xsnowDataset surface (user methods, registered extensions, etc.)
         if hasattr(self.base, name):
-            return getattr(self.base, name)
+            attr = getattr(self.base, name)
+            if callable(attr):
+                # If an inner decorator method returns an xsnowDataset-like wrapper,
+                # promote it back to *this* outer decorator chain. If it returns a
+                # plain xr.Dataset intentionally, keep it as-is.
+                def method(*args, **kwargs):
+                    result = attr(*args, **kwargs)
+                    return self._rewrap(result) if isinstance(result, xsnowDataset) else result
+                return method
+            return attr
 
         # 2) Fall back to the underlying xr.Dataset API
         attr = getattr(self.data, name)
