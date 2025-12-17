@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import json
 import numpy as np
 import pandas as pd
 import pytest
@@ -65,6 +67,28 @@ def tiny_ds_xr() -> xr.Dataset:
 def tiny_xsnow(tiny_ds_xr) -> xsnowDataset:
     """Wrap the tiny xr.Dataset in xsnowDataset."""
     return xsnowDataset(tiny_ds_xr)
+
+
+@pytest.fixture
+def tiny_xsnow_geo(tiny_ds_xr) -> xsnowDataset:
+    """Tiny dataset with latitude/longitude coords for spatial classification."""
+    ds = tiny_ds_xr.assign_coords(
+        latitude=("location", np.array([0.0, 10.0], dtype=float)),
+        longitude=("location", np.array([0.0, 10.0], dtype=float)),
+    )
+    ds.attrs["crs"] = "EPSG:4326"
+    return xsnowDataset(ds)
+
+
+@pytest.fixture
+def tiny_xsnow_proj(tiny_ds_xr) -> xsnowDataset:
+    """Tiny dataset with projected easting/northing coords for spatial classification."""
+    ds = tiny_ds_xr.assign_coords(
+        easting=("location", np.array([0.0, 1000.0], dtype=float)),
+        northing=("location", np.array([0.0, 1000.0], dtype=float)),
+    )
+    ds.attrs["crs"] = "EPSG:3857"
+    return xsnowDataset(ds)
 
 
 # ---------------------- tests: classify (callable-based) ----------------------
@@ -198,3 +222,100 @@ def test_chaining_returns_xsnowDataset(tiny_xsnow: xsnowDataset):
 
     ds3 = ds2.sel(time=time_mask)
     assert isinstance(ds3, xsnowDataset)
+
+
+# ---------------------- tests: classify_spatially -----------------------------
+
+def test_classify_spatially_attach_coord_from_wkt_mapping(tiny_xsnow_geo: xsnowDataset):
+    polys = {
+        "zoneA": "POLYGON ((-1 -1, -1 1, 1 1, 1 -1, -1 -1))",
+    }
+    ds2 = tiny_xsnow_geo.classify_spatially(polys, name="zone", kind="coord", polygons_crs="EPSG:4326")
+    assert isinstance(ds2, xsnowDataset)
+    assert "zone" in ds2.data.coords
+    assert ds2.zone.sel(location="A").item() == "zoneA"
+    assert ds2.zone.sel(location="B").item() == "outside"
+
+    grouped = ds2.data.groupby("zone").mean(dim="location")
+    assert "zone" in grouped.dims
+
+
+def test_classify_spatially_return_mask(tiny_xsnow_geo: xsnowDataset):
+    polys = {
+        "zoneA": "POLYGON ((-1 -1, -1 1, 1 1, 1 -1, -1 -1))",
+        "zoneB": "POLYGON ((9 9, 9 11, 11 11, 11 9, 9 9))",
+    }
+    mask = tiny_xsnow_geo.classify_spatially(polys, name="in_zone", kind="mask", polygons_crs="EPSG:4326")
+    assert isinstance(mask, xr.DataArray)
+    assert mask.dtype == bool
+    assert mask.dims[0] == "polygon"
+    assert set(mask.coords["polygon"].values.tolist()) == {"zoneA", "zoneB"}
+    assert bool(mask.sel(polygon="zoneA", location="A").item()) is True
+    assert bool(mask.sel(polygon="zoneA", location="B").item()) is False
+    assert bool(mask.sel(polygon="zoneB", location="B").item()) is True
+
+
+def test_classify_spatially_from_geojson_file(tmp_path, tiny_xsnow_geo: xsnowDataset):
+    geojson = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"name": "zoneA"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[-1, -1], [-1, 1], [1, 1], [1, -1], [-1, -1]],
+                    ],
+                },
+            }
+        ],
+    }
+    p = tmp_path / "zones.geojson"
+    p.write_text(json.dumps(geojson), encoding="utf-8")
+
+    ds2 = tiny_xsnow_geo.classify_spatially(str(p), name="zone", kind="coord", polygons_crs="EPSG:4326")
+    assert ds2.zone.sel(location="A").item() == "zoneA"
+    assert ds2.zone.sel(location="B").item() == "outside"
+
+
+def test_classify_spatially_projected_uses_easting_northing(tiny_xsnow_proj: xsnowDataset):
+    polys = {
+        "zoneA": "POLYGON ((-10 -10, -10 10, 10 10, 10 -10, -10 -10))",
+    }
+    ds2 = tiny_xsnow_proj.classify_spatially(polys, name="zone", kind="coord", polygons_crs="EPSG:3857")
+    assert ds2.zone.sel(location="A").item() == "zoneA"
+    assert ds2.zone.sel(location="B").item() == "outside"
+
+
+def test_classify_spatially_crs_transform_if_pyproj_available(tiny_xsnow_geo: xsnowDataset):
+    pyproj = pytest.importorskip("pyproj")
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    xs, ys = transformer.transform([-1, -1, 1, 1, -1], [-1, 1, 1, -1, -1])
+    coords = ", ".join(f"{x} {y}" for x, y in zip(xs, ys))
+    wkt = f"POLYGON (({coords}))"
+
+    ds2 = tiny_xsnow_geo.classify_spatially(
+        {"zoneA": wkt},
+        name="zone",
+        kind="coord",
+        polygons_crs="EPSG:3857",
+    )
+    assert ds2.zone.sel(location="A").item() == "zoneA"
+    assert ds2.zone.sel(location="B").item() == "outside"
+
+
+def test_classify_spatially_raises_when_transform_needed_but_pyproj_missing(tiny_xsnow_geo: xsnowDataset):
+    """
+    Meaningful guardrail: if polygon CRS != dataset CRS, we must either transform
+    with pyproj or fail with a clear error.
+    """
+    if importlib.util.find_spec("pyproj") is not None:
+        pytest.skip("pyproj installed; transformation is available in this environment.")
+
+    polys = {
+        "zoneA": "POLYGON ((-1 -1, -1 1, 1 1, 1 -1, -1 -1))",
+    }
+    with pytest.raises(ValueError) as exc:
+        _ = tiny_xsnow_geo.classify_spatially(polys, name="zone", kind="coord", polygons_crs="EPSG:3857")
+    assert "pyproj" in str(exc.value).lower()

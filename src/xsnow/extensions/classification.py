@@ -14,14 +14,17 @@ In brief: To develop an additional ``xsnowDataset`` method, simply write a funct
 
 Note
 ----
-The extension is currently missing a convenient method to classify based on spatial considerations,
-be it through a geojson file or well-known-text filter. This feature will be added soon.
+The extension includes a basic spatial classification helper that can attach a polygon/region label
+per location (or per point grid) based on dataset ``latitude``/``longitude`` coordinates.
 """
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Callable, Dict, Literal, Mapping, Optional
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, Literal, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import xarray as xr
@@ -115,6 +118,369 @@ def _mask_dataset_like(ds_xr: xr.Dataset, mask: xr.DataArray) -> xr.Dataset:
         else:
             masked[name] = var
     return xr.Dataset(masked, coords=ds_xr.coords, attrs=ds_xr.attrs)
+
+
+# ---------------------- internal helpers (spatial polygons) -------------------
+
+@dataclass(frozen=True)
+class _Region:
+    name: str
+    parts: Tuple[Tuple[np.ndarray, ...], ...]
+    # parts: tuple of polygons; each polygon is tuple of rings; each ring is (N,2) float array [lon,lat]
+
+
+def _as_path_maybe(obj: Any) -> Optional[Path]:
+    if isinstance(obj, Path):
+        return obj
+    if isinstance(obj, str):
+        p = Path(obj)
+        if p.exists():
+            return p
+    return None
+
+
+def _ensure_closed_ring(ring: np.ndarray) -> np.ndarray:
+    if ring.shape[0] < 2:
+        raise ValueError("Polygon ring must contain at least 2 points.")
+    if not np.allclose(ring[0], ring[-1], equal_nan=False):
+        ring = np.vstack([ring, ring[0]])
+    return ring
+
+
+def _ring_from_coords(coords: Sequence[Sequence[float]]) -> np.ndarray:
+    arr = np.asarray(coords, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        raise ValueError("Invalid ring coordinates; expected Nx2 or Nx3 array-like.")
+    arr = arr[:, :2]  # drop Z if present
+    return _ensure_closed_ring(arr)
+
+
+def _extract_groups_at_depth(s: str, *, depth: int) -> list[str]:
+    """
+    Extract substrings contained in parentheses at a specific nesting depth.
+    Returns the raw inner content (without the surrounding parentheses).
+    """
+    out: list[str] = []
+    cur_depth = 0
+    start: Optional[int] = None
+
+    for i, ch in enumerate(s):
+        if ch == "(":
+            cur_depth += 1
+            if cur_depth == depth:
+                start = i + 1
+        elif ch == ")":
+            if cur_depth == depth and start is not None:
+                out.append(s[start:i])
+                start = None
+            cur_depth -= 1
+    return out
+
+
+def _parse_wkt_coords_list(s: str) -> np.ndarray:
+    pts: list[Tuple[float, float]] = []
+    for tok in s.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        parts = tok.split()
+        if len(parts) < 2:
+            raise ValueError(f"Invalid WKT point token: {tok!r}")
+        x = float(parts[0])
+        y = float(parts[1])
+        pts.append((x, y))
+    if len(pts) < 3:
+        raise ValueError("WKT ring must have at least 3 points.")
+    return _ensure_closed_ring(np.asarray(pts, dtype=float))
+
+
+def _regions_from_wkt(name: str, wkt: str) -> _Region:
+    w = wkt.strip()
+    upper = w.upper()
+    if upper.startswith("POLYGON"):
+        rings_txt = _extract_groups_at_depth(w, depth=2)
+        if not rings_txt:
+            raise ValueError(f"Invalid POLYGON WKT: {wkt!r}")
+        rings = tuple(_parse_wkt_coords_list(r) for r in rings_txt)
+        return _Region(name=str(name), parts=(rings,))
+    if upper.startswith("MULTIPOLYGON"):
+        poly_txts = _extract_groups_at_depth(w, depth=2)
+        if not poly_txts:
+            raise ValueError(f"Invalid MULTIPOLYGON WKT: {wkt!r}")
+        parts: list[Tuple[np.ndarray, ...]] = []
+        for poly_txt in poly_txts:
+            rings_txt = _extract_groups_at_depth(poly_txt, depth=1)
+            if not rings_txt:
+                raise ValueError(f"Invalid MULTIPOLYGON part: {poly_txt!r}")
+            parts.append(tuple(_parse_wkt_coords_list(r) for r in rings_txt))
+        return _Region(name=str(name), parts=tuple(parts))
+    raise ValueError("Only POLYGON and MULTIPOLYGON WKT are supported.")
+
+
+def _feature_name(props: Mapping[str, Any], fallback: str) -> str:
+    for key in ("name", "id", "title", "label"):
+        if key in props and props[key] is not None:
+            return str(props[key])
+    return fallback
+
+
+def _geojson_crs(obj: Mapping[str, Any]) -> Optional[str]:
+    """
+    Attempt to extract CRS from GeoJSON in the (deprecated) ``crs`` member.
+    Returns a pyproj-compatible CRS string (e.g. "EPSG:4326") if found.
+    """
+    crs = obj.get("crs")
+    if crs is None:
+        return None
+    if isinstance(crs, str):
+        return crs
+    if not isinstance(crs, Mapping):
+        return None
+    if crs.get("type") == "name":
+        props = crs.get("properties") or {}
+        if isinstance(props, Mapping) and props.get("name"):
+            return str(props["name"])
+    return None
+
+
+def _feature_name_from_props(
+    props: Mapping[str, Any],
+    *,
+    field: str,
+    fallback: str,
+) -> str:
+    """
+    Determine a feature name from GeoJSON properties.
+
+    - Prefer ``props[field]`` if present.
+    - Fall back to common alternatives (name/id/title/label).
+    - Fall back to ``fallback`` as last resort.
+    """
+    if field in props and props[field] is not None:
+        return str(props[field])
+    return _feature_name(props, fallback=fallback)
+
+
+def _regions_from_geojson(obj: Mapping[str, Any], *, feature_name_field: str) -> list[_Region]:
+    def _iter_features(o: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
+        t = o.get("type")
+        if t == "FeatureCollection":
+            for f in o.get("features", []) or []:
+                if isinstance(f, Mapping):
+                    yield f
+            return
+        if t == "Feature":
+            yield o
+            return
+        if t in {"Polygon", "MultiPolygon"}:
+            yield {"type": "Feature", "geometry": o, "properties": {}}
+            return
+        raise ValueError(f"Unsupported GeoJSON type: {t!r}")
+
+    regions: list[_Region] = []
+    for i, feat in enumerate(_iter_features(obj)):
+        geom = feat.get("geometry") or {}
+        gtype = geom.get("type")
+        coords = geom.get("coordinates")
+        props = feat.get("properties") or {}
+        if not isinstance(props, Mapping):
+            props = {}
+        name = _feature_name_from_props(props, field=feature_name_field, fallback=f"poly_{i}")
+
+        if gtype == "Polygon":
+            if not isinstance(coords, list) or not coords:
+                raise ValueError("GeoJSON Polygon coordinates must be a non-empty list.")
+            rings = tuple(_ring_from_coords(r) for r in coords)
+            regions.append(_Region(name=name, parts=(rings,)))
+        elif gtype == "MultiPolygon":
+            if not isinstance(coords, list) or not coords:
+                raise ValueError("GeoJSON MultiPolygon coordinates must be a non-empty list.")
+            parts: list[Tuple[np.ndarray, ...]] = []
+            for poly in coords:
+                if not isinstance(poly, list) or not poly:
+                    raise ValueError("GeoJSON MultiPolygon part must be a non-empty list of rings.")
+                parts.append(tuple(_ring_from_coords(r) for r in poly))
+            regions.append(_Region(name=name, parts=tuple(parts)))
+        else:
+            raise ValueError(f"Unsupported GeoJSON geometry type: {gtype!r}")
+    return regions
+
+
+def _normalize_crs_str(crs: str) -> str:
+    return str(crs).strip().upper().replace(" ", "")
+
+
+def _load_regions(polygons: Any, *, feature_name_field: str) -> Tuple[list[_Region], Optional[str], Optional[str]]:
+    """
+    Load regions from:
+      - GeoJSON file path (.geojson/.json)
+      - GeoJSON mapping (FeatureCollection/Feature/Polygon/MultiPolygon)
+      - WKT string (POLYGON/MULTIPOLYGON)
+      - Mapping[str, str] interpreted as {name: wkt}
+      - Sequence[str] of WKT (names auto-assigned poly_0, ...)
+      - Sequence[Tuple[str, str]] of (name, WKT)
+    Returns (regions, source_label, detected_polygons_crs).
+    """
+    p = _as_path_maybe(polygons)
+    if p is not None:
+        suffix = p.suffix.lower()
+        text = p.read_text(encoding="utf-8")
+        if suffix in {".geojson", ".json"}:
+            obj = json.loads(text)
+            if not isinstance(obj, Mapping):
+                raise ValueError("GeoJSON file must decode to a JSON object.")
+            detected = _geojson_crs(obj)
+            return _regions_from_geojson(obj, feature_name_field=feature_name_field), str(p), detected
+        if suffix in {".wkt", ".txt"}:
+            # allow one region per non-empty line: "name<TAB>WKT" or just "WKT"
+            regions: list[_Region] = []
+            for i, line in enumerate(text.splitlines()):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "\t" in line:
+                    nm, wk = line.split("\t", 1)
+                    nm = nm.strip() or f"poly_{i}"
+                    wk = wk.strip()
+                else:
+                    nm, wk = f"poly_{i}", line
+                regions.append(_regions_from_wkt(nm, wk))
+            if not regions:
+                raise ValueError("WKT file contained no polygons.")
+            return regions, str(p), None
+        raise ValueError(f"Unsupported polygon file type: {suffix!r} (expected .geojson/.json/.wkt/.txt)")
+
+    if isinstance(polygons, Mapping):
+        # GeoJSON mapping?
+        if "type" in polygons:
+            detected = _geojson_crs(polygons)
+            return _regions_from_geojson(polygons, feature_name_field=feature_name_field), None, detected
+        # Otherwise treat as mapping of names -> WKT
+        regions = [_regions_from_wkt(str(k), str(v)) for k, v in polygons.items()]
+        return regions, None, None
+
+    if isinstance(polygons, str):
+        # WKT string
+        return [_regions_from_wkt("poly_0", polygons)], None, None
+
+    if isinstance(polygons, Sequence):
+        if not polygons:
+            raise ValueError("polygons must not be empty.")
+        if all(isinstance(x, str) for x in polygons):
+            regions = [_regions_from_wkt(f"poly_{i}", str(w)) for i, w in enumerate(polygons)]
+            return regions, None, None
+        if all(isinstance(x, tuple) and len(x) == 2 for x in polygons):
+            regions = [_regions_from_wkt(str(n), str(w)) for (n, w) in polygons]  # type: ignore[misc]
+            return regions, None, None
+
+    raise TypeError(
+        "polygons must be a path/str WKT, a GeoJSON mapping, a mapping of {name: WKT}, "
+        "or a sequence of WKT strings / (name, WKT) pairs."
+    )
+
+
+def _points_in_ring(x: np.ndarray, y: np.ndarray, ring: np.ndarray) -> np.ndarray:
+    """
+    Ray casting point-in-polygon for a single ring.
+    x,y are 1D arrays. ring is (N,2) and must be closed.
+    """
+    if ring.shape[0] < 4:
+        return np.zeros_like(x, dtype=bool)
+
+    x0 = ring[:-1, 0]
+    y0 = ring[:-1, 1]
+    x1 = ring[1:, 0]
+    y1 = ring[1:, 1]
+
+    inside = np.zeros_like(x, dtype=bool)
+    # Toggle parity for each edge intersection (memory-friendly; no (edges x points) allocation)
+    for xi0, yi0, xi1, yi1 in zip(x0, y0, x1, y1):
+        cond_y = (yi0 > y) != (yi1 > y)
+        den = (yi1 - yi0)
+        if den == 0:
+            x_int = np.inf
+        else:
+            x_int = (xi1 - xi0) * (y - yi0) / den + xi0
+        inside ^= (cond_y & (x < x_int))
+    return inside
+
+
+def _points_in_region(x: np.ndarray, y: np.ndarray, region: _Region) -> np.ndarray:
+    inside_region = np.zeros_like(x, dtype=bool)
+    for rings in region.parts:
+        if not rings:
+            continue
+        outer = rings[0]
+        inside = _points_in_ring(x, y, outer)
+        # holes
+        for hole in rings[1:]:
+            inside &= ~_points_in_ring(x, y, hole)
+        inside_region |= inside
+    return inside_region
+
+
+def _crs_equal(a: str, b: str) -> bool:
+    """
+    CRS equality test with a best-effort fallback if pyproj isn't available.
+    """
+    a_norm = _normalize_crs_str(a)
+    b_norm = _normalize_crs_str(b)
+    if a_norm == b_norm:
+        return True
+    # Best-effort EPSG normalization without pyproj
+    m_a = re.search(r"EPSG:?(?P<code>\d+)", a_norm)
+    m_b = re.search(r"EPSG:?(?P<code>\d+)", b_norm)
+    if m_a and m_b and m_a.group("code") == m_b.group("code"):
+        return True
+    try:
+        import pyproj  # type: ignore
+    except Exception:
+        return False
+    try:
+        return pyproj.CRS.from_user_input(a) == pyproj.CRS.from_user_input(b)
+    except Exception:
+        return False
+
+
+def _is_epsg4326(crs: str) -> bool:
+    if _normalize_crs_str(crs) in {"EPSG:4326", "EPSG4326", "4326"}:
+        return True
+    try:
+        import pyproj  # type: ignore
+    except Exception:
+        return False
+    try:
+        return pyproj.CRS.from_user_input(crs).to_epsg() == 4326
+    except Exception:
+        return False
+
+
+def _transform_regions(regions: Sequence[_Region], src_crs: str, dst_crs: str) -> list[_Region]:
+    """
+    Transform all region coordinates from src_crs to dst_crs using pyproj.
+    """
+    try:
+        import pyproj  # type: ignore
+    except Exception as e:
+        raise ImportError(
+            "Polygon CRS differs from dataset CRS and transformation is required, "
+            "but 'pyproj' is not installed."
+        ) from e
+
+    transformer = pyproj.Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+    out: list[_Region] = []
+    for r in regions:
+        new_parts: list[Tuple[np.ndarray, ...]] = []
+        for poly in r.parts:
+            new_rings: list[np.ndarray] = []
+            for ring in poly:
+                xs, ys = transformer.transform(ring[:, 0], ring[:, 1])
+                rr = np.stack([np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)], axis=1)
+                rr = _ensure_closed_ring(rr)
+                new_rings.append(rr)
+            new_parts.append(tuple(new_rings))
+        out.append(_Region(name=r.name, parts=tuple(new_parts)))
+    return out
 
 
 # ---------------------- 1) general function-based classification --------------
@@ -329,3 +695,224 @@ def mask_by_criteria(self: xsnowDataset, criteria: str) -> xsnowDataset:
         raise ValueError("Cannot filter an empty dataset.")
     mask = self.classify_criteria(criteria, kind="mask")
     return self.__class__(_mask_dataset_like(self.data, mask))
+
+
+# ---------------------- 3) spatial classification ----------------------------
+
+@register_xsnowDataset_method
+def classify_spatially(
+    self: xsnowDataset,
+    polygons: Any,
+    *,
+    name: str = "polygon",
+    kind: Literal["mask", "coord", "data"] = "coord",
+    attrs: Optional[dict] = None,
+    outside_label: str = "outside",
+    polygons_crs: Optional[str] = None,
+    feature_name_field: str = "id",
+) -> xr.DataArray | xsnowDataset:
+    """
+    Spatial classification of points into named polygons/regions.
+
+    This attaches a region label (or returns a per-polygon mask) based on the dataset's
+    horizontal coordinates. Typical use-cases:
+      - select all data from a specific region
+      - aggregate over regions via ``groupby``
+    
+    The dataset CRS is taken from ``self.attrs['crs']``. If it is EPSG:4326,
+    this method uses the ``longitude``/``latitude`` coordinates. Otherwise it expects
+    projected coordinates ``easting``/``northing``.
+    
+    If the polygon CRS differs from the dataset CRS, polygons are transformed to the
+    dataset CRS using ``pyproj`` (optional dependency).
+
+    Parameters
+    ----------
+    polygons
+        One of:
+          - path to a GeoJSON file (.geojson/.json)
+          - GeoJSON mapping (FeatureCollection/Feature/Polygon/MultiPolygon)
+          - WKT string (POLYGON/MULTIPOLYGON)
+          - mapping of ``{name: wkt}``
+          - sequence of WKT strings (names auto: poly_0, poly_1, ...)
+          - sequence of ``(name, wkt)`` pairs
+        Coordinate order is assumed to be ``(x, y)``. For EPSG:4326 this means
+        ``(longitude, latitude)``; for projected CRSs, ``(easting, northing)``.
+    name : str, default "polygon"
+        Name for the attached label coordinate/data var (or the returned mask name).
+    kind : {"mask","coord","data"}, default "coord"
+        - "mask": return a boolean mask with dims ``('polygon', <point-dims...>)``
+        - "coord": attach a string label per point as a coordinate and return xsnowDataset
+        - "data": attach a string label per point as a data variable and return xsnowDataset
+    attrs : dict, optional
+        Metadata to attach to the output.
+    outside_label : str, default "outside"
+        Label assigned to points not contained in any provided polygon.
+    polygons_crs : str, optional
+        CRS of the input polygons (e.g. ``"EPSG:4326"``). If not provided, the CRS is
+        only auto-detected for GeoJSON that contains an explicit (deprecated) top-level
+        ``"crs"`` member. If the polygon CRS cannot be identified unambiguously, this
+        method raises.
+    feature_name_field : str, default "id"
+        For GeoJSON inputs, this field is read from each feature's ``properties`` to
+        determine the polygon/region name. If absent, it falls back to common alternatives
+        (``name``, ``id``, ``title``, ``label``) and finally ``poly_<i>``.
+
+    Returns
+    -------
+    xr.DataArray | xsnowDataset
+
+    Examples
+    --------
+    >>> import xarray as xr
+    >>> import xsnow
+    >>> xs = xsnow.sample_data.snp_gridded_ds().compute()
+    >>> xs.longitude.values
+    array([11.191828, 11.286182, 11.2973  , 11.392236, 11.5008  ])
+    >>> xs.latitude.values
+    array([47.146392, 47.436152, 47.148326, 47.437999, 47.367788])
+    >>> xs.altitude.values
+    array([2372., 1749., 1860., 1801., 2066.])
+
+    Create two regions (rectangles) and leave one location outside:
+
+    >>> regions = {
+    ...   "valley": "POLYGON ((11.15 47.12, 11.15 47.17, 11.33 47.17, 11.33 47.12, 11.15 47.12))",
+    ...   "ridge":  "POLYGON ((11.25 47.42, 11.25 47.46, 11.43 47.46, 11.43 47.42, 11.25 47.42))",
+    ... }
+    >>> xs2 = xs.classify_spatially(regions, name="region", kind="coord", polygons_crs="EPSG:4326")
+    >>> xs_valley = xs2.where(xs2.region == "valley", drop=True)
+
+    Group by region and slope (slope is already an existing coordinate):
+
+    >>> xs_stats = xs2.groupby(["region", "slope"]).mean()
+
+    Group by region, slope, and an elevation band (>=2000 m) created via ``classify_criteria``:
+
+    >>> xs3 = xs2.classify_criteria(
+    ...   "altitude >= 2000",
+    ...   name="band",
+    ...   kind="coord",
+    ...   attrs={"mapping": {False: "<2000m", True: ">=2000m"}},
+    ... )
+    >>> xs_stats2 = xs3.groupby(["region", "slope", "band"]).mean()
+    """
+    if self.data is None:
+        raise ValueError("Cannot classify an empty dataset.")
+
+    xds = self.data
+    dataset_crs = xds.attrs.get("crs")
+    if not dataset_crs:
+        raise ValueError(
+            "Dataset CRS is required for spatial classification; expected `xsnowDataset.data.attrs['crs']` "
+            "(e.g. 'EPSG:4326')."
+        )
+
+    use_lon_lat = _is_epsg4326(str(dataset_crs))
+    if use_lon_lat:
+        if "latitude" not in xds.coords or "longitude" not in xds.coords:
+            raise ValueError("Dataset CRS is EPSG:4326 but 'latitude'/'longitude' coordinates are missing.")
+        x_da = xds.coords["longitude"]
+        y_da = xds.coords["latitude"]
+    else:
+        if "easting" not in xds.coords or "northing" not in xds.coords:
+            raise ValueError(
+                "Dataset CRS is not EPSG:4326; expected projected coordinates 'easting' and 'northing' as coords."
+            )
+        x_da = xds.coords["easting"]
+        y_da = xds.coords["northing"]
+
+    regions, source_label, detected_polygons_crs = _load_regions(polygons, feature_name_field=feature_name_field)
+    if not regions:
+        raise ValueError("No polygons/regions were loaded.")
+
+    poly_crs = polygons_crs or detected_polygons_crs
+    if not poly_crs:
+        raise ValueError(
+            "Polygon CRS could not be identified unambiguously. "
+            "Pass `polygons_crs='EPSG:xxxx'` (or include an explicit GeoJSON 'crs' member)."
+        )
+
+    if not _crs_equal(str(poly_crs), str(dataset_crs)):
+        try:
+            regions = _transform_regions(regions, str(poly_crs), str(dataset_crs))
+        except Exception as e:
+            raise ValueError(
+                f"Polygon CRS ({poly_crs!r}) does not match dataset CRS ({dataset_crs!r}) and could not be "
+                "transformed; pass a valid CRS via `polygons_crs=...` and ensure 'pyproj' is installed."
+            ) from e
+
+    if x_da.dims != y_da.dims or x_da.shape != y_da.shape:
+        raise ValueError("Dataset horizontal coordinate arrays must have matching dims and shape.")
+
+    point_dims = x_da.dims
+    point_shape = x_da.shape
+    x = np.asarray(x_da.values, dtype=float).reshape(-1)
+    y = np.asarray(y_da.values, dtype=float).reshape(-1)
+
+    # Pre-filter invalid points; keep them as outside/False
+    valid = np.isfinite(x) & np.isfinite(y)
+    x_v = x[valid]
+    y_v = y[valid]
+
+    region_names = [r.name for r in regions]
+    masks = np.zeros((len(regions), x.size), dtype=bool)
+    if x_v.size:
+        for i, region in enumerate(regions):
+            hit = _points_in_region(x_v, y_v, region)
+            masks[i, valid] = hit
+
+    # mask output: ('polygon', *point_dims)
+    mask_data = masks.reshape((len(regions),) + point_shape)
+    mask_da = xr.DataArray(
+        mask_data,
+        dims=("polygon",) + point_dims,
+        coords={
+            "polygon": np.asarray(region_names, dtype=object),
+            **{d: xds.coords[d] for d in point_dims if d in xds.coords},
+        },
+        name=name,
+    )
+
+    if kind == "mask":
+        if attrs:
+            mask_da = mask_da.copy()
+            mask_da.attrs.update(attrs)
+        return mask_da
+
+    # label output: per-point string label (first polygon match wins)
+    labels = np.full(x.size, str(outside_label), dtype=object)
+    any_hit = masks.any(axis=0)
+    if any_hit.any():
+        first_idx = np.argmax(masks, axis=0)
+        region_names_arr = np.asarray(region_names, dtype=object)
+        labels[any_hit] = region_names_arr[first_idx[any_hit]]
+    labels = labels.reshape(point_shape)
+
+    label_da = xr.DataArray(
+        labels,
+        dims=point_dims,
+        coords={d: xds.coords[d] for d in point_dims if d in xds.coords},
+        name=name,
+    )
+    label_da.attrs.update(
+        {
+            "outside_label": str(outside_label),
+            "regions": [str(n) for n in region_names],
+            "source": source_label,
+            "method": "point-in-polygon (ray casting), first match wins",
+            "dataset_crs": str(dataset_crs),
+            "polygons_crs": str(poly_crs),
+            "x_coord": str(x_da.name),
+            "y_coord": str(y_da.name),
+        }
+    )
+    if attrs:
+        label_da = label_da.copy()
+        label_da.attrs.update(attrs)
+
+    if kind == "coord":
+        return self.__class__(xds.assign_coords({name: label_da}))
+    if kind == "data":
+        return self.__class__(xds.assign({name: label_da}))
+    raise ValueError("kind must be one of {'mask','coord','data'}.")
