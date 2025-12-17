@@ -22,7 +22,7 @@ import xarray as xr
 from pathlib import Path
 import shutil
 
-from xsnow import xsnowDataset
+from xsnow import xsnowDataset, read
 
 # ============================================================================
 # TEST DATA REPOSITORY MANAGEMENT
@@ -113,6 +113,41 @@ def gridded_pros_dir() -> Path:
 
 
 @pytest.fixture(scope="session")
+def snp_gridded_cache_dir(tmp_path_factory) -> Path:
+    """
+    A per-session temp dir to store cached NetCDF outputs.
+    One per pytest invocation (per worker under xdist).
+    """
+    return tmp_path_factory.mktemp("snp_gridded_cache")
+
+
+@pytest.fixture(scope="session")
+def snp_gridded_netcdf(
+    snp_gridded_cache_dir: Path,
+    gridded_pros_dir: Path,
+) -> Path:
+    """
+    Build the slow dataset ONCE from raw files, then cache as NetCDF.
+    """
+    nc_path = snp_gridded_cache_dir / "snp_gridded.nc"
+
+    if not nc_path.exists():
+        xs = read(gridded_pros_dir, lazy=False)
+        xs.to_netcdf(nc_path)
+
+    return nc_path
+
+
+@pytest.fixture(scope="function")
+def snp_gridded_xs(snp_gridded_netcdf: Path):
+    """
+    Fast reader: open the cached NetCDF for tests.
+    """
+    xs = read(snp_gridded_netcdf, lazy=False)
+    return xs
+
+
+@pytest.fixture(scope="session")
 def snowobs_pros_dir() -> Path:
     """Directory containing snow observation SNOWPACK .pro files."""
     try:
@@ -122,21 +157,70 @@ def snowobs_pros_dir() -> Path:
 
 
 @pytest.fixture(scope="session")
-def pit_pros_dir() -> Path:
-    """Directory containing manual snow pit .pro files."""
+def snowobs_smets_dir_nowcast() -> Path:
+    """Directory containing snow observation SNOWPACK .smet files (nowcast forcing)."""
     try:
-        return _get_dir_path("pits")
+        return _get_dir_path("smets/snowobs/nowcast")
     except FileNotFoundError:
-        pytest.skip("Pit data not available in test repo")
+        pytest.skip("Snow observation data not available in test repo")
 
 
 @pytest.fixture(scope="session")
-def smet_files_dir() -> Path:
-    """Directory containing SMET meteorological forcing files."""
+def snowobs_pits_dir() -> Path:
+    """Directory containing snow observation .pro files (converted from caaml)."""
     try:
-        return _get_dir_path("smets")
+        return _get_dir_path("caamls/as_pro")
     except FileNotFoundError:
-        pytest.skip("SMET data not available in test repo")
+        pytest.skip("Snow observation data not available in test repo")
+
+
+@pytest.fixture(scope="session")
+def snp_snowobs_cache_dir(tmp_path_factory) -> Path:
+    """
+    A per-session temp dir to store cached NetCDF outputs.
+    One per pytest invocation (per worker under xdist).
+    """
+    return tmp_path_factory.mktemp("snp_snowobs_cache")
+
+
+@pytest.fixture(scope="session")
+def snp_snowobs_netcdf(
+    snp_snowobs_cache_dir: Path,
+    snowobs_pros_dir: Path,
+    snowobs_pits_dir: Path,
+) -> Path:
+    """
+    Build the slow dataset ONCE from raw files, then cache as NetCDF.
+    """
+    nc_path_sim = snp_snowobs_cache_dir / "snp_snowobs_sim.nc"
+    nc_path_obs = snp_snowobs_cache_dir / "snp_snowobs_obs.nc"
+
+    if not nc_path_sim.exists():
+        xs = read(snowobs_pros_dir, lazy=False)
+        xs.to_netcdf(nc_path_sim)
+
+    if not nc_path_obs.exists():
+        xs = read(snowobs_pits_dir, lazy=False)
+        xs.to_netcdf(nc_path_obs)
+
+    return nc_path_sim, nc_path_obs
+
+
+@pytest.fixture(scope="function")
+def snp_snowobs_sim_xs(snp_snowobs_netcdf: Path):
+    """
+    Fast reader: open the cached NetCDF for tests.
+    """
+    xs = read(snp_snowobs_netcdf[0], lazy=False)
+    return xs
+
+@pytest.fixture(scope="function")
+def snp_snowobs_obs_xs(snp_snowobs_netcdf: Path):
+    """
+    Fast reader: open the cached NetCDF for tests.
+    """
+    xs = read(snp_snowobs_netcdf[1], lazy=False)
+    return xs
 
 
 @pytest.fixture
@@ -185,7 +269,7 @@ class SyntheticProGenerator:
         heights = ','.join(str(0.1 * i) for i in range(1, n_layers + 1))
         densities = ','.join(str(100 * i) for i in range(1, n_layers + 1))
         
-        content = f"""[STATION_PARAMETERS]
+        station_params = f"""[STATION_PARAMETERS]
 StationName= {station_name}
 Latitude= 46.5
 Longitude= 10.5
@@ -193,11 +277,22 @@ Altitude= 2500
 SlopeAngle= 35
 SlopeAzi= 180
 
+"""
+        if n_layers > 0:
+            data_sect = f"""
 [DATA]
 0500,{timestamp}
 0501,{n_layers},{heights}
 0502,{n_layers},{densities}
 """
+        else:
+            data_sect= f"""
+[DATA]
+0500,{timestamp}
+0501,{n_layers}
+0502,{n_layers}
+"""
+        content = station_params + data_sect
         filepath = tmp_path / f"{station_name}.pro"
         filepath.write_text(content)
         return filepath
@@ -274,15 +369,30 @@ SlopeAzi= 180
 StationName= CORRUPTED
 [DATA]
 0500,01.01.2025 12:00:00
-0501,INVALID_DATA
+0501,2,INVALID_DATA
 """
         elif corruption_type == "empty":
             content = ""
             
         elif corruption_type == "no_data_section":
             content = """[STATION_PARAMETERS]
-StationName= NO_DATA
+StationName= NO_DATA_SECTION
 Latitude= 46.5
+"""
+        elif corruption_type == "empty_data_section":
+            content = """[STATION_PARAMETERS]
+StationName= EMPTY_DATA_SECTION
+Latitude= 46.5
+[DATA]
+"""
+        elif corruption_type == "good_and_bad_data":
+            content = """[STATION_PARAMETERS]
+StationName= GOOD_AND_BAD_TIME
+[DATA]
+0500,01.01.2025 12:00:00
+0501,2,0.1,0.2
+0500,01.01.2025 13:00:00
+0501,2,INVALID_DATA
 """
         elif corruption_type == "invalid_timestamp":
             content = """[STATION_PARAMETERS]

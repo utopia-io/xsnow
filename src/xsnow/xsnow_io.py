@@ -25,13 +25,16 @@ out-of-core loading strategy for .pro files using Dask. The process is:
     memory at any given time, enabling the processing of vast amounts of data
     on a single machine.
 """
+from __future__ import annotations
 import os
 import sys
+import json
 import logging
 import multiprocessing
-from pathlib import Path
-from typing import Dict, Optional, List, Any, Union, Tuple, Sequence, Mapping
 import concurrent.futures
+from pathlib import Path
+from typing import Dict, Optional, List, Any, Union, Tuple, Sequence, Mapping, cast, Literal
+from datetime import datetime
 
 
 import numpy as np
@@ -49,10 +52,8 @@ from .selectors import (
     TimeLike, LocationLike, SlopeLike, RealizationLike
 )
 from .plugin import register_xsnowDataset_method
-
-# Configure a basic logger for this module
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from .combiners import concat as xsnow_concat
+from .utils import get_logger, normalize_slope_coords, reorder_dims
 
 # --- Dynamic Mapping from Registry ---
 CODE_TO_NAME_MAP = {
@@ -69,8 +70,25 @@ HEADER_MAP = {
     'Longitude=': 'longitude',
     'SlopeAngle=': 'slopeAngle',
     'SlopeAzi=': 'slopeAzi',
-    'StationName=': 'stationName'
+    'StationName=': 'stationName',
+    'tz ': 'tz',        # Format: "tz = 1" (space before =)
+    'tz=': 'tz',        # Format: "tz=1" (no space)
+    'TZ=': 'tz',
+    'TimeZone=': 'tz',
+    'timezone=': 'tz',
 }
+
+
+def _round_coord(val: Any, ndigits: int = 6) -> float:
+    """Round coordinate-like value to `ndigits`, preserving NaN."""
+    try:
+        fval = float(val)
+    except (TypeError, ValueError):
+        return np.nan
+    if np.isnan(fval):
+        return np.nan
+    return round(fval, ndigits)
+
 
 # --------------------------------------------------------------------------- #
 #                      PRIMARY USER-FACING READ FUNCTION                      #
@@ -122,8 +140,19 @@ def read(
                 Default: {'time': 100, 'layer': -1}                
                 Example: {'time': 50, 'layer': 100}                
         **parser_kwargs: Additional keyword arguments passed to the underlying
-            parser functions, such as `max_layers='auto'`, `remove_soil=True`,
-            `add_surface_sh_as_layer=True`.
+            parser functions:
+            - `max_layers`: Max layer dimension; `'auto'` (default) scans files to pick
+              the maximum, or set an int to force a fixed size.
+            - `remove_soil`: If True (default), drops soil layers during parsing.
+            - `add_surface_sh_as_layer`: If True (default), inserts a surface hoar
+              layer explicitly as layer when indicated by the PRO file special code for SH at surface.
+            - `norm_slopes`: Controls slope normalization in SNOWPACK parsing /
+              merging. Options:
+                * `'auto'` (default): normalize when slopes are consistent across
+                  locations; preserve per-location slopes when inconsistent.
+                * True: force normalization (collapse to `(slope,)` even if slopes
+                  vary by location).
+                * False: skip normalization entirely.
 
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
@@ -139,9 +168,8 @@ def read(
         >>> # Force eager loading for quick access
         >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
     """
-# --- Step 1: Setup ---
-    if logger is None or logger is True:
-        logger = logging.getLogger(__name__)
+    # --- Step 1: Setup ---
+    logger = get_logger(__name__, logger=logger)
 
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
@@ -155,33 +183,14 @@ def read(
     # --- Step 2: Resolve file paths ---
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
-            # Using context managers to ensure file is properly closed
-            with xr.open_dataset(source) as ds:
-                ds = ds.load()
-
-            # Decode bytes to strings for string-based coordinates
-            for coord_name in ('location', 'realization'):
-                if coord_name in ds.coords:
-                    coord_data = ds[coord_name]
-                    if coord_data.dtype.kind == 'S':  # Byte string
-                        # Decode to Unicode strings
-                        decoded_values = [val.decode('utf-8') if isinstance(val, bytes) else str(val) 
-                                        for val in coord_data.values]
-                        ds[coord_name] = (coord_data.dims, decoded_values)
-            
-            # DEBUG: Check slope coordinates after loading
-            if 'inclination' in ds.coords:
-                logger.debug(f"read NetCDF: inclination values AFTER load = {ds.inclination.values}")
-                logger.debug(f"read NetCDF: inclination dims = {ds.inclination.dims}")
-            
-            return xsnowDataset(ds)
+            return _read_xsnow_netcdf(source)
         except Exception as e:
             logger.warning(f"Failed to read NetCDF file {source}: {e}")
             return None
     
     # Continue with normal .pro/.smet file processing
     try:
-        pro_files, smet_files = _resolve_filepaths(source, recursive)
+        pro_files, smet_files = _resolve_filepaths(source, recursive, logger)
     except (FileNotFoundError, TypeError) as e:
         logger.error(e)
         return None
@@ -220,8 +229,91 @@ def read(
 
     # --- Step 5: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets
-    return _merge_and_finalize(all_datasets, time_sel, location_sel, slope_sel, realization_sel)
+    return _merge_and_finalize(
+        all_datasets,
+        time_sel,
+        location_sel,
+        slope_sel,
+        realization_sel,
+        logger=logger,
+        norm_slopes=parser_kwargs.get('norm_slopes', 'auto'),
+    )
 
+
+
+def _read_xsnow_netcdf(source: Union[str, Path]) -> Optional["xsnowDataset"]:
+    """Read xsnow's custom netcdf format
+
+    This includes proper json decoding of any 'mapping' attribute and
+    handling of fixed-length byte coordinate strings.
+    """
+    # open lazily, then materialize metadata/coords eagerly
+    with xr.open_dataset(source) as _ds:
+        ds = _ds.load()
+
+    # Decode fixed-length byte coords back to str
+    for coord_name in ("location", "realization"):
+        if coord_name in ds.coords:
+            coord_data = ds[coord_name]
+            if coord_data.dtype.kind == 'S':  # byte strings
+                decoded_values = [
+                    (val.decode("utf-8") if isinstance(val, (bytes, np.bytes_)) else str(val))
+                    for val in coord_data.values
+                ]
+                ds[coord_name] = (coord_data.dims, decoded_values)
+
+    # if 'inclination' in ds.coords:
+    #     logger.debug(f"read NetCDF: inclination AFTER load = {ds.inclination.values}")
+    #     logger.debug(f"read NetCDF: inclination dims = {ds.inclination.dims}")
+
+    # Restore mapping attrs from JSON
+    ds = _decode_mapping_attrs_from_netcdf(ds)
+
+    return xsnowDataset(ds)
+
+
+def _decode_mapping_attrs_from_netcdf(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Reverse of _encode_mapping_attrs_for_netcdf:
+    - If 'mapping_json' exists (dataset or variable), parse JSON and restore
+      the 'mapping' dict attr (with int keys when possible).
+    - Leaves other attrs untouched.
+    """
+    def _parse(json_str: str):
+        try:
+            obj = json.loads(json_str)
+            # convert numeric-like keys back to int where possible
+            if isinstance(obj, dict):
+                new = {}
+                for k, v in obj.items():
+                    try:
+                        k2 = int(k)
+                    except (ValueError, TypeError):
+                        k2 = k
+                    new[k2] = v
+                return new
+            return obj
+        except Exception:
+            # fall back: leave as string if something goes wrong
+            return json_str
+
+    # dataset-level
+    mj = ds.attrs.get("mapping_json")
+    if isinstance(mj, str):
+        decoded = _parse(mj)
+        ds.attrs["mapping"] = decoded
+        # optional: clean up the helper attr
+        del ds.attrs["mapping_json"]
+
+    # variable-level
+    for name, var in ds.variables.items():
+        mj = var.attrs.get("mapping_json")
+        if isinstance(mj, str):
+            decoded = _parse(mj)
+            var.attrs["mapping"] = decoded
+            del var.attrs["mapping_json"]
+
+    return reorder_dims(ds)
 
 # --------------------------------------------------------------------------- #
 #                    EAGER LOADING WITH MULTIPROCESSING                       #
@@ -344,14 +436,18 @@ def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
         )
         
         # Create dataset if data found
-        if raw_data and raw_data[1]:
+        if raw_data and raw_data[0]:
             metadata, profiles = raw_data
             return _create_pro_dataset(metadata, profiles, max_layers, add_sh)
     except Exception as e:
         # Can't use logger in worker, just return None
-        logging.warning(f"Warning: Failed to process {filepath.name}: {e}")
-    
-    return None
+        logging.error(f"Failed to process {filepath.name}: {e}")
+        try:
+            metadata = _read_pro_metadata(filepath, throw=False)
+            return _create_pro_dataset(metadata, [], max_layers, empty_profile_status_default=-1)
+        except Exception as e:
+            logging.warning(f"Cannot even recover minimal metadata for {filepath.name}. Dropping from dataset. | {e}")
+            return None
 
 
 
@@ -445,6 +541,7 @@ def _read_pro_files_lazy(
         chunks = parser_kwargs.get('chunks', {'time': 100, 'layer': -1})
         
         for fp in pro_files:
+            ds = None
             try:
                 # Parse raw data (metadata and structure - small, can be eager)
                 metadata, profiles = _read_pro_raw(
@@ -457,7 +554,7 @@ def _read_pro_files_lazy(
                     add_surface_sh_as_layer=add_sh
                 )
                 
-                if profiles:
+                if metadata:
                     # Create dataset with dask arrays (lazy!)
                     ds = _create_pro_dataset(
                         metadata, 
@@ -467,11 +564,17 @@ def _read_pro_files_lazy(
                         use_dask=True,  # Create dask arrays
                         chunks=chunks
                     )
-                    if ds is not None:
-                        final_datasets.append(ds)
-                        
             except Exception as e:
-                logger.warning(f"Failed to process {fp.name}: {e}")
+                logger.error(f"Failed to process {fp.name}: {e}")
+                try:
+                    metadata = _read_pro_metadata(fp, logger=logger, throw=False)
+                    ds = _create_pro_dataset(metadata, [], max_layers_to_use, use_dask=True,
+                                             chunks=chunks, empty_profile_status_default=-1)
+                except Exception as e:
+                    logger.warning(f"Cannot even recover minimal metadata for {fp.name}. Dropping from dataset. | {e}")
+                    pass
+            if ds is not None:
+                final_datasets.append(ds)
         
         logger.info(f"Created {len(final_datasets)} lazy datasets (data NOT yet loaded into memory)")
         return final_datasets
@@ -541,13 +644,20 @@ def _create_dataset_from_pro_file(
             add_surface_sh_as_layer=add_sh
         )
 
-        # Step 2: Create the dataset if data was found
-        if raw_data and raw_data[1]:  # Check if profiles list is not empty
+        # Step 2: Create the dataset
+        if raw_data and raw_data[0]:  # Check if metadata dict is not empty
             metadata, profiles = raw_data
             return _create_pro_dataset(metadata, profiles, max_layers, add_sh)
             
     except Exception as e:
-        logger.error(f"Failed to create dataset from {filepath.name}", exc_info=e)
+        try:
+            metadata = _read_pro_metadata(filepath, logger=logger, throw=False)
+            ds = _create_pro_dataset(metadata, [], max_layers, empty_profile_status_default=-1)
+            logger.error(f"Cannot parse {filepath.name}", exc_info=e)
+            return ds
+        except Exception as e:
+            logger.warning(f"Warning: Cannot even recover minimal metadata for {filepath.name}. Dropping from dataset. | {e}")
+
     
     return None
 
@@ -613,7 +723,8 @@ def _sanitize_station_name(name: str) -> str:
 
 
 
-def _handle_duplicate_names(names: List[str]) -> List[str]:
+def _handle_duplicate_names(names: List[str], 
+                            logger: Optional[logging.Logger]=None) -> List[str]:
     """
     Ensure all station names are unique by appending indices to duplicates.
     
@@ -636,6 +747,7 @@ def _handle_duplicate_names(names: List[str]) -> List[str]:
     """
     if len(names) == len(set(names)):
         return names
+    log = get_logger(__name__, logger=logger)
     
     # Find duplicates
     from collections import Counter
@@ -655,8 +767,7 @@ def _handle_duplicate_names(names: List[str]) -> List[str]:
             
             # Warn once per duplicate name
             if name not in warned:
-                logger = logging.getLogger(__name__)
-                logger.warning(
+                log.warning(
                     f"Duplicate station name '{name}' found. "
                     f"Renaming all occurrences with indices (e.g., {name}_0, {name}_1, ...)."
                 )
@@ -667,6 +778,208 @@ def _handle_duplicate_names(names: List[str]) -> List[str]:
         unique_names.append(unique_name)
     
     return unique_names
+
+def _read_pro_metadata(
+    filepath: Union[str, Path],
+    logger: Optional[logging.Logger] = None,
+    throw: bool = True,
+) -> Dict[str, Any]:
+    """
+    Read minimal metadata from a .pro file header.
+
+    Returns a dict with at least:
+      - station_name
+      - latitude
+      - longitude
+      - altitude
+      - slopeAngle (raw)
+      - slopeAzi (raw)
+
+    If the file cannot be read, falls back to filename-based station_name
+    and NaNs for others.
+    """
+    logger = get_logger(__name__, logger=logger)
+
+    file_path = Path(filepath)
+
+    metadata: Dict[str, Any] = {
+        "station_name": np.nan,
+        "latitude": np.nan,
+        "longitude": np.nan,
+        "altitude": np.nan,
+        "slopeAngle": np.nan,
+        "slopeAzi": np.nan,
+        "tz": None,  # None means not specified in file
+    }
+
+    if not file_path.exists():
+        if throw:
+            raise FileNotFoundError(f"File not found while reading metadata: {filepath}")
+        else:
+            metadata["station_name"] = _sanitize_station_name(file_path.stem)
+            return metadata
+
+
+    in_header = False
+    has_header = False
+
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line == "[STATION_PARAMETERS]":
+                    in_header = True
+                    has_header = True
+                    continue
+                if line.startswith('[') and line != "[STATION_PARAMETERS]":
+                    # any other section ends header
+                    if in_header:
+                        break
+                    continue
+                if in_header:
+                    for key, value in HEADER_MAP.items():
+                        if line.startswith(key):
+                            metadata[value] = line.split('=', 1)[1].strip()
+    except Exception as exc:
+        logger.warning(f"Error reading metadata from {file_path.name}: {exc}")
+        # keep fallback metadata
+
+    if not has_header and throw:
+        raise ValueError(f"No declared header exists in {file_path.name}.")
+
+    name = metadata.get("station_name")
+    if name is None or pd.isna(name) or (isinstance(name, str) and not name.strip()):
+        if throw:
+            raise ValueError(f"No StationName found in {file_path.name}.")
+        else:
+            metadata["station_name"] = file_path.stem
+
+    metadata["station_name"] = _sanitize_station_name(metadata["station_name"])
+
+    # Normalize coordinates
+    for coord_key in ("latitude", "longitude"):
+        if coord_key in metadata:
+            metadata[coord_key] = _round_coord(metadata[coord_key])
+
+    return metadata
+
+
+def _parse_pro_profiles_from_lines(
+    lines: List[str],
+    file_path: Path,
+    code_map_to_use: Dict[str, str],
+    datetime_start: Optional[str],
+    datetime_end: Optional[str],
+    logger: logging.Logger,
+    remove_soil: bool,
+    add_surface_sh_as_layer: bool,
+) -> List[Dict]:
+    """Parse [DATA] section into temp_profiles list."""
+    temp_profiles: List[Dict] = []
+    in_data = False
+    has_data = False
+
+    start_ts = pd.to_datetime(datetime_start, format='mixed') if datetime_start else None
+    end_ts = pd.to_datetime(datetime_end, format='mixed') if datetime_end else None
+
+    def _process_and_append_profile(profile_data: Dict):
+        if not profile_data or 'timestamp' not in profile_data:
+            return
+
+        profile_ts = pd.to_datetime(
+            profile_data['timestamp'],
+            format='%d.%m.%Y %H:%M:%S',
+            errors='coerce'
+        )
+        if pd.isna(profile_ts):
+            return
+
+        if start_ts and profile_ts < start_ts:
+            return
+        if end_ts and profile_ts > end_ts:
+            return
+
+        # Remove soil layers if requested
+        if remove_soil and 'grain_type' in profile_data:
+            grain_types = profile_data['grain_type']
+            soil_indices = np.where((grain_types == 81) | (grain_types == 82))[0]
+            if soil_indices.size > 0:
+                first_soil_idx = soil_indices[0]
+                new_profile_data = {}
+                for key, val in profile_data.items():
+                    if isinstance(val, np.ndarray) and val.size == grain_types.size:
+                        new_profile_data[key] = val[:first_soil_idx]
+                    else:
+                        new_profile_data[key] = val
+                profile_data = new_profile_data
+
+        height_array = profile_data.get('height', np.array([]))
+        if height_array.size == 0:
+            profile_data['height'] = np.array([np.nan])
+        temp_profiles.append(profile_data)
+
+    def _parse_and_process_block(lines_block: List[str]):
+        if not lines_block:
+            return
+        profile_dict: Dict[str, Any] = {}
+        parse_error = False
+
+        # First line is timestamp line: "0500,<timestamp>"
+        ts_line = lines_block[0]
+        try:
+            profile_dict['timestamp'] = ts_line.split(',', 1)[1]
+        except IndexError:
+            return
+
+        for profile_line in lines_block[1:]:
+            try:
+                param_code, *data_parts = profile_line.split(',')
+                param_name = code_map_to_use.get(param_code)
+                if param_name:
+                    data_values = data_parts[1:]  # skip declared layer count
+                    profile_dict[param_name] = np.array(data_values, dtype=float)
+            except (ValueError, IndexError):
+                parse_error = True
+                logger.error(
+                    f"Could not parse data in {file_path.name} at timestamp "
+                    f"{profile_dict.get('timestamp', 'unknown')}. Line: '{profile_line}'"
+                )
+        if parse_error:
+            profile_dict['_parse_error'] = True
+        _process_and_append_profile(profile_dict)
+
+    current_profile_lines: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped == '[DATA]':
+            in_data = True
+            continue
+        if stripped.startswith('[') and stripped != '[DATA]':
+            # any other section ends data region
+            if in_data:
+                break
+            continue
+
+        if in_data:
+            if stripped.startswith("0500,"):
+                # new block
+                has_data = True
+                _parse_and_process_block(current_profile_lines)
+                current_profile_lines = [stripped]
+            else:
+                current_profile_lines.append(stripped)
+    # last block
+    _parse_and_process_block(current_profile_lines)
+
+    if not has_data:
+        raise ValueError(f"[DATA] section non-existent or empty for {file_path.name}.")
+
+    return temp_profiles
+
 
 def _read_pro_raw(
     filepath: Union[str, Path],
@@ -708,8 +1021,7 @@ def _read_pro_raw(
             - temp_profiles (List[Dict]): A list where each element is a
               dictionary representing a single snow profile at one timestamp.
     """
-    if logger is None:
-        logger = logging.getLogger(__name__)
+    logger = get_logger(__name__, logger=logger)
 
     file_path = Path(filepath)
     if not file_path.exists():
@@ -717,128 +1029,25 @@ def _read_pro_raw(
         return {}, []
 
     code_map_to_use = code_map if code_map is not None else CODE_TO_NAME_MAP
-    metadata: Dict[str, Any] = {}
-    temp_profiles: List[Dict] = []
-    
-    in_header, in_data = False, False
 
-    start_ts = pd.to_datetime(datetime_start, format='mixed') if datetime_start else None
-    end_ts = pd.to_datetime(datetime_end, format='mixed') if datetime_end else None
-
-    # --- HELPER FUNCTIONS ---
-    def _process_and_append_profile(profile_data: Dict):
-        """Helper to process a completed profile dictionary."""
-        if not profile_data or 'timestamp' not in profile_data:
-            return
-
-        profile_ts = pd.to_datetime(profile_data['timestamp'], format='%d.%m.%Y %H:%M:%S', errors='coerce')
-        if pd.notna(profile_ts):
-            in_range = True
-            if start_ts and profile_ts < start_ts:
-                in_range = False
-            if end_ts and profile_ts > end_ts:
-                in_range = False
-            
-            if in_range:
-                # Check for soil layers and slice the data if necessary
-                if remove_soil and 'grain_type' in profile_data:
-                    grain_types = profile_data['grain_type']
-                    # Find the first occurrence of a soil layer
-                    soil_indices = np.where((grain_types == 81) | (grain_types == 82))[0]
-                    
-                    if soil_indices.size > 0:
-                        first_soil_idx = soil_indices[0]
-                        # Create a new dictionary, slicing all array variables
-                        # to keep only the elements BEFORE the first soil layer.
-                        new_profile_data = {}
-                        for key, val in profile_data.items():
-                            if isinstance(val, np.ndarray) and val.size == grain_types.size:
-                                new_profile_data[key] = val[:first_soil_idx]
-                            else:
-                                new_profile_data[key] = val
-                        profile_data = new_profile_data
-                
-                height_array = profile_data.get('height', np.array([]))
-                # Ensure height_array is not empty after potential slicing
-                if height_array.size == 0:
-                    return
-
-                has_snow = np.nanmax(height_array) > 0
-
-                sh_data = profile_data.get('SH_at_surface', np.array([]))
-                has_sh = add_surface_sh_as_layer and sh_data.size >= 3 and sh_data[0] > 0
-                
-                if has_snow or has_sh:
-                    temp_profiles.append(profile_data)
-                    
-    def _parse_and_process_block(lines_block: List[str]):
-        """Parses a block of lines for one timestamp into a dict and processes it."""
-        if not lines_block:
-            return
-        
-        profile_dict = {}
-        # The first line is always the timestamp
-        ts_line = lines_block[0]
-        profile_dict['timestamp'] = ts_line.split(',', 1)[1]
-        
-        # Process the rest of the lines for this block
-        for profile_line in lines_block[1:]:
-            try:
-                param_code, *data_parts = profile_line.split(',')
-                if (param_name := code_map_to_use.get(param_code)):
-                    data_values = data_parts[1:] # Skip the layer count
-                    profile_dict[param_name] = np.array(data_values, dtype=float)
-            except (ValueError, IndexError):
-                logger.warning(
-                    f"Could not parse data in {file_path.name} at timestamp "
-                    f"{profile_dict.get('timestamp', 'unknown')}. Line: '{profile_line}'"
-                )
-        _process_and_append_profile(profile_dict)
-
-    # --- MAIN PARSING LOGIC ---
+    # read once
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         lines = f.readlines()
 
-    current_profile_lines = []
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            continue
-        if line == '[STATION_PARAMETERS]':
-            in_header, in_data = True, False
-        elif line == '[DATA]':
-            in_header, in_data = False, True
-        elif line.startswith('['):
-            in_header, in_data = False, False
-        elif in_header:
-            for key, value in HEADER_MAP.items():
-                if line.startswith(key):
-                    metadata[value] = line.split('=', 1)[1].strip()
-        elif in_data:
-            # Detect the start of a new profile block
-            if line.startswith("0500,"):
-                # If we have lines from a previous block, process them now
-                _parse_and_process_block(current_profile_lines)
-                # Start a new block
-                current_profile_lines = [line]
-            else:
-                # Add the current line to the block
-                current_profile_lines.append(line)
+    # 1) metadata from header
+    metadata = _read_pro_metadata(filepath, logger=logger, throw=True)
 
-    # After the loop, process the very last profile block in the file
-    _parse_and_process_block(current_profile_lines)
-
-    # POST-PROCESSING: Sanitize station name
-    if 'station_name' not in metadata or not metadata['station_name']:
-        # Use filename as fallback
-        metadata['station_name'] = file_path.stem
-        if logger:
-            logger.warning(
-                f"No StationName found in {file_path.name}, using filename: {file_path.stem}"
-            )
-    
-    # Sanitize the station name
-    metadata['station_name'] = _sanitize_station_name(metadata['station_name'])
+    # 2) profiles from data section
+    temp_profiles = _parse_pro_profiles_from_lines(
+        lines=lines,
+        file_path=file_path,
+        code_map_to_use=code_map_to_use,
+        datetime_start=datetime_start,
+        datetime_end=datetime_end,
+        logger=logger,
+        remove_soil=remove_soil,
+        add_surface_sh_as_layer=add_surface_sh_as_layer,
+    )
 
     return metadata, temp_profiles
 
@@ -855,7 +1064,8 @@ def _create_pro_dataset(
     max_layers: int,
     add_surface_sh_as_layer: bool = True,
     use_dask: bool = False,
-    chunks: Dict[str, int] | None = None
+    chunks: Dict[str, int] | None = None,
+    empty_profile_status_default: int = 0,
 ) -> xr.Dataset | None:
     """Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
 
@@ -872,12 +1082,23 @@ def _create_pro_dataset(
     density and grain size taken from the file, while other variables like
     temperature are set to np.nan.
 
+    `profile_status` semantics in this worker:
+        - 1: valid snow layer data (no layer data counts as valid information here!)
+        - 0: no data (default, e.g., 'height' missing in pro file)
+        - <0: parse errors (need to be provided from outside this function from higher-level)
+        - status = 0 should basically never happen for this function.
+
+    If no profiles are provided but metadata exists, a minimal dataset with
+    `profile_status = empty_profile_status_default` is returned.
+    This variable has no time dimension and will broadcast across time when
+    merged with time-resolved datasets later on.
+
     The final dataset will have dimensions:
         - location (1): Single monitoring site
-        - time (variable): Each profile timestamp
+        - time (variable): Each profile timestamp  [only if existent]
         - slope (1): Single slope angle (from file metadata)
         - realization (1): Single simulation run
-        - layer (max_layers): Padded vertical layers
+        - layer (max_layers): Padded vertical layers  [only if existent]
 
     Args:
         metadata (Dict): A dictionary containing SNOWPACK .pro
@@ -898,30 +1119,89 @@ def _create_pro_dataset(
         Optional[xr.Dataset]: An xarray.Dataset containing the structured
         snow profile data, or None if the input profiles list is empty.
     """
-    if not profiles:
-        return None
 
     chunks = chunks or {'time': 100, 'layer': -1}
-        
-    timestamps = pd.to_datetime([p['timestamp'] for p in profiles], format='%d.%m.%Y %H:%M:%S')
-    
+
+    # ------------------------------------------------------------------
+    # Case 1: no profiles, but we still build a dataset with profile_status
+    # ------------------------------------------------------------------
+    if not profiles:
+        # USE STRING STATION NAME DIRECTLY (not 'stationName')
+        station_name = metadata.get('station_name', metadata.get('stationName', 'unknown'))
+
+        slope_index = [0]
+
+        ds = xr.Dataset(
+            data_vars={
+                # shape: (location=1, slope=1, realization=1)
+                # This will broadcast along 'time' if/when merged with datasets
+                # that introduce a time dimension for this site.
+                'profile_status': (
+                    ('location', 'slope', 'realization'),
+                    np.array([[[empty_profile_status_default]]], dtype='i1')
+                )
+            },
+            coords={
+                'location': [station_name],
+                'time': ('time', np.array([], dtype='datetime64[ns]')),
+                'slope': slope_index,
+                'realization': [0],
+                'latitude': (
+                    'location',
+                    [_round_coord(metadata.get('latitude', np.nan))]
+                ),
+                'longitude': (
+                    'location',
+                    [_round_coord(metadata.get('longitude', np.nan))]
+                ),
+                'altitude': (
+                    'location',
+                    [float(metadata.get('altitude', np.nan))]
+                ),
+                'inclination': (
+                    'slope',
+                    [
+                        int(round(float(metadata.get('slopeAngle', np.nan))))
+                        if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
+                        else np.nan
+                    ]
+                ),
+                'azimuth': (
+                    'slope',
+                    [
+                        int(round(float(metadata.get('slopeAzi', np.nan))))
+                        if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
+                        else np.nan
+                    ]
+                ),
+            }
+        )
+
+        return ds
+
+    # ------------------------------------------------------------------
+    # Case 2: profiles present --> full 5D dataset + per-timestamp profile_status
+    # ------------------------------------------------------------------
+    timestamps = pd.to_datetime(
+        [p['timestamp'] for p in profiles],
+        format='%d.%m.%Y %H:%M:%S'
+    )
+
     all_params = sorted({
-        key for p in profiles for key in p 
-        if key not in ['timestamp', 'SH_at_surface']
+        key for p in profiles for key in p
+        if key not in ['timestamp', 'SH_at_surface', '_parse_error']
     })
 
-    # For each parameter, collect all profile data first
-    data_vars = {}
-    
+    data_vars: Dict[str, Any] = {}
+
     for param in all_params:
-        # Create a list to hold data for each profile
         profile_data = []
-        
-        for i, profile in enumerate(profiles):
+
+        for profile in profiles:
             has_sh = False
             sh_gsize = np.nan
             sh_density = np.nan
-            
+
             if add_surface_sh_as_layer and 'SH_at_surface' in profile:
                 sh_data = profile['SH_at_surface']
                 if sh_data.size >= 3 and sh_data[0] > 0:
@@ -930,12 +1210,12 @@ def _create_pro_dataset(
                     sh_density = sh_data[2]
 
             num_snow_layers = len(profile.get('height', []))
-            
+
             # Get parameter data for this profile
             param_data = profile.get(param, [])
             final_values = list(param_data[:num_snow_layers])
-            
-            # Pad with NaN to num_snow_layers
+
+            # Pad with NaN up to num_snow_layers
             while len(final_values) < num_snow_layers:
                 final_values.append(np.nan)
 
@@ -948,7 +1228,11 @@ def _create_pro_dataset(
                 elif param == 'density':
                     final_values.append(sh_density)
                 elif param == 'height':
-                    last_height = final_values[-1] if final_values and not np.isnan(final_values[-1]) else 0.0
+                    last_height = (
+                        final_values[-1]
+                        if final_values and not np.isnan(final_values[-1])
+                        else 0.0
+                    )
                     final_values.append(last_height + 0.001)
                 else:
                     final_values.append(np.nan)
@@ -956,59 +1240,148 @@ def _create_pro_dataset(
             # Pad to max_layers
             while len(final_values) < max_layers:
                 final_values.append(np.nan)
-            
+
             # Truncate if too long
             final_values = final_values[:max_layers]
-            
-            # Add to profile_data
+
             profile_data.append(final_values)
-        
-        # Now create the full array with shape (1, n_profiles, 1, 1, max_layers)
-        # Build as numpy first
-        np_array = np.full((1, len(profiles), 1, 1, max_layers), np.nan, dtype=np.float32)
-        
-        # Fill in the data
+
+        # Build numpy array with shape (1, n_profiles, 1, 1, max_layers)
+        np_array = np.full(
+            (1, len(profiles), 1, 1, max_layers),
+            np.nan,
+            dtype=np.float32
+        )
+
         for i, profile_values in enumerate(profile_data):
             np_array[0, i, 0, 0, :] = profile_values
-        
+
         # Convert to dask if needed
         if use_dask:
             chunk_spec = (1, chunks['time'], 1, 1, chunks['layer'])
-            arr = da.from_array(np_array.copy(), chunks=chunk_spec) # type: ignore[arg-type]
+            arr = da.from_array(np_array.copy(), chunks=chunk_spec)  # type: ignore[arg-type]
         else:
             arr = np_array
-        
-        data_vars[param] = (("location", "time", "slope", "realization", "layer"), arr)
 
-    # USE STRING STATION NAME DIRECTLY (not 'stationName')
+        data_vars[param] = (
+            ("location", "time", "slope", "realization", "layer"),
+            arr
+        )
+
+    # ------------------------------------------------------------------
+    # Compute profile_status for each timestamp
+    #   1: 'height' data exists (even if no snow on ground)
+    #   0: safe default if no 'height' data but still parsed without error
+    # ------------------------------------------------------------------
+    status_np = np.empty((1, len(profiles), 1, 1), dtype='i1')
+
+    for i, profile in enumerate(profiles):
+        status = 0  # default: no data otherwise proven differently
+        if profile.get('_parse_error', False):
+            status = -1
+        else:
+            height = profile.get('height', None)
+            if height is not None and len(height) >= 1:
+                status = 1
+        status_np[0, i, 0, 0] = status
+
+    if use_dask:
+        status_arr = da.from_array(
+            status_np,
+            chunks=(1, chunks['time'], 1, 1) # type: ignore[arg-type]
+        )  # type: ignore[arg-type]
+    else:
+        status_arr = status_np
+
+    data_vars['profile_status'] = (
+        ("location", "time", "slope", "realization"),
+        status_arr
+    )
+
+    # ------------------------------------------------------------------
+    # Build Dataset with coords
+    # ------------------------------------------------------------------
     station_name = metadata.get('station_name', metadata.get('stationName', 'unknown'))
-    
     slope_index = [0]
+
     ds = xr.Dataset(
         data_vars,
         coords={
-            'location': [station_name],  # ✨ STRING COORDINATE!
+            'location': [station_name],  # string coordinate
             'time': timestamps,
             'slope': slope_index,
             'realization': [0],
             'layer': np.arange(max_layers),
-            'latitude': ('location', [float(metadata.get('latitude', np.nan))]),
-            'longitude': ('location', [float(metadata.get('longitude', np.nan))]),
-            'altitude': ('location', [float(metadata.get('altitude', np.nan))]),
-            'inclination': ('slope', [
-                int(round(float(metadata.get('slopeAngle', np.nan))))
-                if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
-                else np.nan
-            ]),
-            'azimuth': ('slope', [
-                int(round(float(metadata.get('slopeAzi', np.nan))))
-                if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
-                else np.nan
-            ])
+            'latitude': (
+                'location',
+                [_round_coord(metadata.get('latitude', np.nan))]
+            ),
+            'longitude': (
+                'location',
+                [_round_coord(metadata.get('longitude', np.nan))]
+            ),
+            'altitude': (
+                'location',
+                [float(metadata.get('altitude', np.nan))]
+            ),
+            'inclination': (
+                'slope',
+                [
+                    int(round(float(metadata.get('slopeAngle', np.nan))))
+                    if not np.isnan(float(metadata.get('slopeAngle', np.nan)))
+                    else np.nan
+                ]
+            ),
+            'azimuth': (
+                'slope',
+                [
+                    int(round(float(metadata.get('slopeAzi', np.nan))))
+                    if not np.isnan(float(metadata.get('slopeAzi', np.nan)))
+                    else np.nan
+                ]
+            )
         }
     )
+    
+    # Attach metadata from registry to all variables
+    from .registry import registry
+    for var_name in ds.data_vars:
+        if reg_entry := registry.get(str(var_name)):
+            ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', str(var_name))
+            ds[var_name].attrs['units'] = reg_entry.get('si_units', '1')
+            ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', str(var_name)).replace('_', ' ')
+        else:
+            # Set default attributes for variables not in registry
+            if 'units' not in ds[var_name].attrs:
+                ds[var_name].attrs['units'] = '1'  # Default: dimensionless
+            if 'standard_name' not in ds[var_name].attrs:
+                ds[var_name].attrs['standard_name'] = str(var_name)
+            if 'long_name' not in ds[var_name].attrs:
+                ds[var_name].attrs['long_name'] = str(var_name).replace('_', ' ')
+    
+    # Add timezone attribute to time coordinate
+    if 'time' in ds.coords and 'timezone' not in ds['time'].attrs:
+        # Try to get timezone from metadata
+        tz_offset = metadata.get('tz')
+        if tz_offset is not None:
+            try:
+                tz_offset = float(tz_offset)
+            except (ValueError, TypeError):
+                pass  # allow string input of timezone names
+            ds['time'].tz.set_attr(tz_offset)
+        # else:
+        #     # No timezone in metadata, we don't assume defaults
+        #     pass
+    
+    # Add mapping attribute to profile_status
+    if 'profile_status' in ds:
+        ds['profile_status'].attrs['mapping'] = {
+            -1: "error during parsing",
+            0: "no layer data",
+            1: "existing layer data",
+        }
 
-    return ds 
+    return ds
 
 
 # --------------------------------------------------------------------------- #
@@ -1066,7 +1439,10 @@ def _get_layer_count(profile_lines: List[str], add_sh: bool, remove_soil: bool =
     return final_count + 1 if sh_present else final_count
 
 
-def _scan_pro_for_max_layers(filepath: Path, add_sh: bool, remove_soil: bool = True) -> int:
+def _scan_pro_for_max_layers(filepath: Path, 
+                             add_sh: bool, 
+                             remove_soil: bool = True,
+                             logger: Optional[logging.Logger] = None) -> int:
     """
     Scans a single .pro file to find the maximum layer count across all profiles.
 
@@ -1082,6 +1458,7 @@ def _scan_pro_for_max_layers(filepath: Path, add_sh: bool, remove_soil: bool = T
     Returns:
         The maximum layer count found in the file.
     """
+    logger = logger or get_logger(__name__)  # Ensure it exists
     max_layers_in_file = 0
     current_profile_lines = []
     
@@ -1176,8 +1553,8 @@ def read_smet(
         An xarray.Dataset containing the SMET data, or None if the file
         cannot be parsed or contains no data in the specified time range.
     """
-    if logger is None:
-        logger = logging.getLogger(__name__)
+    logger_input = None if isinstance(logger, bool) else logger
+    logger = get_logger(__name__, logger=logger_input)
 
     file_path = Path(filepath)
     if not file_path.exists():
@@ -1198,6 +1575,11 @@ def read_smet(
     if 'fields' not in header or data_start_line == -1:
         logger.error(f"SMET file {filepath} is missing 'fields' or '[DATA]' section.")
         return None
+
+    # Normalize coordinates early
+    for coord_key in ("latitude", "longitude"):
+        if coord_key in header:
+            header[coord_key] = _round_coord(header[coord_key])
 
     variable_heights = {
         key.replace('_height', ''): value.strip()
@@ -1253,9 +1635,13 @@ def read_smet(
     tz_val = header.get('tz')
     if tz_val is not None:
         try:
-            ds['time'].tz.set_attr(int(tz_val))
+            tz_val = float(tz_val)
         except (ValueError, TypeError):
-            logger.warning(f"Could not parse timezone '{tz_val}' from file {filepath}")
+            pass  # allow string input of timezone names
+        ds['time'].tz.set_attr(tz_val)
+    # else:
+    #     # No timezone metadata, we don't assume defaults
+    #     pass
             
     station_name = header.get('station_name', header.get('station_id', file_path.stem))
     
@@ -1274,8 +1660,8 @@ def read_smet(
     # Add coordinates if they don't exist
     if 'latitude' not in ds.coords:
         ds = ds.assign_coords({
-            'latitude': ('location', [float(header.get('latitude', np.nan))]),
-            'longitude': ('location', [float(header.get('longitude', np.nan))]),
+            'latitude': ('location', [_round_coord(header.get('latitude', np.nan))]),
+            'longitude': ('location', [_round_coord(header.get('longitude', np.nan))]),
             'altitude': ('location', [float(header.get('altitude', np.nan))]),
         })
     
@@ -1298,16 +1684,34 @@ def read_smet(
             slope_azi = float(slope_azi) if slope_azi is not None else np.nan
         except (ValueError, TypeError):
             slope_azi = np.nan
-        
+
         ds = ds.assign_coords({
             'inclination': ('slope', [slope_incl]),
             'azimuth': ('slope', [slope_azi])
         })
+    
+    # Attach metadata from registry to all variables
+    from .registry import registry
+    for var_name in ds.data_vars:
+        if reg_entry := registry.get(str(var_name)):
+            ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', str(var_name))
+            ds[var_name].attrs['units'] = reg_entry.get('si_units', '1')
+            ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', str(var_name)).replace('_', ' ')
+        else:
+            # Set default attributes for variables not in registry (e.g., SMET meteorological vars)
+            if 'units' not in ds[var_name].attrs:
+                ds[var_name].attrs['units'] = '1'  # Default: dimensionless
+            if 'standard_name' not in ds[var_name].attrs:
+                ds[var_name].attrs['standard_name'] = str(var_name)
+            if 'long_name' not in ds[var_name].attrs:
+                ds[var_name].attrs['long_name'] = str(var_name).replace('_', ' ')
 
     return ds
 
-def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]],
-                       recursive: bool = False
+def _resolve_filepaths(source: Union[str, Path, 
+                       Sequence[Union[str, Path]]],
+                       recursive: bool = False, 
+                       logger: Optional[logging.Logger]=None,
 ) -> Tuple[List[Path], List[Path]]:
     """
     Resolves the source argument into separate lists of .pro and .smet files.
@@ -1323,6 +1727,7 @@ def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]],
     Raises:
         TypeError: If the source is of an unsupported type.
     """
+    logger = logger or get_logger(__name__)
     paths_to_process = []
     if isinstance(source, (str, Path)):
         paths_to_process.append(Path(source))
@@ -1354,10 +1759,12 @@ def _resolve_filepaths(source: Union[str, Path, Sequence[Union[str, Path]]],
 
 def _merge_and_finalize(
     all_datasets: List[xr.Dataset],
-    time: Optional[TimeSelector],
-    location: Optional[LocationSelector],
-    slope: Optional[SlopeSelector],
-    realization: Optional[RealizationSelector]
+    time: TimeSelector,
+    location: LocationSelector,
+    slope: SlopeSelector,
+    realization: RealizationSelector,
+    logger: logging.Logger,
+    norm_slopes: Union[bool, Literal['auto']] = 'auto',
 ) -> Optional[xsnowDataset]:
     """
     Merges, re-indexes, and applies final filters to the datasets.
@@ -1373,10 +1780,17 @@ def _merge_and_finalize(
         location: A LocationSelector for final location-based filtering.
         slope: A SlopeSelector for final slope-based filtering.
         realization: A RealizationSelector for final realization-based filtering.
+        norm_slopes: Controls slope normalization:
+            - 'auto' (default): normalize when slopes are consistent across locations;
+              preserve per-location slopes when inconsistent.
+            - True: force normalization to `(slope,)` even if values differ by location.
+            - False: do not call `normalize_slope_coords`.
 
     Returns:
         A unified and filtered xsnowDataset, or None if no datasets were provided.
     """
+    logger = get_logger(__name__, logger=logger)
+    
     if not all_datasets:
         return None
 
@@ -1399,7 +1813,7 @@ def _merge_and_finalize(
     
     # HANDLE DUPLICATE STATION NAMES
     station_names = list(grouped_by_location.keys())
-    unique_names = _handle_duplicate_names(station_names)
+    unique_names = _handle_duplicate_names(station_names, logger=logger)
     
     # Rename locations if duplicates were found
     if unique_names != station_names:
@@ -1494,9 +1908,9 @@ def _merge_and_finalize(
     if not final_xr_dataset.attrs:
         final_xr_dataset.attrs = {
             'Conventions': 'CF-1.8',
-            'title': 'SNOWPACK model output',
-            'source': 'SNOWPACK model output (.pro and .smet files)',
-            'history': f'{pd.Timestamp.now(tz="UTC").isoformat()}: Created by xsnow.',
+            # 'title': 'SNOWPACK model output',
+            # 'source': 'SNOWPACK model output (.pro and .smet files)',
+            # 'history': f'{pd.Timestamp.now(tz="UTC").isoformat()}: Created by xsnow.',
             'crs': 'EPSG:4326'
         }
 
@@ -1507,7 +1921,49 @@ def _merge_and_finalize(
             final_xr_dataset[var_name].attrs['standard_name'] = reg_entry.get('standard_name', 'unknown')
             final_xr_dataset[var_name].attrs['units'] = reg_entry.get('si_units', 'unknown')
             final_xr_dataset[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
+        else:
+            # Set defaults for variables not in registry if not already set
+            if var_name in final_xr_dataset.data_vars:
+                if 'units' not in final_xr_dataset[var_name].attrs:
+                    final_xr_dataset[var_name].attrs['units'] = '1'
+                if 'standard_name' not in final_xr_dataset[var_name].attrs:
+                    final_xr_dataset[var_name].attrs['standard_name'] = var_name
+                if 'long_name' not in final_xr_dataset[var_name].attrs:
+                    final_xr_dataset[var_name].attrs['long_name'] = var_name.replace('_', ' ')
 
+    # Normalize slope coordinates
+    # After merging multiple locations, slope coordinates (azimuth, inclination)
+    # may have dimensions (location, slope) when they should only have (slope).
+    if 'slope' in final_xr_dataset.dims:
+        try:
+            if norm_slopes is True:
+                final_xr_dataset = normalize_slope_coords(
+                    final_xr_dataset,
+                    verify_consistency=False,  # Force reduction even if slopes differ by location
+                    allow_per_location=False,  # Always collapse to (slope,)
+                )
+            elif norm_slopes == 'auto':
+                final_xr_dataset = normalize_slope_coords(
+                    final_xr_dataset,
+                    verify_consistency=True,   # Only reduce when consistent
+                    allow_per_location=True,   # Preserve per-location slopes when inconsistent
+                )
+            elif norm_slopes is False:
+                pass  # Explicitly skip normalization
+            else:
+                raise ValueError(
+                    f"Unsupported norm_slopes value: {norm_slopes!r}. "
+                    "Use True, False, or 'auto'."
+                )
+        except ValueError as e:
+            # This should rarely happen now with allow_per_location=True
+            # Only occurs if there's a true data structure problem
+            logger.error(
+                f"Failed to normalize slope coordinates: {e}\n"
+                f"This indicates a data structure issue that needs investigation."
+            )
+            # Re-raise instead of silently using first location's values
+            raise
     
     # The location coordinate is already meaningful strings
     # Apply final filters
@@ -1520,14 +1976,24 @@ def _merge_and_finalize(
     if realization: 
         final_xr_dataset = realization.apply(final_xr_dataset)
 
+    final_xr_dataset = reorder_dims(final_xr_dataset)
     final_dataset = xsnowDataset(final_xr_dataset)
     
     # DEBUG: Check slope coordinates after merge
     if 'inclination' in final_dataset.data.coords:
         logger.debug(f"_merge_and_finalize: inclination values = {final_dataset.data.inclination.values}")
         logger.debug(f"_merge_and_finalize: inclination dims = {final_dataset.data.inclination.dims}")
+
+    if 'z' not in final_dataset and 'height' in final_dataset:
+        final_dataset = final_dataset.compute_z_depth()
     
-    return final_dataset.compute_z_depth() if 'height' in final_dataset.data else final_dataset
+    # Compute HS if not present
+    if 'HS' not in final_dataset and 'height' in final_dataset:
+        final_dataset = final_dataset.compute_hs()
+
+    final_dataset = final_dataset.update_profile_status()
+    
+    return final_dataset
 
 
 def _coerce_time(sel: Optional[TimeLike]) -> Optional[TimeSelector]:
@@ -1555,201 +2021,165 @@ def _coerce_realization(sel: Optional[RealizationLike]) -> Optional[RealizationS
 # --------------------------------------------------------------------------- #
 
 @register_xsnowDataset_method
-def update(existing_ds: xsnowDataset, source: Union[str, List[str], Path]) -> xsnowDataset:
+def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path],
+                  from_time: Optional[Union[str, datetime, pd.Timestamp, np.datetime64]]=None,
+                  join: str='left', logger: Optional[logging.Logger]=None, **kwargs,
+) -> xsnowDataset:
     """
-    Updates an existing xsnowDataset with new data from a source.
+    Incrementally extend a dataset by appending newer timestamps from files.
 
-    This method is designed for workflows where you load a cached dataset
-    (e.g., from NetCDF) and want to append new data from recent .pro or
-    .smet files. It finds the last timestamp in the current data and only
-    reads new data from the source that is more recent.
-    
-    Note: This method is optimized for adding new timestamps to existing data.
-    If the new data has different dimensions (e.g., different slopes), the result
-    may differ from loading all data together. For guaranteed consistency across
-    all dimensions, use a full reload instead.
+    This method is a convenience wrapper for time selection, read, and concat.
+    Semantics:
+        1) Determine a start time:
+            - If `from_time` is None, use (max(existing time) + 1s).
+            - If `from_time` is provided, drop all times <= `from_time`
+              from `existing_ds` and start reading from `from_time` (inclusive).
+        2) Read `source` with that time filter.
+        3) Concatenate along `time` using `xsnow.concat`.
+            - `join` controls non-time dims (default: 'left' keeps existing domains).
+            - Time is always the union along the concat axis (no extra reindexing).
 
     Args:
-        existing_ds (xsnowDataset): The dataset instance to be updated.
-        source: Path to a file, a directory, or a list of files
-            containing the new data.
+        existing_ds: The dataset instance to extend.
+        source: Path(s) to files or directories to read new data from (calls `read` upon it).
+        from_time: Subset existing data to times `< from_time` and read new data starting 
+            with `from_time` (this will already be new data). (also read Semantics above)
+            Accepts str/pandas/np datetime or datetime.
+        join: Join mode for non-time dimensions forwarded to `xsnow.concat`.
+        logger: Optional logger to use for status/warning messages. If None, a
+            logger is created.
+        **kwargs: Additional keyword args forwarded to `xsnow.concat` like `compat` or 
+            `combine_attrs`.
 
     Returns:
-        A new xsnowDataset instance with the combined data.
+        xsnowDataset with the appended data (or trimmed-only if nothing new).
     """
-    try:
-        pro_files, smet_files = _resolve_filepaths(source)
-        if not pro_files and not smet_files:
-            logger.warning("Update source contains no data files.")
-            return existing_ds
-        resolved_source = pro_files + smet_files
-    except (FileNotFoundError, TypeError) as e:
-        logger.error(e)
-        return existing_ds
+    logger = get_logger(__name__, logger=logger)
 
-    if existing_ds.data is None or existing_ds.data.time.size == 0:
-        return read(resolved_source) or existing_ds
-    
-    last_timestamp = pd.to_datetime(existing_ds.data.time.max().values)
+    base_data = existing_ds.data if existing_ds.data is not None else xr.Dataset()
+    base_filtered = base_data
+    base_max_ts = None
+    if "time" in base_data and base_data.time.size > 0:
+        base_max_ts = pd.to_datetime(base_data.time.max().values)
 
-    # Add 1 second to make it exclusive (avoid re-reading the last timestamp)
-    last_timestamp_exclusive = (last_timestamp + pd.Timedelta(seconds=1)).isoformat()
-    time_filter = TimeSelector(sel=slice(last_timestamp_exclusive, None))    
-    new_data_obj = read(resolved_source, time=time_filter)
-
-    if new_data_obj is None or new_data_obj.data.time.size == 0:
-        return existing_ds
-
-    # ========================================================================
-    # FIX: Handle string-based location coordinates properly
-    # ========================================================================
-    
-    # Get location names from both datasets
-    def _get_location_names(ds):
-        """Extract location names as strings, handling bytes if needed."""
-        return [loc.decode('utf-8') if isinstance(loc, bytes) else str(loc) 
-                for loc in ds.location.values]
-    
-    existing_locations = _get_location_names(existing_ds.data)
-    new_locations = _get_location_names(new_data_obj.data)
-    
-    # Find common and unique locations
-    common_locations = set(existing_locations) & set(new_locations)
-    only_in_existing = set(existing_locations) - set(new_locations)
-    only_in_new = set(new_locations) - set(existing_locations)
-    
-    logger.info(f"Update: {len(common_locations)} common, {len(only_in_new)} new locations")
-    
-    # Process based on whether we have common locations
-    if common_locations:
-        # Merge data for common locations along time dimension
-        merged_parts = []
-        
-        # 1. Handle locations that exist in both datasets
-        for loc_name in common_locations:
-            # Select data for this location from both datasets
-            existing_loc_data = existing_ds.data.sel(location=loc_name)
-            new_loc_data = new_data_obj.data.sel(location=loc_name)
-            
-            # Align dimensions (except time)
-            for dim in set(existing_loc_data.dims) | set(new_loc_data.dims):
-                if dim == 'time':
-                    continue
-                
-                existing_size = existing_loc_data.sizes.get(dim, 0)
-                new_size = new_loc_data.sizes.get(dim, 0)
-                
-                if existing_size != new_size and existing_size > 0 and new_size > 0:
-                    logger.warning(
-                        f"Location '{loc_name}' dimension mismatch in '{dim}': "
-                        f"existing={existing_size}, new={new_size}. Reindexing to match."
-                    )
-                    max_size = max(existing_size, new_size)
-                    
-                    if existing_size < max_size:
-                        existing_loc_data = existing_loc_data.reindex(
-                            {dim: range(max_size)}, fill_value=np.nan
-                        )
-                    if new_size < max_size:
-                        new_loc_data = new_loc_data.reindex(
-                            {dim: range(max_size)}, fill_value=np.nan
-                        )
-            
-            # BEFORE concat: Save coordinates from existing dataset
-            slope_coords_to_preserve = {}
-            for coord_name in ['inclination', 'azimuth']:
-                if coord_name in existing_loc_data.coords:
-                    slope_coords_to_preserve[coord_name] = existing_loc_data[coord_name]
-            
-            # Concatenate along time dimension for this location
-            merged_loc = xr.concat(
-                [existing_loc_data, new_loc_data],
-                dim='time',
-                coords='all',
-                compat='override'
-            )
-            
-            # Remove duplicate timestamps AFTER concat (handles overlapping data)
-            if 'time' in merged_loc.dims:
-                _, unique_idx = np.unique(merged_loc['time'].values, return_index=True)
-                merged_loc = merged_loc.isel(time=sorted(unique_idx))
-                               
-            # AFTER concat: Restore preserved coordinates
-            if slope_coords_to_preserve:
-                merged_loc = merged_loc.assign_coords(slope_coords_to_preserve)
-            
-            # Ensure location is preserved as a dimension
-            if 'location' not in merged_loc.dims:
-                # Drop location coordinate if it exists to avoid conflict
-                if 'location' in merged_loc.coords:
-                    merged_loc = merged_loc.drop_vars('location')  # ✅ Drop first
-                # Add location as a new dimension with the correct value
-                merged_loc = merged_loc.expand_dims(location=[loc_name])  # ✅ Then add
-
-            merged_parts.append(merged_loc)  
-                  
-        # 2. Add locations that only exist in existing dataset
-        for loc_name in only_in_existing:
-            loc_data = existing_ds.data.sel(location=loc_name)
-            if 'location' not in loc_data.dims:
-                loc_data = loc_data.expand_dims(location=[loc_name])
-            merged_parts.append(loc_data)
-        
-        # 3. Add locations that only exist in new dataset
-        for loc_name in only_in_new:
-            loc_data = new_data_obj.data.sel(location=loc_name)
-            if 'location' not in loc_data.dims:
-                loc_data = loc_data.expand_dims(location=[loc_name])
-            merged_parts.append(loc_data)
-        
-        # Combine all location data
-        combined = xr.concat(
-            merged_parts,
-            dim='location',
-            coords='all',
-            compat='override'
-        )
-                
+    # Determine start time for reading new data; optionally trim existing
+    time_start: Optional[str] = None
+    if from_time is None:
+        if "time" in base_data and base_data.time.size > 0:
+            last_ts = pd.to_datetime(base_data.time.max().values)
+            time_start = (last_ts + pd.Timedelta(seconds=1)).isoformat()
     else:
-        # No common locations - simple concatenation along location dimension
-        # Handle dimension mismatches
-        all_dims = set(existing_ds.data.dims) | set(new_data_obj.data.dims)
-        
-        for dim in all_dims:
-            if dim in ('time', 'location'):
+        start_ts = pd.to_datetime(from_time)
+        time_start = start_ts.isoformat()
+        if base_max_ts is not None and start_ts < base_max_ts:
+            logger.warning(
+                "append_latest called with from_time earlier than existing max time; "
+                "this trims existing data from that point onward and may introduce "
+                "time gaps if the new source does not fully cover that range."
+            )
+        if "time" in base_data:
+            mask = base_data["time"].values < start_ts
+            base_filtered = base_data.sel(time=mask)
+
+    time_sel = TimeSelector(sel=slice(time_start, None)) if time_start else None
+    new_ds = read(source, time=time_sel, logger=logger)
+    new_data = new_ds.data if new_ds is not None else None
+
+    def _new_coord_values(base: xr.Dataset, incoming: xr.Dataset) -> Dict[str, np.ndarray]:
+        new_coords: Dict[str, np.ndarray] = {}
+        for coord_name, coord in incoming.coords.items():
+            if coord_name == "time" or coord.ndim != 1:
                 continue
-                
-            existing_size = existing_ds.data.sizes.get(dim, 0)
-            new_size = new_data_obj.data.sizes.get(dim, 0)
-            
-            if existing_size != new_size and existing_size > 0 and new_size > 0:
-                logger.warning(
-                    f"Dimension mismatch in '{dim}': existing={existing_size}, new={new_size}. "
-                    f"Incremental update may differ from full reload."
+            incoming_vals = np.asarray(coord.values).ravel()
+            base_vals = np.asarray(base[coord_name].values).ravel() if coord_name in base else np.array([])
+            incoming_vals = incoming_vals[~pd.isna(incoming_vals)]
+            base_vals = base_vals[~pd.isna(base_vals)]
+            diff = np.setdiff1d(incoming_vals, base_vals, assume_unique=True)
+            if diff.size:
+                new_coords[str(coord_name)] = diff
+        return new_coords
+
+    def _preview(vals: np.ndarray) -> str:
+                    as_list = list(np.atleast_1d(vals))
+                    shown = ", ".join(map(repr, as_list[:5]))
+                    suffix = "..." if len(as_list) > 5 else ""
+                    return f"[{shown}{suffix}]"
+
+    if new_data is None or "time" not in new_data or new_data.time.size == 0:
+        if new_data is not None and join in {"outer", "right"}:
+            extra_coords = _new_coord_values(base_filtered, new_data)
+            if extra_coords:
+                preview = ", ".join(
+                    f"{name}: {_preview(vals)}" for name, vals in extra_coords.items()
                 )
-                max_size = max(existing_size, new_size)
-                
-                if existing_size < max_size:
-                    existing_ds.data = existing_ds.data.reindex(
-                        {dim: range(max_size)}, fill_value=np.nan
+                logger.warning(
+                    "append_latest found no new time steps, but new coordinate values exist "
+                    f"that would be merged under join='{join}': {preview}. "
+                    "Check time filters or data completeness."
+                )
+        # Nothing to append; still return trimmed data if from_time was provided
+        return existing_ds.__class__(base_filtered)
+
+    # Guard against unexpected overlapping timestamps
+    if "time" in base_filtered and "time" in new_data:
+        overlap = np.intersect1d(base_filtered["time"].values, new_data["time"].values)
+        if overlap.size:
+            raise ValueError(
+                "append_latest detected overlapping timestamps between existing "
+                "and new data; expected disjoint time domains. "
+                "This may indicate an incorrect from_time or a read filter bug. "
+                f"Example overlaps (up to 5): {overlap[:5]!r}"
+            )
+
+    JoinMode = Literal["left", "right", "outer", "inner", "union"]
+    combined = xsnow_concat(
+        [existing_ds.__class__(base_filtered), xsnowDataset(new_data)],
+        dim="time",
+        join=cast(JoinMode, join),
+        **kwargs,
+    )
+    # Log
+    new_times = combined.time.where(combined.time >= pd.to_datetime(time_start), drop=True)
+    new_time_start = pd.to_datetime(new_times[0].values).isoformat()
+    new_time_end = pd.to_datetime(new_times.max().values).isoformat()
+    logger.info(f"Appended {len(new_times)} new timestamps: {new_time_start}--{new_time_end}")
+    # Unwrap xsnowDataset if needed for type compatibility
+    combined_data = combined.data if isinstance(combined, xsnowDataset) else combined
+    extra_coords = _new_coord_values(base_filtered, combined_data)
+    if extra_coords:
+        preview = ", ".join(
+                        f"{name}: {_preview(vals)}" for name, vals in extra_coords.items()
                     )
-                if new_size < max_size:
-                    new_data_obj.data = new_data_obj.data.reindex(
-                        {dim: range(max_size)}, fill_value=np.nan
-                    )        
-        # Concatenate along location dimension (different stations)
-        combined = xr.concat(
-            [existing_ds.data, new_data_obj.data],
-            dim='location',
-            join='outer',
-            coords='all',
-            compat='override'
-        )
-            
-    return xsnowDataset(combined)
-    
+        logger.debug(f"Added new coordinates: {preview}")
+
+    return combined if isinstance(combined, xsnowDataset) else xsnowDataset(combined)
+
+
+def _encode_mapping_attrs_for_netcdf(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Return a Dataset with any variable/dataset attrs named 'mapping'
+    (which must be dicts) serialized into JSON under 'mapping_json'.
+    The original 'mapping' attr is removed to satisfy NetCDF constraints.
+    This function modifies in-place!
+    """
+    ds_out = ds  # work in-place on the copy the caller passes in
+
+    # dataset-level attrs
+    if isinstance(ds_out.attrs.get("mapping"), dict):
+        ds_out.attrs["mapping_json"] = json.dumps(ds_out.attrs["mapping"])
+        del ds_out.attrs["mapping"]
+
+    # variable-level attrs
+    for name, var in ds_out.variables.items():
+        if isinstance(var.attrs.get("mapping"), dict):
+            var.attrs["mapping_json"] = json.dumps(var.attrs["mapping"])
+            del var.attrs["mapping"]
+
+    return ds_out
+
 @register_xsnowDataset_method
-def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
+def to_netcdf(ds: xsnowDataset, path: Union[str, Path],
+              logger: Optional[logging.Logger]=None, **kwargs):
     """
     Saves the dataset to a NetCDF file.
 
@@ -1762,44 +2192,45 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     Args:
         ds (xsnowDataset): The dataset instance to save.
         path (Union[str, Path]): The destination file path for the .nc file.
+        logger (logging.Logger): An optional preconfigured logger instance.
         **kwargs: Additional keyword arguments passed to `xarray.Dataset.to_netcdf()`.
     """
     if ds.data is None:
         raise ValueError("Cannot save an empty dataset.")
+    logger = get_logger(__name__, logger=logger)
     
     # Create a copy to avoid modifying the original
     ds_to_save = ds.to_xarray().copy()
     
     # DEBUG: Check slope coordinates before saving
     if 'inclination' in ds_to_save.coords:
-        logger.debug(f"to_netcdf: inclination values BEFORE save = {ds_to_save.inclination.values}")
+        logger.debug(f"to_netcdf: inclination BEFORE save = {ds_to_save.inclination.values}")
         logger.debug(f"to_netcdf: inclination dims = {ds_to_save.inclination.dims}")
-    
-    # ENCODE STRING COORDINATES FOR NETCDF
+
+    # Encode any dict attrs named 'mapping' as JSON
+    ds_to_save = _encode_mapping_attrs_for_netcdf(ds_to_save)
+
+    # Encode string coordinates as fixed-length bytes for NetCDF classic compatibility
     for coord_name in ("location", "realization"):
         if coord_name in ds_to_save.coords:
             coord_data = ds_to_save[coord_name]
-            
-            # Check if coordinate is string-like
             if coord_data.dtype.kind in ("U", "S", "O"):
-                # Determine max string length
                 if coord_data.dtype.kind == "U":
-                    max_len = max(len(str(x)) for x in coord_data.values)
+                    max_len = max((len(str(x)) for x in coord_data.values), default=1)
                 elif coord_data.dtype.kind == "S":
-                    max_len = coord_data.dtype.itemsize
-                else:  # Object dtype
-                    max_len = max(len(str(x)) for x in coord_data.values)
-                
-                # Set encoding to fixed-length string
+                    max_len = max(1, coord_data.dtype.itemsize)
+                else:
+                    max_len = max((len(str(x)) for x in coord_data.values), default=1)
                 ds_to_save[coord_name].encoding = {
                     "dtype": f"S{max_len}",
                     "compression": "zlib",
-                    "complevel": 4
+                    "complevel": 4,
                 }
-                
-                logger.debug(f"Encoding {coord_name} as S{max_len}")
+                logger.debug(f"Encoding coord '{coord_name}' as S{max_len}")
+
+    path = Path(path)
     ds_to_save.to_netcdf(path, **kwargs)
-    logging.info(f"Dataset successfully saved to {path}")
+    logger.info(f"Dataset successfully saved to {path}")
 
 @register_xsnowDataset_method
 def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = None, **kwargs):

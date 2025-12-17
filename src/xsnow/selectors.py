@@ -207,10 +207,26 @@ class SlopeSelector(Selector):
     Supports:
     - int / list[int] / slice / xr.DataArray (existing positional/boolean logic)
     - dict query like {'inclination': 30, 'azimuth': 180} to match slope
-      metadata coords/vars.
+      metadata coords/vars with optional tolerance.
     """
-    def __init__(self, sel: Union[SlopeIndexLike, SlopeQueryMapping]):
+    def __init__(
+        self, 
+        sel: Union[SlopeIndexLike, SlopeQueryMapping],
+        tolerance: Optional[float] = None
+    ):
+        """
+        Parameters
+        ----------
+        sel : int, slice, list, DataArray, or dict
+            Selection criteria for slopes
+        tolerance : float, optional
+            When using dict-style queries with numerical values, allow matches
+            within this tolerance. Useful for floating-point comparisons.
+            If None, uses exact equality for integers and small default tolerance
+            (1e-6) for floats.
+        """
         super().__init__("slope", sel)
+        self.tolerance = tolerance
 
     def apply(self, ds: xr.Dataset) -> xr.Dataset:
         s = self.sel
@@ -218,7 +234,6 @@ class SlopeSelector(Selector):
         # Case 1: dict-style metadata query for slope properties
         if isinstance(s, dict):
             # Build a cumulative mask over the slope dimension
-            # Start with all True
             if "slope" not in ds.dims:
                 raise ValueError("Dataset has no 'slope' dimension")
 
@@ -239,27 +254,107 @@ class SlopeSelector(Selector):
                         f"not found in dataset coords or variables."
                     )
 
+                # Handle case where arr has extra dimensions (e.g., location)
                 if "slope" not in arr.dims:
                     raise ValueError(
                         f"SlopeSelector: field '{key}' is not defined per-slope "
                         f"(dims={arr.dims})"
                     )
+                
+                # If arr has extra dimensions beyond 'slope', reduce them
+                # This handles the common case of (location, slope) -> (slope)
+                extra_dims = [d for d in arr.dims if d != 'slope']
+                if extra_dims:
+                    # Check if values are consistent across extra dimensions
+                    # If so, take the first value; otherwise warn
+                    if 'location' in extra_dims:
+                        # Take first location, but check consistency
+                        first_loc = arr.isel(location=0)
+                        
+                        # Check if all locations have the same values
+                        if arr.sizes['location'] > 1:
+                            # Compare all locations to first
+                            all_same = True
+                            for loc_idx in range(1, arr.sizes['location']):
+                                if not np.allclose(
+                                    arr.isel(location=loc_idx).values,
+                                    first_loc.values,
+                                    rtol=1e-9,
+                                    atol=1e-9,
+                                    equal_nan=True
+                                ):
+                                    all_same = False
+                                    break
+                            
+                            if not all_same:
+                                warnings.warn(
+                                    f"Slope coordinate '{key}' varies across locations. "
+                                    f"Using values from first location for selection. "
+                                    f"This may indicate a data structure issue - slope "
+                                    f"coordinates should typically be consistent across locations.",
+                                    UserWarning
+                                )
+                        
+                        arr = first_loc
+                    else:
+                        # For other extra dimensions, just take the first value
+                        warnings.warn(
+                            f"Slope coordinate '{key}' has unexpected dimensions {arr.dims}. "
+                            f"Reducing by taking first value along {extra_dims}.",
+                            UserWarning
+                        )
+                        for dim in extra_dims:
+                            arr = arr.isel({dim: 0})
 
-                cond = (arr == expected)
-                # align to slope dim just in case of broadcasting
+                # Determine tolerance for this comparison
+                tol = self.tolerance
+                if tol is None:
+                    # Auto-determine: exact for integers, small tolerance for floats
+                    if np.issubdtype(arr.dtype, np.integer):
+                        tol = 0
+                    else:
+                        tol = 1e-6
+                
+                # Apply condition with tolerance
+                if tol == 0:
+                    cond = (arr == expected)
+                else:
+                    cond = np.abs(arr - expected) <= tol
+                
+                # Ensure cond has the same shape as mask
                 cond = cond.broadcast_like(mask)
                 mask = mask & cond
 
             # Check if anything matched
             if not bool(mask.any()):
-                # No slope satisfies all criteria. HARD FAIL.
+                # No slope satisfies all criteria. HARD FAIL with helpful message.
                 criteria = ", ".join(f"{k} == {v}" for k, v in s.items())
+                
+                # Provide helpful diagnostics
+                avail_info = []
+                for key in s.keys():
+                    if key in ds.coords or key in ds:
+                        arr = ds.coords.get(key, ds.get(key))
+                        # Reduce to slope dimension for reporting
+                        if 'location' in arr.dims:
+                            arr = arr.isel(location=0)
+                        unique_vals = np.unique(arr.values)
+                        if len(unique_vals) <= 10:
+                            avail_info.append(f"  {key}: {list(unique_vals)}")
+                        else:
+                            avail_info.append(
+                                f"  {key}: range [{arr.min().values}, {arr.max().values}]"
+                            )
+                
+                avail_str = "\n".join(avail_info) if avail_info else "  (no diagnostic info available)"
+                
                 raise ValueError(
-                    f"No slope matches criteria: {criteria}"
+                    f"No slope matches criteria: {criteria}\n"
+                    f"Available values:\n{avail_str}\n"
+                    f"Consider using tolerance parameter if values are close."
                 )
 
             # Convert boolean mask -> integer indices
-            # (This avoids the ambiguity of .sel on integer coords.)
             matching_idx = np.nonzero(mask.values)[0]
 
             return ds.isel(slope=matching_idx)

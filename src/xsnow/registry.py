@@ -217,5 +217,12 @@ registry = {
         'long_name': 'Critical Cut Length (Flat Terrain)',
         'si_units': 'm',
     },
+    'HS': {
+        "param_code": None,
+        "aliases": ['HS', 'snow_height', 'snow_depth'],
+        'standard_name': 'snow_height',
+        'long_name': 'Total snow height',
+        'si_units': 'm',
+    },
 
 }

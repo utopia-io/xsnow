@@ -31,6 +31,7 @@ on demand for analysis, visualization, or export.
 
 from __future__ import annotations
 import re
+import warnings
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -235,7 +236,7 @@ class TimezoneAccessor:
         Parameters
         ----------
         tz : str, optional
-            Timezone like 'UTC' or 'Europe/Vienna'. Defaults to the attr.
+            Timezone like 'UTC' or 'Europe/Vienna'. Defaults to the stored 'timezone' attribute.
         ambiguous, nonexistent : handling for DST edge cases (forwarded to pandas).
         as_series : bool
             If True, return a pandas.Series aligned to the same, unchanged index labels as the
@@ -246,9 +247,18 @@ class TimezoneAccessor:
         >>> time_tz = ds['time'].tz.localize()  # use stored attr
         >>> time_tz_utc = time_tz.tz_convert("UTC")
         """
-        tzinfo = _coerce_tzinfo(tz if tz is not None else self.get_attr())
+        attr_tz = self.get_attr()
+        tzinfo = _coerce_tzinfo(tz if tz is not None else attr_tz)
         if tzinfo is None:
             raise ValueError("No timezone provided and no '.attrs[\"timezone\"]' set.")
+
+        if tz is not None and attr_tz is not None:
+            stored = _coerce_tzinfo(attr_tz)
+            if str(tzinfo) != str(stored):
+                warnings.warn(
+                    f"Requested timezone '{tzinfo}' differs from stored attrs['timezone'] '{stored}'. This changes important time information!",
+                    UserWarning,
+                )
 
         values = self._obj.values
         idx = _as_datetime_index(values).tz_localize(tzinfo, ambiguous=ambiguous, nonexistent=nonexistent)
@@ -327,6 +337,7 @@ class TimezoneAccessor:
         idx_aware = self.localize(ambiguous=ambiguous, nonexistent=nonexistent)
         idx_in_target = idx_aware.tz_convert(target_tzinfo)
         np_naive = idx_in_target.tz_localize(None).to_numpy(dtype="datetime64[ns]")
+        tz_attr_str = _normalize_tz_attr_value(target_tz)
 
         var_name = f"time_{str(target_tzinfo).replace('/','_').lower()}_naive"
         if as_series:
@@ -339,7 +350,7 @@ class TimezoneAccessor:
             return xr.DataArray(
                 np_naive[0],
                 name=var_name,
-                attrs={"timezone": target_tzinfo, "note": "tz info dropped"},
+                attrs={"timezone": tz_attr_str, "note": "dtype is tz-naive"},
             )
         else:
             return xr.DataArray(
@@ -347,7 +358,7 @@ class TimezoneAccessor:
                 dims=("time",) if self._obj.ndim == 1 else self._obj.dims,
                 coords={k: v for k, v in self._obj.coords.items()},
                 name=var_name,
-                attrs={"timezone": target_tzinfo, "note": f"tz info dropped"},
+                attrs={"timezone": tz_attr_str, "note": "dtype is tz-naive"},
             )
 
 
@@ -389,12 +400,20 @@ class TimezoneAccessor:
         >>> mask = ds['time'].tz.between("2025-01-01 06:00", "2025-01-01 12:00", tz="Europe/Vienna")
         >>> ds_sub = ds.sel(time=mask)
         """
-        idx = self.localize(tz=tz, as_series=True)  # pandas.Series of tz-aware timestamps
+        attr_tz = self.get_attr()
+        if attr_tz is None:
+            raise ValueError("No '.attrs[\"timezone\"]' set on self.")
+        attr_tzinfo = _coerce_tzinfo(attr_tz)
+        user_tzinfo = _coerce_tzinfo(tz) if tz is not None else None
+
+        idx_naive = _as_datetime_index(self._obj.values)  # keep stored values as-naive
 
         # Empty guard
-        if idx.empty:
+        if idx_naive.empty:
             if as_series:
-                return idx.astype(bool)  # empty bool Series
+                is_1d = (self._obj.ndim == 1)
+                ser_index = self._obj.to_index() if is_1d else pd.RangeIndex(0)
+                return pd.Series([], index=ser_index, dtype=bool, name=f"{self._obj.name or 'time'}_mask")
             return xr.DataArray(
                 np.array([], dtype=bool),
                 dims=("time",),
@@ -402,29 +421,43 @@ class TimezoneAccessor:
                 name=f"{self._obj.name or 'time'}_mask",
             )
 
-        target_tz = idx.dt.tz
-
-        def _to_target(ts_like):
+        def _normalize_bound(ts_like, label: str) -> Optional[pd.Timestamp]:
+            if ts_like is None:
+                return None
             ts = pd.Timestamp(ts_like)
-            if ts.tzinfo is None:
-                return ts.tz_localize(target_tz)
+            if ts.tzinfo is not None:
+                if user_tzinfo is not None and str(ts.tzinfo) != str(user_tzinfo):
+                    raise ValueError(
+                        f"{label} timezone ({ts.tzinfo}) does not match provided tz ({user_tzinfo})."
+                    )
+                return ts.tz_convert(attr_tzinfo).tz_localize(None)
             else:
-                return ts.tz_convert(target_tz)
+                if user_tzinfo is None:
+                    raise ValueError(
+                        f"{label} is timezone-naive. Please provide `tz` to localize it."
+                    )
+                return (
+                    ts.tz_localize(user_tzinfo)
+                    .tz_convert(attr_tzinfo)
+                    .tz_localize(None)
+                )
 
         # Defaults to full span if start/end not given
-        start_ts = idx.min() if start is None else _to_target(start)
-        end_ts   = idx.max() if end   is None else _to_target(end)
+        start_ts = _normalize_bound(start, "start") or idx_naive.min()
+        end_ts   = _normalize_bound(end, "end") or idx_naive.max()
 
         # Normalize ordering
         if start_ts > end_ts:
             start_ts, end_ts = end_ts, start_ts
 
-        mask = (idx >= start_ts) & (idx <= end_ts)
+        mask = (idx_naive >= start_ts) & (idx_naive <= end_ts)
 
         if as_series:
-            return mask
+            is_1d = (self._obj.ndim == 1)
+            ser_index = self._obj.to_index() if is_1d else pd.RangeIndex(len(mask))
+            return pd.Series(mask, index=ser_index, name=f"{self._obj.name or 'time'}_mask")
         return xr.DataArray(
-            mask.to_numpy(),
+            mask.astype(bool),
             dims=("time",),
             coords={"time": self._obj},
             name=f"{self._obj.name or 'time'}_mask",
@@ -437,6 +470,8 @@ def _int_offset_to_tzstring(offset_hours: Union[int, float]) -> str:
     ah = abs(float(offset_hours))
     hours = int(ah)
     minutes = int(round((ah - hours) * 60))
+    if hours==0 and minutes==0:
+        return "UTC"
     return f"UTC{sign}{hours:02d}:{minutes:02d}"
 
 def _parse_tzinfo_from_string(tz: str):

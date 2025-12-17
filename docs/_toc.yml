@@ -12,7 +12,7 @@ parts:
       - file: tutorials/getting_started
       - file: tutorials/reading_writing
       - file: tutorials/subsetting_filtering
-      - file: tutorials/data_manipulation
+      - file: tutorials/combining_data
       - file: tutorials/tabular_inspection
       - file: tutorials/simple_plots
       - file: tutorials/timezones

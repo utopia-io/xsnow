@@ -13,7 +13,7 @@ from xsnow.selectors import TimeSelector, LocationSelector
 
 @pytest.mark.real_data
 class TestCachingWorkflow:
-    """Test caching and incremental update workflows."""
+    """Test caching and incremental append workflows."""
     
     def test_initial_load_and_cache(self, real_file_subset, tmp_path):
         """Test initial data load and caching to NetCDF."""
@@ -36,7 +36,7 @@ class TestCachingWorkflow:
         assert ds_cached.sizes == ds.sizes
     
     def test_daily_incremental_update(self, synthetic_pro, tmp_path):
-        """Test incremental update workflow."""
+        """Test incremental append workflow using append_latest."""
         archive_dir = tmp_path / "archive"
         archive_dir.mkdir()
         
@@ -64,19 +64,19 @@ class TestCachingWorkflow:
         # Load cached data
         ds_cached = read(cache_file)
         
-        # Update with new data
-        ds_updated = ds_cached.update(archive_dir)
+        # Append with new data
+        ds_updated = ds_cached.append_latest(archive_dir)
         
         # Note: This will merge both files, so may have more timestamps
-        # The key is that update doesn't crash and adds new data
+        # The key is that append_latest doesn't crash and adds new data
         assert ds_updated.sizes['time'] >= ds_initial.sizes['time']
         
         # Save updated cache
         ds_updated.to_netcdf(cache_file)
     
     
-    def test_update_with_no_new_data(self, synthetic_pro, tmp_path):
-        """Test update when no new data is available."""
+    def test_append_latest_with_no_new_data(self, synthetic_pro, tmp_path):
+        """Test append_latest when no new data is available."""
         filepath = synthetic_pro.basic(tmp_path)  # Pass directory
         
         # Initial load
@@ -84,14 +84,14 @@ class TestCachingWorkflow:
         original_size = ds.sizes['time']
         
         # Update with same source (no new data)
-        ds_updated = ds.update(tmp_path)
+        ds_updated = ds.append_latest(tmp_path)
         
         # Should be unchanged
         assert ds_updated.sizes['time'] == original_size
 
     
-    def test_update_handles_duplicates(self, synthetic_pro, tmp_path):
-        """Test that update handles duplicate timestamps correctly."""
+    def test_append_latest_handles_duplicates(self, synthetic_pro, tmp_path):
+        """Test that append_latest handles duplicate timestamps correctly."""
         # Create file with 3 profiles
         filepath = synthetic_pro.varying_layers(
             tmp_path,  # Pass directory
@@ -102,7 +102,7 @@ class TestCachingWorkflow:
         ds = read(tmp_path)
         
         # "Update" with same file (duplicates)
-        ds_updated = ds.update(tmp_path)
+        ds_updated = ds.append_latest(tmp_path)
         
         # Should deduplicate and keep same size
         assert ds_updated.sizes['time'] == ds.sizes['time']
@@ -323,12 +323,14 @@ class TestErrorRecoveryWorkflows:
         
         # Add corrupted file
         synthetic_pro.corrupted(tmp_path, corruption_type='malformed_data')
-        
+
         # Should load valid files
         ds = read(tmp_path, lazy=False)
         
         assert ds is not None
-        assert ds.sizes['location'] == 5  # Only valid files
+        assert ds.sizes['location'] == 6
+        assert (ds.profile_status>0).sum() == 5  # only 5 valid
+        assert ds.sel(location="CORRUPTED").profile_status.values == -1
     
     def test_workflow_with_missing_optional_data(self, synthetic_pro, tmp_path):
         """Test workflow when optional data is missing."""
@@ -496,10 +498,10 @@ class TestSlopeCoordinateBugFixes:
             assert not np.isnan(incl), f"{loc}: inclination is NaN"
             assert not np.isnan(azi), f"{loc}: azimuth is NaN"
     
-    def test_update_preserves_slope_coords(self, synthetic_pro, tmp_path):
-        """Test that update() method preserves slope coordinates.
+    def test_append_latest_preserves_slope_coords(self, synthetic_pro, tmp_path):
+        """Test that append_latest preserves slope coordinates.
         
-        Bug: coords='minimal' in concat operations within update() caused
+        Bug: coords='minimal' in concat operations within append_latest() caused
         slope coordinates to be dropped or become NaN.
         Fix: Changed to coords='all' in all concat operations.
         """
@@ -533,18 +535,18 @@ class TestSlopeCoordinateBugFixes:
         # Load cached data
         ds_cached = read(cache_file)
         
-        # Update with new data
-        ds_updated = ds_cached.update(archive_dir)
+        # Append with new data
+        ds_updated = ds_cached.append_latest(archive_dir)
         
-        # BUG CHECK: Slope coordinates should still be valid after update
+        # BUG CHECK: Slope coordinates should still be valid after append_latest
         assert 'inclination' in ds_updated.data.coords
         assert 'azimuth' in ds_updated.data.coords
         
         updated_incl = float(ds_updated.data.inclination.values.flat[0])
         updated_azi = float(ds_updated.data.azimuth.values.flat[0])
         
-        assert not np.isnan(updated_incl), "inclination became NaN after update!"
-        assert not np.isnan(updated_azi), "azimuth became NaN after update!"
+        assert not np.isnan(updated_incl), "inclination became NaN after append_latest!"
+        assert not np.isnan(updated_azi), "azimuth became NaN after append_latest!"
         # Values should be preserved
         assert updated_incl == initial_incl, f"Slope changed from {initial_incl} to {updated_incl}"
         assert updated_azi == initial_azi, f"Azimuth changed from {initial_azi} to {updated_azi}"
@@ -585,9 +587,9 @@ class TestSlopeCoordinateBugFixes:
         assert not np.isnan(azi), "azimuth is NaN - SMET NaN overwrote PRO value!"
     
     def test_multi_location_update_preserves_coords(self, synthetic_pro, tmp_path):
-        """Test that updating multi-location datasets preserves slope coords for all locations.
+        """Test that appending to multi-location datasets preserves slope coords.
         
-        This tests the combination of multi-location handling and update operations.
+        This tests the combination of multi-location handling and append_latest operations.
         """
         archive_dir = tmp_path / "archive"
         archive_dir.mkdir()
@@ -624,7 +626,7 @@ class TestSlopeCoordinateBugFixes:
         
         # Load and update
         ds_cached = read(cache_file)
-        ds_updated = ds_cached.update(archive_dir)
+        ds_updated = ds_cached.append_latest(archive_dir)
         
         # BUG CHECK: Each location should still have valid slope coords
         for loc in ds_updated.location.values:
@@ -634,14 +636,14 @@ class TestSlopeCoordinateBugFixes:
             incl = float(loc_ds.inclination.values.flat[0])
             azi = float(loc_ds.azimuth.values.flat[0])
             
-            assert not np.isnan(incl), f"{loc}: inclination is NaN after update"
-            assert not np.isnan(azi), f"{loc}: azimuth is NaN after update"
+            assert not np.isnan(incl), f"{loc}: inclination is NaN after append_latest"
+            assert not np.isnan(azi), f"{loc}: azimuth is NaN after append_latest"
             
             # Values should be preserved
             if loc_key in initial_slopes:
                 initial_incl, initial_azi = initial_slopes[loc_key]
-                assert incl == initial_incl, f"{loc}: slope changed after update"
-                assert azi == initial_azi, f"{loc}: azimuth changed after update"
+                assert incl == initial_incl, f"{loc}: slope changed after append_latest"
+                assert azi == initial_azi, f"{loc}: azimuth changed after append_latest"
     
     def test_smet_only_slope_coords(self, synthetic_smet, tmp_path):
         """Test behavior when only SMET files are loaded (no PRO files).
