@@ -236,3 +236,42 @@ def single_profile_timeseries() -> xsnowDataset:
     ds = ds.sel(location=[first_location])
     
     return ds
+
+
+REGISTRY_SNP_ENSFX = {
+    "smets/ens-fx/2024-01-16T09Z/det/VIR1A.smet": "sha256:4c5363384ab66853ced8e78f2540275ff0fd8d72a83274bc49ca69186947523c",
+    "smets/ens-fx/2024-01-16T09Z/det/VIR2A.smet": "sha256:5fa99cf3656dd28c8c3e499026bb99bd0b759b51218ebed8efc3e4c65eb9a308",
+    "smets/ens-fx/2024-01-17T09Z/det/VIR1A.smet": "sha256:3eb84e7ea20aa58d641a9418a39d75004c030203d1808e26176952476b096a66",
+    "smets/ens-fx/2024-01-17T09Z/det/VIR2A.smet": "sha256:813ecd6755acf7fecbf968695fe6a9ec95990ad0e5339453bffccd3713a4f44a",
+    "smets/ens-fx/2024-01-17T09Z/p01/VIR1A.smet": "sha256:3eb84e7ea20aa58d641a9418a39d75004c030203d1808e26176952476b096a66",
+    "smets/ens-fx/2024-01-17T09Z/p01/VIR2A.smet": "sha256:813ecd6755acf7fecbf968695fe6a9ec95990ad0e5339453bffccd3713a4f44a",
+    "smets/ens-fx/analysis/det/VIR1A.smet": "sha256:05475de5d742941bd05c47b63b0909b217ead219f20b54ad17cca08cbecd5ab2",
+    "smets/ens-fx/analysis/det/VIR2A.smet": "sha256:38eef8b9059f35c50e89e6f47f397b705ba574efcefeadace431933ebe59f42a",
+}
+
+SNP_ENSFX = pooch.create(
+    path=pooch.os_cache("xsnow-snp-ensfx"),
+    base_url=URL_SNP_TESTDATA,
+    registry=REGISTRY_SNP_ENSFX,
+)
+
+def snp_ensfx_dir() -> str:
+    """
+    Get the local directory containing all SNOWPACK files from a toy dataset that corresponds
+    to the ensemble_forecasts extension (i.e., comparing different model runs (lead times) of
+    deterministic or ensemble members)
+
+    
+    Returns:
+    --------
+        A path to a locally cached directory, where:
+          - dir/smets/ens-fx/{run}/{member}/: contains .smet files with weather inputs
+
+    See Also:
+    ---------
+    read_ensemble_fx : Read this directory with the ensemble_forecasts extension
+    """
+    for fname in REGISTRY_SNP_ENSFX:
+        SNP_ENSFX.fetch(fname)
+
+    return str(SNP_ENSFX.path)
