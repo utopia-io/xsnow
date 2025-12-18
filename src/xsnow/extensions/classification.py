@@ -483,6 +483,67 @@ def _transform_regions(regions: Sequence[_Region], src_crs: str, dst_crs: str) -
     return out
 
 
+def classify_by_bins(da: xr.DataArray, *, bins: np.ndarray, right: bool = True) -> xr.DataArray:
+    """
+    Bin a DataArray into integer classes using ``numpy.digitize``.
+
+    This helper is designed to work hand-in-hand with :meth:`xsnowDataset.classify` and
+    to act as a template for custom user-defined classification functions.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Input values to bin. Output preserves dims/coords and aligns with ``da``.
+    bins : array-like
+        Bin edges (length B). Output classes are integers in ``[0, B]`` (B+1 classes).
+    right : bool, default True
+        If True, intervals are ``(-inf, b0]``, ``(b0, b1]``, ..., ``(b_{B-1}, +inf)``.
+        If False, intervals are ``[-inf, b0)``, ``[b0, b1)``, ..., ``[b_{B-1}, +inf)``.
+
+    Returns
+    -------
+    xr.DataArray
+        Integer class labels with the same shape as ``da``.
+
+    See Also
+    --------
+    classify : Attach a classifier result to an xsnowDataset.
+
+    Examples
+    --------
+    >>> hs_bins = np.array([0.25, 0.50, 1.00, 1.50, 2.00])
+    >>> class_attrs = {
+    ...   "long_name": "Snow depth class (6 bins)",
+    ...   "method": "np.digitize",
+    ...   "bin_edges": hs_bins.tolist(),
+    ...   "right_closed": True,
+    ... }
+    >>> ds2 = ds.classify(
+    ...   classify_by_bins,
+    ...   output_name="HS_class",
+    ...   output_kind="coord",
+    ...   input_var="HS",
+    ...   attrs=class_attrs,
+    ...   bins=hs_bins,
+    ...   right=True,
+    ... )
+    >>> ds_deep = ds2.where(ds2.HS_class == 5, drop=True)
+    """
+    bins_arr = np.asarray(bins, dtype=float)
+
+    def _digitize(x: np.ndarray, *, bins: np.ndarray, right: bool) -> np.ndarray:
+        return np.digitize(x, bins, right=right)
+
+    classes = xr.apply_ufunc(
+        _digitize,
+        da,
+        dask="allowed",
+        kwargs={"bins": bins_arr, "right": right},
+        output_dtypes=[np.int64],
+    )
+    return classes.astype(np.int64)
+
+
 # ---------------------- 1) general function-based classification --------------
 
 @register_xsnowDataset_method
@@ -510,8 +571,8 @@ def classify(
         Name of the resulting coord or data var.
     output_kind : {"coord","data"}, default "coord"
         How to store the classification result.
-        * `"coord"`: attach as a coordinate (good for fast selection, e.g. `ds.sel(hs_class=2)` 
-                     or boolean masks).
+        * `"coord"`: attach as a coordinate (good for use with `where(...)`, e.g.
+                     `ds.where(ds.hs_class == 2, drop=True)`, or for grouping).
         * `"data"`: attach as a data variable (good if you’ll plot it, compute stats on it, or 
                     don’t need to use it as a selector).
     input_var : str, optional
@@ -529,6 +590,7 @@ def classify(
     See Also
     --------
     classify_citeria : A generic, boolean classification function.
+    classify_by_bins : Bin a variable into integer classes (template classifier).
 
     Examples
     --------
@@ -539,29 +601,13 @@ def classify(
     ...     c.attrs["mapping"] = {0: "shallow", 1: "medium", 2: "deep"}
     ...     return c
     >>> ds2 = ds.classify(by_hs, output_name="hs_class", output_kind="coord", input_var="HS")
-    >>> ds2.sel(hs_class=2)
+    >>> ds2.where(ds2.hs_class == 2, drop=True)
 
-    >>> def classify_by_bins(da: xr.DataArray, *, bins: np.ndarray, right: bool = True) -> xr.DataArray:
-            '''
-            Bin `da` into integer classes using np.digitize.
-            - `bins` are bin *edges* (length B) → classes are 0..B (B+1 classes).
-            - If `right=True`, intervals are (-inf, b0], (b0, b1], ..., (b_{B-1}, +inf).
-            Returns an int64 DataArray with same shape/coords as `da`.
-            '''
-            def _digitize(x, *, bins, right=False):
-                return np.digitize(x, bins, right=right)
-            classes = xr.apply_ufunc(
-                _digitize,
-                da,
-                dask="allowed",
-                kwargs={"bins": np.asarray(bins), "right": right},
-                output_dtypes=[np.int64],
-            )
-            return classes
+    >>> from xsnow.extensions.classification import classify_by_bins
     >>> hs_bins = np.array([0.25, 0.50, 1.00, 1.50, 2.00])
     >>> hs_mapping = {
             0: "(-inf, 0.25]",
-            1: "(0.25, 0.50]"
+            1: "(0.25, 0.50]",
             2: "(0.50, 1.00]",
             3: "(1.00, 1.50]",
             4: "(1.50, 2.00]",
@@ -583,7 +629,7 @@ def classify(
             bins=hs_bins,            # forwarded to classify_by_bins()
             right=True,
         )
-    >>> ds_extremely_deep = ds2.sel(HS_class=5)
+    >>> ds_extremely_deep = ds2.where(ds2.HS_class == 5, drop=True)
     """
     if self.data is None:
         raise ValueError("Cannot classify an empty dataset.")
@@ -650,10 +696,10 @@ def classify_criteria(
     Examples
     --------
     >>> mask = ds.classify_criteria("density < 200 & grain_size > 0.8", kind="mask")
-    >>> ds_sel = ds.sel(layer=mask)
+    >>> ds_sel = ds.where(mask, drop=True)
 
     >>> ds2 = ds.classify_criteria("HS > 1.5", name="deep_snow", kind="coord")
-    >>> ds2.sel(deep_snow=True)
+    >>> ds2.where(ds2.deep_snow, drop=True)
     """
     if self.data is None:
         raise ValueError("Cannot classify an empty dataset.")

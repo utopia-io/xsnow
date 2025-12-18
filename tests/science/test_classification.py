@@ -126,6 +126,24 @@ def test_classify_attach_data_from_variable(tiny_xsnow: xsnowDataset):
     assert out.data["rho_class"].sizes["layer"] == tiny_xsnow.data.sizes["layer"]
 
 
+def test_classify_by_bins_helper_works_with_classify(tiny_xsnow: xsnowDataset):
+    bins = np.array([0.75, 1.25])
+    out = tiny_xsnow.classify(
+        classification.classify_by_bins,
+        output_name="HS_bin",
+        output_kind="coord",
+        input_var="HS",
+        bins=bins,
+        right=True,
+    )
+    assert isinstance(out, xsnowDataset)
+    assert "HS_bin" in out.data.coords
+    vals = out.data["HS_bin"].values
+    assert np.issubdtype(vals.dtype, np.integer)
+    assert vals.min() >= 0
+    assert vals.max() <= len(bins)
+
+
 def test_classify_raises_on_wrong_return_type(tiny_xsnow: xsnowDataset):
     def bad_func(xds: xr.Dataset):
         return 123  # not a DataArray
