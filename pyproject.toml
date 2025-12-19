@@ -10,8 +10,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [
-  { name = "Ron Simenhois", email = "ron.simenhois@state.co.us" },
   { name = "Florian Herla", email = "fherla@sfu.ca" },
+  { name = "Ron Simenhois", email = "ron.simenhois@state.co.us" },
 ]
 dependencies = [
     "netcdf4>=1.7.2",
@@ -54,6 +54,11 @@ dev = [
   "matplotlib>=3.8",
   "ipython",
   "jupyter",
+  "ruamel.yaml>=0.18",
+]
+release = [
+  "ruamel.yaml>=0.18",
+  "cffconvert>=2.0.0",
 ]
 
 [project.urls]

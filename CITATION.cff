@@ -1,0 +1,67 @@
+cff-version: 1.2.0
+message: "If you use xsnow, please cite it with the metadata below."
+title: "xsnow: a collaborative Python package for parsing and post-processing snow cover simulations"
+abstract: >
+  xsnow is an open, collaborative Python library for parsing, analyzing, and
+  post-processing simulated snow profiles. It wraps xarray-based data models,
+  domain-specific workflows, and an extension framework to support both
+  operational avalanche forecasting and research.
+type: software
+version: 0.1.2
+url: https://xsnow.avacollabra.org
+authors:
+  - family-names: Herla
+    given-names: Florian
+    email: fherla@sfu.ca
+    roles:
+      - Conceptualization
+      - Methodology
+      - Software
+      - Validation
+      - Writing-Original-Draft
+      - Project-Administration
+      - Funding-Acquisition
+      - Supervision
+  - family-names: Simenhois
+    given-names: Ron
+    email: ron.simenhois@state.co.us
+    roles:
+      - Conceptualization
+      - Methodology
+      - Software
+      - Validation
+      - Writing-Original-Draft
+  - family-names: Horton
+    given-names: Simon
+    roles:
+      - Conceptualization
+  - family-names: Viallon-Galinier
+    given-names: Leo
+    roles:
+      - Conceptualization
+  - family-names: Bavay
+    given-names: Mathias
+    roles:
+      - Conceptualization
+  - family-names: Reisecker
+    given-names: Michael
+    roles:
+      - Conceptualization
+  - family-names: Haegeli
+    given-names: Pascal
+    roles:
+      - Conceptualization
+      - Funding-Acquisition
+repository-code: https://gitlab.com/avacollabra/postprocessing/xsnow
+license: AGPL-3.0-only
+keywords:
+  - snow
+  - stratigraphy
+  - avalanche
+  - xarray
+  - post-processing
+date-released: '2025-12-19'
+identifiers:
+  - type: doi
+    value: "<TO_BE_RETRIEVED>"
+    description: Concept DOI for all xsnow versions
