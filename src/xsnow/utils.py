@@ -495,6 +495,7 @@ def detect_slope_coord_issues(ds: xr.Dataset) -> dict:
     return diagnostics
 
 
+@register_xsnowDataset_method
 def reorder_dims(
     ds: Union[xsnowDataset, xr.Dataset],
     preferred_order: Sequence[str] = ("location", "time", "slope", "realization", "layer"),
