@@ -1,6 +1,7 @@
 # ── Python build artifacts ───────────────────────────────
 build/
-dist/
+dist/*
+!dist/update_citation.py
 *.egg-info/
 src/**/*.egg-info/
 src/xsnow/_version.py

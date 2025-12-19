@@ -9,7 +9,9 @@ code duplication and improve maintainability.
 import builtins
 import logging
 import os
+import re
 from collections import OrderedDict
+from pathlib import Path
 from typing import Union, Any, Optional, List, Sequence
 
 import numpy as np
@@ -551,3 +553,132 @@ def reorder_dims(
 
     final_ds = rebuilt.transpose(*final, missing_dims="ignore")
     return xsnowDataset(final_ds) if input_is_xsnow else final_ds
+
+
+def cite(fmt: str = "bibtex", display: bool = True) -> Optional[str]:
+    """
+    Render the package citation from CITATION.cff using cffconvert.
+
+    Args:
+        fmt: Output format, one of {"biblatex", "bibtex", "apa", "csljson"}.
+            Defaults to "bibtex" to avoid BibLaTeX warnings; use "biblatex"
+            when available for @software entries.
+        display: When True (default), print the rendered citation (BibTeX/BibLaTeX
+            is aligned for readability). When False, return the string.
+
+    Returns:
+        The rendered citation string if display is False; otherwise None.
+
+    Raises:
+        RuntimeError: If cffconvert is not installed (with install hint).
+        FileNotFoundError: If CITATION.cff is missing.
+        ValueError: If an unsupported format is requested.
+    """
+    fmt_norm = fmt.lower()
+    preferred_methods = {
+        "biblatex": ("as_biblatex", "as_bibtex"),  # fall back to bibtex if biblatex is unavailable
+        "bibtex": ("as_bibtex",),
+        "apa": ("as_apalike",),
+        "csljson": ("as_csljson", "as_csl"),  # cffconvert versions vary on naming
+    }
+    if fmt_norm not in preferred_methods:
+        raise ValueError(f"Unsupported format '{fmt}'. Choose from {sorted(preferred_methods)}.")
+
+    try:
+        from cffconvert import Citation
+    except ImportError as exc:
+        raise RuntimeError(
+            "cffconvert is required for cite(). Install with `pip install .[release]` "
+            "or `pip install cffconvert ruamel.yaml`. Citation info is also available at "
+            "https://xsnow.avacollabra.org."
+        ) from exc
+
+    cff_path = Path(__file__).resolve().parents[2] / "CITATION.cff"
+    if not cff_path.exists():
+        raise FileNotFoundError(f"CITATION.cff not found at {cff_path}")
+
+    cff_text = cff_path.read_text(encoding="utf-8")
+    citation = Citation(cff_text)
+    bib_key = _bib_key_from_cff(cff_text)
+
+    for method_name in preferred_methods[fmt_norm]:
+        if hasattr(citation, method_name):
+            if fmt_norm == "biblatex" and method_name != "as_biblatex":
+                warnings.warn(
+                    "cffconvert does not expose biblatex in this environment; falling back to BibTeX (@misc).",
+                    RuntimeWarning,
+                )
+            if fmt_norm == "csljson" and method_name != "as_csljson":
+                warnings.warn(
+                    "cffconvert does not expose csljson; falling back to csl.",
+                    RuntimeWarning,
+                )
+            formatter = getattr(citation, method_name)
+            rendered = formatter()
+            if fmt_norm in {"bibtex", "biblatex"}:
+                rendered = _override_bib_key(rendered, key=bib_key)
+            if display:
+                if fmt_norm in {"bibtex", "biblatex"}:
+                    builtins.print(_format_bib_block(rendered))
+                else:
+                    builtins.print(rendered)
+                return None
+            return rendered
+
+    raise RuntimeError(
+        f"cffconvert does not support '{fmt_norm}' with available methods. "
+        f"Found methods: {', '.join(sorted(m for m in dir(citation) if m.startswith('as_')))}"
+    )
+
+
+def _format_bib_block(bib_str: str) -> str:
+    """
+    Align BibTeX/BibLaTeX key/value pairs for nicer display.
+    """
+    lines = bib_str.splitlines()
+    if len(lines) < 3:
+        return bib_str
+
+    header = lines[0]
+    footer = lines[-1]
+    body = lines[1:-1]
+
+    key_vals = []
+    for line in body:
+        stripped = line.strip()
+        if "=" in stripped:
+            key, val = stripped.split("=", 1)
+            key_vals.append((key.strip(), val.strip()))
+        else:
+            key_vals.append((None, stripped))
+
+    max_key = max((len(k) for k, v in key_vals if k is not None), default=0)
+    formatted_body = []
+    for key, val in key_vals:
+        if key is None:
+            formatted_body.append(f"  {val}")
+        else:
+            formatted_body.append(f"  {key.ljust(max_key)} = {val}")
+
+    return "\n".join([header, *formatted_body, footer])
+
+def _override_bib_key(bib_str: str, key: str = "xsnow") -> str:
+    """
+    Replace the default cffconvert key (YourReferenceHere) with a stable one.
+    """
+    return bib_str.replace("YourReferenceHere", key, 1)
+
+def _bib_key_from_cff(cff_text: str) -> str:
+    """
+    Build a BibTeX key from the package name and the CFF version.
+    Example: version 0.1.2 -> xsnow_v0_1_2
+    """
+    match = re.search(r"^version:\s*[\"']?([^\s\"']+)", cff_text, re.MULTILINE)
+    if not match:
+        return "xsnow"
+    version = match.group(1)
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", version).strip("_")
+    if not normalized:
+        return "xsnow"
+    return f"xsnow_v{normalized}"
+
