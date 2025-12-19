@@ -24,6 +24,8 @@ dependencies = [
     "tzdata>=2024.1",
     "pytest>=8.4.2",
     "dask>=2025.9.1",
+    "matplotlib>=3.10.6",
+    "folium>=0.20.0",
 ]
 keywords = ["snow", "stratigraphy", "avalanche", "xarray", "post-processing"]
 classifiers = [
@@ -54,6 +56,11 @@ dev = [
   "matplotlib>=3.8",
   "ipython",
   "jupyter",
+]
+# NEW: Large-scale data management features
+largescale = [
+  "dask[distributed]>=2025.9.1",  # Distributed processing (note: dask is already in core deps)
+  "psutil>=7.1.0",                # Memory monitoring (note: psutil is in testing deps)
 ]
 
 [project.urls]
@@ -86,6 +93,7 @@ markers = [
     "real_data: marks tests that use real data files",
     "synthetic: marks tests that use synthetic data",
     "edge_case: marks edge case tests",
+    "largescale: marks large-scale data management tests",  # NEW marker
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:multiprocessing",
