@@ -25,3 +25,7 @@ uv.lock
 # ── Debug code ──────────────────────────────────────
 debug_parser.py
 tests/data_itegraty_test.ipynb
+
+# ── Backup files ────────────────────────────────────────
+*.bak
+*.backup

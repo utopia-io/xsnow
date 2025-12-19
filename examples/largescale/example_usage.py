@@ -10,20 +10,31 @@ Demonstrates:
 
 from snowpack_updater import SnowpackUpdater
 from pathlib import Path
+from typing import Optional
+import warnings
 
+# Suppress the overflow warning (if it's expected/benign)
+warnings.filterwarnings('ignore', category=RuntimeWarning,
+                       message='overflow encountered in cast')
 
-def example_auto_detect():
+def example_auto_detect(data_dir: str,#='/home/snowpack/runs/output.2024/zone035',
+                        archive_file: str=Path(__file__).parent / 'snowpack_operational.nc',
+                        window_days: int=90,
+                        lazy: bool=True,
+                        n_cpus:int=15
+
+):
     """Example: Auto-detect mode (recommended)"""
     print("="*70)
     print("Example 1: Auto-Detect Mode (Recommended)")
     print("="*70)
     
     updater = SnowpackUpdater(
-        data_dir='/home/snowpack/runs/output.2024',
-        archive_file='snowpack_operational.nc',
-        window_days=90,
-        lazy=True,
-        n_cpus=15
+        data_dir=data_dir,
+        archive_file=archive_file,
+        window_days=window_days,
+        lazy=lazy,
+        n_cpus=n_cpus
     )
     
     print(f"\nDetected mode: {updater.mode}")
@@ -44,18 +55,23 @@ def example_auto_detect():
             print(f"   Max HS: {max_hs:.2f} m")
 
 
-def example_initial_load():
+def example_initial_load(data_dir: str,
+                         archive_file: str=Path(__file__).parent / 'snowpack_operational.nc',
+                         window_days: int=90,
+                         lazy: bool=True,
+                         n_cpus:int=15
+):
     """Example: Force initial load to create full historical archive"""
     print("\n" + "="*70)
     print("Example 2: Force Initial Load (Full History)")
     print("="*70)
     
     updater = SnowpackUpdater(
-        data_dir='/home/snowpack/runs/output.2024',
-        archive_file='snowpack_full_history.nc',
-        window_days=90,  # Ignored in initial mode
+        data_dir=data_dir,
+        archive_file=archive_file,
+        window_days=window_days,  # Ignored in initial mode
         mode='initial',   # Force initial
-        lazy=True
+        lazy=lazy,
     )
     
     print(f"\nMode: {updater.mode}")
@@ -67,14 +83,19 @@ def example_initial_load():
     # All timesteps from file creation to now!
 
 
-def example_update_only():
+def example_update_only(data_dir: str,
+                         archive_file: str=Path(__file__).parent / 'snowpack_operational.nc',
+                         window_days: int=90,
+                         lazy: bool=True,
+                         n_cpus:int=15
+):
     """Example: Force update mode (requires existing archive)"""
     print("\n" + "="*70)
     print("Example 3: Force Update Mode")
     print("="*70)
     
     # Check if archive exists
-    archive_path = Path('snowpack_operational.nc')
+    archive_path = archive_file
     
     if not archive_path.exists():
         print(f"\n⚠️  Archive not found: {archive_path}")
@@ -83,11 +104,11 @@ def example_update_only():
         return
     
     updater = SnowpackUpdater(
-        data_dir='/home/snowpack/runs/output.2024',
-        archive_file='snowpack_operational.nc',
-        window_days=90,
+        data_dir=data_dir,
+        archive_file=archive_file,
+        window_days=window_days,
         mode='update',  # Force update, will error if no archive
-        lazy=True
+        lazy=lazy
     )
     
     print(f"\nMode: {updater.mode}")
@@ -96,7 +117,12 @@ def example_update_only():
     ds = updater.run()
 
 
-def example_multiple_archives():
+def example_multiple_archives(data_dir: str,
+                              archive_file: str=Path(__file__).parent / 'snowpack_operational.nc',
+                              window_days: int=90,
+                              lazy: bool=True,
+                              n_cpus:int=15
+):
     """Example: Maintain multiple archives with different windows"""
     print("\n" + "="*70)
     print("Example 4: Multiple Archives")
@@ -112,7 +138,7 @@ def example_multiple_archives():
         print(f"\n📦 Creating {description} archive ({window_days} days)...")
         
         updater = SnowpackUpdater(
-            data_dir='/home/snowpack/runs/output.2024',
+            data_dir=data_dir,
             archive_file=archive_file,
             window_days=window_days,
             lazy=True
@@ -127,13 +153,14 @@ def example_multiple_archives():
         print(f"   (Skipped actual run in example)")
 
 
-def example_query_archive():
+def example_query_archive(archive_file: str=Path(__file__).parent / 'snowpack_operational.nc',
+):
     """Example: Query an existing archive"""
     print("\n" + "="*70)
     print("Example 5: Query Existing Archive")
     print("="*70)
     
-    archive_path = Path('snowpack_operational.nc')
+    archive_path = Path(archive_file)
     
     if not archive_path.exists():
         print(f"\n⚠️  Archive not found: {archive_path}")
@@ -178,22 +205,47 @@ def main():
     print("   In production, you typically just run example 1 (auto-detect).")
     print("   Uncomment the example you want to run:\n")
     
+    data_dir = '/home/snowpack/runs/output.2024/zone053'  # Adjust as needed
+    archive_file = Path(__file__).parent / 'snowpack_operational.nc'
+    window_days = 14  # Adjust as needed
+    lazy = True
+    n_cpus:int=15
+    
     # Uncomment the example you want to run:
     
     # Example 1: Auto-detect (recommended for production)
-    # example_auto_detect()
-    
+    """
+    example_auto_detect(data_dir,
+                        archive_file,
+                        window_days,
+                        lazy,
+                        n_cpus)
+    """
     # Example 2: Force initial load (create full historical archive)
-    # example_initial_load()
+    example_initial_load(data_dir,
+                         archive_file,
+                         window_days,
+                         lazy,
+                         n_cpus)
     
     # Example 3: Force update (require existing archive)
-    # example_update_only()
-    
+    """
+    example_update_only(data_dir,
+                        archive_file,
+                        window_days,
+                        lazy,
+                        n_cpus)
+    """
     # Example 4: Multiple archives with different windows
-    # example_multiple_archives()
-    
+    """
+    example_multiple_archives(data_dir,
+                              archive_file,
+                              window_days,
+                              lazy,
+                              n_cpus)
+    """
     # Example 5: Query existing archive
-    # example_query_archive()
+    example_query_archive(archive_file)
     
     print("\n💡 To run an example, uncomment it in the main() function")
     print("   and run: python example_usage.py\n")

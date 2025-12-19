@@ -58,7 +58,7 @@ class SnowpackUpdater:
         self,
         data_dir: str,
         archive_file: str = 'snowpack_operational.nc',
-        window_days: int = 90,
+        window_days: int = 14,
         mode: str = 'auto',
         lazy: bool = True,
         n_cpus: int = 15
@@ -389,7 +389,7 @@ Examples:
     parser.add_argument(
         '--window-days',
         type=int,
-        default=90,
+        default=14,
         help='Time window in days for updates (default: 90)'
     )
     parser.add_argument(
