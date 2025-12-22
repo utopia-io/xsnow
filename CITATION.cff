@@ -7,8 +7,9 @@ abstract: >
   domain-specific workflows, and an extension framework to support both
   operational avalanche forecasting and research.
 type: software
-version: 0.1.2
+version: 0.1.0
 url: https://xsnow.avacollabra.org
+publisher: Zenodo
 authors:
   - family-names: Herla
     given-names: Florian
@@ -52,6 +53,11 @@ authors:
     roles:
       - Conceptualization
       - Funding-Acquisition
+contributors:
+  - family-names: Legner
+    given-names: Simon
+    roles:
+      - Software
 repository-code: https://gitlab.com/avacollabra/postprocessing/xsnow
 license: AGPL-3.0-only
 keywords:
@@ -63,5 +69,6 @@ keywords:
 date-released: '2025-12-19'
 identifiers:
   - type: doi
-    value: "<TO_BE_RETRIEVED>"
+    value: "10.5281/zenodo.18013539"
     description: Concept DOI for all xsnow versions
+
