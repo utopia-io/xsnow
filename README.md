@@ -1,20 +1,23 @@
-# AvaCollabra subgroup on post-processing snow cover simulations
+# xsnow: a collaborative Python package for parsing and post-processing snow cover simulations
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18013539.svg)](https://doi.org/10.5281/zenodo.18013539)
 
-This project aims to collaborate on a python base package `xsnow` to parse and post-process snow cover simulations.
+
+This project originates from a working group in [Avacollabra](avacollabra.org) and aims to collaborate on a python library `xsnow` to parse and post-process snow cover simulations.
 
 The general scope of the package focuses on simulated snow profiles with the option to handle observed profiles to initiate simulations. We want to design the package to cater to both operational and research needs. It should therefore balance an intuitive implementation to maximize accessibility with efficient processing to allow for operational application in mid-sized agencies and mature research projects.
 
-Read the [development plan](development_plan.md) and [extension strategy](postprocessing_extensions.md) for more detailed information.
+Visit [**xsnow.avacollabra.org**](xsnow.avacollabra.org) for more detailed information.
 
 ## Current status
 
-The implementation has started! Ron Simenhois (CAIC), Bryce Schroers (Avalanche Canada), Florian Herla, and Simon Horton are working towards a first prototype.  
-
-The [xsnow Package Documentation](https://gitlab.com/avacollabra/postprocessing/xsnow/-/blob/Ron_dev/xsnow%20Package%20Documentation.md?ref_type=heads) is continuously updated with details on implemented features and code examples. We are also starting our documentation website at [https://avacollabra.gitlab.io/postprocessing/xsnow/latest/](https://avacollabra.gitlab.io/postprocessing/xsnow/latest/).
-
-We still welcome feedback on our general strategy, please reach out via email or (better) start a gitlab issue.
+We are looking for community feedback on bugs and suggestions for improvement (API, code implementation, etc).
+Check out the website section [Contributing to xsnow](https://xsnow.avacollabra.org/dev/tutorials/contributing2xsnow.html) for more details and ways for getting involved.
 
 ### Action steps carried out so far
+
+##### First prototype implementation
+
+- [x] Florian Herla and Ron Simenhois worked on a first prototype release
 
 ##### Design package development plan
 
