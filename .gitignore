@@ -2,6 +2,8 @@
 build/
 dist/*
 !dist/update_citation.py
+!dist/reserve_zenodo_DOI.py
+!dist/publish_zenodo.py
 *.egg-info/
 src/**/*.egg-info/
 src/xsnow/_version.py

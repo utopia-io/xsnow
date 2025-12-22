@@ -3,16 +3,18 @@
 Helper to keep CITATION.cff aligned with releases.
 
 Best practice:
-1) Reserve a version DOI in Zenodo (concept DOI stays in CITATION.cff).
+1) Run dist/reserve_zenodo_DOI.py to create a draft and reserve a version DOI.
 2) Run this script before committing/tagging:
    python dist/update_citation.py --version <vX.Y.Z> --version-doi <reserved> [--date YYYY-MM-DD]
    It sets version, date-released, identifiers, and top-level doi.
-3) Commit and tag; Zenodo will use the reserved DOI.
+3) Commit and tag. The tag CI job can upload the archive to the draft.
+   Publishing is manual unless you pass --publish to dist/publish_zenodo.py.
 
-Fallback if you already tagged:
-- Do not move the tag. After Zenodo mints the version DOI, run the script
-  with the same version and minted DOI, then commit on the main branch to
-  backfill CITATION.cff.
+If you tagged without a draft DOI:
+- Leave the tag untouched (no Zenodo deposition, no tag docs).
+- Run dist/reserve_zenodo_DOI.py to create a new draft.
+- Update CITATION.cff with the reserved DOI and incremented patch version.
+- Commit and create a new tag (version +0.0.1).
 
 Validation:
 - If `cffconvert` is installed, the script runs `cffconvert --validate CITATION.cff`.
