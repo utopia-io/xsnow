@@ -8,32 +8,8 @@ The general scope of the package focuses on simulated snow profiles with the opt
 
 Visit [**xsnow.avacollabra.org**](xsnow.avacollabra.org) for more detailed information.
 
-## Current status
 
-We are looking for community feedback on bugs and suggestions for improvement (API, code implementation, etc).
+
+##### Getting involved
+We are looking for community feedback on bugs and suggestions for improvement (API, code implementation, etc).  
 Check out the website section [Contributing to xsnow](https://xsnow.avacollabra.org/dev/tutorials/contributing2xsnow.html) for more details and ways for getting involved.
-
-### Action steps carried out so far
-
-##### First prototype implementation
-
-- [x] Florian Herla and Ron Simenhois worked on a first prototype release
-
-##### Design package development plan
-
-- [x] Florian Herla drafted package [development plan](development_plan.md) based on strategies brainstormed in Tromso
-- [x] Members reviewed development plan and provided extensive feedback and additional ideas
-    * Main contributors: Mathias Bavay, Leo Viallon, Fabien Maussion, Simon Horton
-- [x] Florian Herla and Simon Horton draft strategy for [extension system](postprocessing_extensions.md) 
-
-##### In-person workshop at ISSW, Tromso (Sep 2024)
-
-- [x] Take up discussion points from gitlab issues and online meetings
-- [x] Decide on internal data model & sketch out strategy
-* Participants: Leo Viallon, Aron Widforss, Mathias Bavay, Michael Reisecker, Florian Herla
-
-##### First steps
-
-- [x] Members upload existing code that is relevant to achieve the current goal of designing basic data classes.
-- [x] Members review existing implementation approaches and discuss pros/cons in issues
-- [x] Once we have a better understanding, we schedule a second online meeting to make a decision on how to implement the data classes.
