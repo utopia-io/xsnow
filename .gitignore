@@ -1,6 +1,10 @@
 # ── Python build artifacts ───────────────────────────────
 build/
-dist/
+dist/*
+!dist/update_citation.py
+!dist/reserve_zenodo_DOI.py
+!dist/publish_zenodo.py
+!dist/update_footer_citation.py
 *.egg-info/
 src/**/*.egg-info/
 src/xsnow/_version.py

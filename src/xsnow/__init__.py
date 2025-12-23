@@ -8,7 +8,7 @@ from .plugin import register_xsnowDataset_method
 from .registry import registry
 from .sample_data import single_profile, single_profile_timeseries
 from .combiners import combine, concat
-from .utils import normalize_slope_coords, detect_slope_coord_issues, reorder_dims
+from .utils import normalize_slope_coords, detect_slope_coord_issues, reorder_dims, cite
 from . import accessors
 try:
     from ._version import version as __version__  # generated at build time by setuptools-scm
@@ -35,5 +35,6 @@ __all__ = [
     'normalize_slope_coords',
     'detect_slope_coord_issues',
     'reorder_dims',
+    'cite',
 
 ]
