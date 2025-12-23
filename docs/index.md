@@ -1,6 +1,8 @@
 # xsnow documentation
 Welcome to the **Tutorials** and the **API reference** for xsnow and its extension strategy.
 
+## A collaborative Python package for parsing and post-processing snow cover simulations
+
 ```{admonition} Version: ENV_DOC_VERSION
 :class: note
 
@@ -13,7 +15,7 @@ To explore other versions, replace the URL part `/stable/` with a tag of your in
 This version represents an early prototype of xsnow. The user API may still change until the first major release planned for Spring/Summer 2026.
 ```
 
-## Background
+### Background
 
 Snow cover models such as **SNOWPACK** and **CROCUS** simulate the layered structure of the seasonal snowpack. For avalanche warning services, these models add an important second perspective to traditional field observations, which are often sparse and hard to collect.  
 
@@ -21,21 +23,21 @@ Over the last years, international collaborations have gained momentum in our co
 
 What was missing, however, was a common foundation: every stakeholder had its own set of parsers and ad-hoc scripts to link model output to postprocessing tools. This slowed down collaboration and made it difficult to scale up or share new methods.  
 
-## Our solution: xsnow
+### Our solution: xsnow
 
-**xsnow** was created to solve this problem. It is an open-source Python package that makes working with snow cover simulations efficient, consistent, and collaborative.  
+**xsnow** was created to solve this problem. It is an open-source Python library that makes working with snow cover simulations efficient, consistent, and collaborative.  
 
 With xsnow you can:  
 
-- Read and write data from common formats (SNOWPACK PRO/SMET, and more to come).  
+- Read and write data from common formats (SNOWPACK PRO/SMET, NetCDF, and more to come).  
 - Store everything in a convenient and powerful, gridded data model built on `xarray` and `numpy`.  
-- Perform vectorized analysis and postprocessing without reinventing the wheel.  
+- Perform vectorized analysis and post-processing without reinventing the wheel.  
 - Share algorithms and workflows more easily between agencies and researchers.  
 
-Although designed primarily for simulated snow profiles, xsnow will also support observed profiles. This makes it possible to compare simulations with measurements or even initialize simulations from field data.  
+Although designed primarily for simulated snow profiles, xsnow will also support observed profiles. This makes it possible to compare simulations with measurements or even initialize simulations from field data. To satisfy both operational and research needs, xsnow aims to balance an intuitive implementation with efficient processing.
 
 
-## Who’s behind xsnow
+### Who’s behind xsnow
 
 xsnow is developed openly within [AvaCollabra](https://avacollabra.org), with contributions from major players at the intersection of snow science and avalanche forecasting, including:  
 
