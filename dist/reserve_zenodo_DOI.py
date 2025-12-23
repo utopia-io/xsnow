@@ -13,7 +13,7 @@ Typical usage:
   python dist/reserve_zenodo_DOI.py
 
 This will:
-- look up the latest record for the xsnow concept DOI,
+- look up the latest deposition for the xsnow concept DOI (owned by your token),
 - create a new draft version via the Zenodo depositions API,
 - reserve a DOI for that draft,
 - print the reserved version DOI and draft deposition id.
@@ -32,6 +32,7 @@ Outputs:
 Notes:
 - You must have already published at least one version to obtain a concept DOI.
 - CI publishing can use the draft id emitted by this script.
+  If the concept DOI belongs to a different account, use --deposition-id.
 
 If you tagged without a draft DOI:
 - Leave the tag untouched (no Zenodo deposition, no tag docs).
@@ -48,7 +49,7 @@ import os
 import re
 import sys
 from typing import Any, Dict, Optional
-from urllib import parse, request, error
+from urllib import request, error
 
 
 DEFAULT_API_BASE = "https://zenodo.org/api"
@@ -80,7 +81,9 @@ def _request_json(
             return json.loads(body)
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8") if exc.fp else ""
-        raise SystemExit(f"Zenodo API error {exc.code}: {detail or exc.reason}") from exc
+        raise SystemExit(
+            f"Zenodo API error {exc.code} for {url}: {detail or exc.reason}"
+        ) from exc
 
 
 def _extract_id(url: str) -> Optional[int]:
@@ -90,23 +93,51 @@ def _extract_id(url: str) -> Optional[int]:
     return int(match.group(1))
 
 
-def _latest_record_id(api_base: str, token: str, concept_doi: str) -> int:
-    query = parse.quote(f'conceptdoi:"{concept_doi}"')
-    url = f"{api_base}/records?size=1&sort=mostrecent&q={query}"
-    data = _request_json("GET", url, token)
-    hits = data.get("hits", {}).get("hits", [])
-    if not hits:
-        raise SystemExit(f"No records found for concept DOI {concept_doi}")
+def _normalize_doi(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = value.strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+            break
+    return normalized
 
-    record = hits[0]
-    links = record.get("links", {})
-    latest_url = links.get("latest") or links.get("self")
-    record_id = _extract_id(latest_url) if latest_url else None
-    if record_id is None:
-        record_id = record.get("id")
-    if record_id is None:
-        raise SystemExit("Unable to determine latest record id from Zenodo response.")
-    return int(record_id)
+
+def _latest_deposition_id(api_base: str, token: str, concept_doi: str) -> int:
+    url = f"{api_base}/deposit/depositions?size=100&sort=mostrecent"
+    data = _request_json("GET", url, token)
+    depositions = data if isinstance(data, list) else data.get("hits", {}).get("hits", [])
+    concept_norm = _normalize_doi(concept_doi)
+    candidates: list[dict[str, Any]] = []
+    for dep in depositions:
+        dep_concept = _normalize_doi(dep.get("conceptdoi"))
+        if dep_concept == concept_norm:
+            candidates.append(dep)
+            continue
+        metadata = dep.get("metadata", {})
+        related = metadata.get("related_identifiers", []) or []
+        for item in related:
+            if _normalize_doi(item.get("identifier")) == concept_norm:
+                candidates.append(dep)
+                break
+
+    if not candidates:
+        raise SystemExit(
+            f"No depositions found for concept DOI {concept_doi}. "
+            "Use --deposition-id if the record belongs to a different account."
+        )
+
+    published = [
+        dep for dep in candidates if dep.get("submitted") is True or dep.get("state") in {"published", "done"}
+    ]
+    if not published:
+        raise SystemExit(
+            f"No published depositions found for concept DOI {concept_doi}. "
+            "Publish the initial deposition first so the DOI is registered."
+        )
+
+    return int(published[0]["id"])
 
 
 def _new_version(api_base: str, token: str, deposition_id: int) -> int:
@@ -166,7 +197,7 @@ def main() -> None:
     if args.deposition_id:
         latest_id = args.deposition_id
     else:
-        latest_id = _latest_record_id(api_base, token, CONCEPT_DOI)
+        latest_id = _latest_deposition_id(api_base, token, CONCEPT_DOI)
 
     draft_id = _new_version(api_base, token, int(latest_id))
     doi = _reserve_doi(api_base, token, draft_id)
