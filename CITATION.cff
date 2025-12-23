@@ -8,8 +8,22 @@ abstract: >
   operational avalanche forecasting and research.
 type: software
 version: 0.1.0
+doi: 10.5281/zenodo.18033182
 url: https://xsnow.avacollabra.org
+date-released: '2025-12-23'
+repository-code: https://gitlab.com/avacollabra/postprocessing/xsnow
 publisher: Zenodo
+license: AGPL-3.0-only
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.18013539"
+    description: Concept DOI for all xsnow versions
+keywords:
+  - snow
+  - stratigraphy
+  - avalanche
+  - xarray
+  - post-processing
 authors:
   - family-names: Herla
     given-names: Florian
@@ -58,17 +72,3 @@ contributors:
     given-names: Simon
     roles:
       - Software
-repository-code: https://gitlab.com/avacollabra/postprocessing/xsnow
-license: AGPL-3.0-only
-keywords:
-  - snow
-  - stratigraphy
-  - avalanche
-  - xarray
-  - post-processing
-date-released: '2025-12-19'
-identifiers:
-  - type: doi
-    value: "10.5281/zenodo.18013539"
-    description: Concept DOI for all xsnow versions
-
