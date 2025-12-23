@@ -291,6 +291,7 @@ performance-parser:
     - python -m pip install --upgrade pip
     - pip install -r docs/requirements.txt
     - pip install -e .
+    - python dist/update_footer_citation.py
   cache:
     key: "pip-docs"
     paths: [ .cache/pip ]

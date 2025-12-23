@@ -21,6 +21,7 @@ html: api
 	sed -i '1s/^xsnow\.extensions\.//' api/_generated/*.rst  # make extension titles more legible
 	sed -i '1s/^xsnow\.//' api/_generated/*.rst  # make module titles more legible
 	pip install -e ..
+	python ../dist/update_footer_citation.py
 	jupyter-book build $(SOURCEDIR) --path-output $(BUILDDIR)
 
 clean:

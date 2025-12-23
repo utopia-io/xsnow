@@ -20,7 +20,7 @@ sphinx:
   config:
     project: xsnow
     html_title: xsnow
-    copyright: "2025 xsnow contributors"
+    copyright: "2025 AvaCollabra / xsnow authors"
     html_theme: sphinx_book_theme
     html_theme_options:
       use_download_button: true
@@ -34,6 +34,10 @@ sphinx:
       default_mode: light
       pygments_light_style: github-light
       pygments_dark_style: github-dark-dimmed
+      extra_footer: |
+        <div class="citation-footer">
+          <p>Herla, F., Simenhois, R., Horton, S., Viallon-Galinier, L., Bavay, M., Reisecker, M., and Haegeli, P.: xsnow: a collaborative Python package for parsing and post-processing snow cover simulations (version 0.0.1) [software], Zenodo, https://doi.org/10.5281/zenodo.18013540, https://xsnow.avacollabra.org, 2025.</p>
+        </div>
     autosummary_generate: true
     # If you want numbering across multiple toctrees, enable this:
     use_multitoc_numbering: true
