@@ -239,14 +239,20 @@ def single_profile_timeseries() -> xsnowDataset:
 
 
 REGISTRY_SNP_ENSFX = {
-    "smets/ens-fx/2024-01-16T09Z/det/VIR1A.smet": "sha256:4c5363384ab66853ced8e78f2540275ff0fd8d72a83274bc49ca69186947523c",
-    "smets/ens-fx/2024-01-16T09Z/det/VIR2A.smet": "sha256:5fa99cf3656dd28c8c3e499026bb99bd0b759b51218ebed8efc3e4c65eb9a308",
-    "smets/ens-fx/2024-01-17T09Z/det/VIR1A.smet": "sha256:3eb84e7ea20aa58d641a9418a39d75004c030203d1808e26176952476b096a66",
-    "smets/ens-fx/2024-01-17T09Z/det/VIR2A.smet": "sha256:813ecd6755acf7fecbf968695fe6a9ec95990ad0e5339453bffccd3713a4f44a",
-    "smets/ens-fx/2024-01-17T09Z/p01/VIR1A.smet": "sha256:3eb84e7ea20aa58d641a9418a39d75004c030203d1808e26176952476b096a66",
-    "smets/ens-fx/2024-01-17T09Z/p01/VIR2A.smet": "sha256:813ecd6755acf7fecbf968695fe6a9ec95990ad0e5339453bffccd3713a4f44a",
-    "smets/ens-fx/analysis/det/VIR1A.smet": "sha256:05475de5d742941bd05c47b63b0909b217ead219f20b54ad17cca08cbecd5ab2",
-    "smets/ens-fx/analysis/det/VIR2A.smet": "sha256:38eef8b9059f35c50e89e6f47f397b705ba574efcefeadace431933ebe59f42a",
+    "smets/ens-fx/2024-01-17T00Z/det/VIR1A.smet": "sha256:baa3ae8667d0c4b746828e59d9fd846110e22c18bb9207311270604cd92be38f",
+    "smets/ens-fx/2024-01-17T00Z/det/VIR5A.smet": "sha256:1a1e6ad7a1960f883cc65a1d7eff940bd114ac491938c023bb8997a1c16bec4f",
+    "smets/ens-fx/2024-01-17T00Z/p01/VIR1A.smet": "sha256:c5533824928f5a31e82e056249dc4060a18c6a72e89870a3ea0e26d80e79c249",
+    "smets/ens-fx/2024-01-17T00Z/p01/VIR5A.smet": "sha256:43fc619570701f62c0e828a7ed8d140c84b4a8dc9a661c3234e4c229889ce7d7",
+    "smets/ens-fx/2024-01-19T10Z/det/VIR1A.smet": "sha256:edceb13fcad925cffa8f12327587e9e7f14339423d9a0a5b9fe9cce097422161",
+    "smets/ens-fx/2024-01-19T10Z/det/VIR5A.smet": "sha256:aefaa14ef79f655fb86a82ac7075145365cfc5f1c85fb008c9ea8f6307a64b49",
+    "smets/ens-fx/2024-01-19T10Z/p01/VIR1A.smet": "sha256:68c76f4c09c025af885c1e029fcbdcd30d1d9075547aa701f7f2082b584f75e7",
+    "smets/ens-fx/2024-01-19T10Z/p01/VIR5A.smet": "sha256:f22e52d715ce4144e3afa12d66faf776d81b45dec37826d4a12e0249b4de0f53",
+    "smets/ens-fx/2024-01-25T12Z/det/VIR1A.smet": "sha256:bfa74c97c4c98c0c22930764d1126b821b939d065987d01d7272694ee34746aa",
+    "smets/ens-fx/2024-01-25T12Z/det/VIR5A.smet": "sha256:5d6d0c279ed2e2bed734d2172ff20fb9e44011e506a7c4748ef52a3b137c8410",
+    "smets/ens-fx/2024-01-25T12Z/p01/VIR1A.smet": "sha256:b97f80deb1319c64008b710152c8ad79a60fe71271b9c05067f077dbac840b41",
+    "smets/ens-fx/2024-01-25T12Z/p01/VIR5A.smet": "sha256:fe43e731eda05bd210e4b1b1bc55fec0e72da38efdd06ebeea7091fa2d263056",
+    "smets/ens-fx/analysis/det/VIR1A.smet": "sha256:bf46bb5da8ae9d037097d136b8b5eaf676f618270d107c85e000580c19a475c1",
+    "smets/ens-fx/analysis/det/VIR5A.smet": "sha256:3759eb31a7d168efbf7ca11370d2d096337d35814bc8bda888aaf2bae2917660",
 }
 
 SNP_ENSFX = pooch.create(
