@@ -2,12 +2,17 @@
 """
 Reserve the next Zenodo DOI for the xsnow concept DOI.
 
-This script is intended to be run BEFORE you tag a release:
+This script is intended to be run BEFORE you tag a release.
+
+Status note:
+- The automated Zenodo workflow is currently paused due to API discrepancies
+  encountered with depositions and permissions. Until resolved, use the
+  Zenodo UI to create drafts and reserve DOIs manually.
 1) Reserve a DOI for the next version in Zenodo.
 2) Update CITATION.cff with that version DOI (via dist/update_citation.py).
 3) Commit and tag the release.
 4) A tag-triggered CI job uploads the tag archive to the draft.
-   Publishing is manual unless you pass --publish to dist/publish_zenodo.py.
+   (Currently disabled; publication is manual in the Zenodo UI.)
 
 Typical usage:
   python dist/reserve_zenodo_DOI.py

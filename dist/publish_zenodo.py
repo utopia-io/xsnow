@@ -9,6 +9,11 @@ Intended workflow:
 4) Run this script (typically in CI on tags) to upload the tag archive.
    By default it does NOT publish; use --publish when you are ready.
 
+Status note:
+- The automated Zenodo workflow is currently paused due to API discrepancies
+  encountered with depositions and permissions. Until resolved, use the
+  Zenodo UI for draft creation, file upload, and publication.
+
 Failure and recovery (tag created without a draft DOI):
 - Leave the original tag untouched. It will have no Zenodo deposition and no tag docs.
 - Create a new draft via dist/reserve_zenodo_DOI.py.

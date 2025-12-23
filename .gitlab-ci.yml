@@ -303,22 +303,23 @@ performance-parser:
 ########################################
 # Zenodo draft upload (tagged releases)
 ########################################
-zenodo-upload:
-  stage: release
-  rules:
-    - if: $CI_COMMIT_TAG
-      when: on_success
-  script:
-    - |
-      if [ -z "$ZENODO_TOKEN" ]; then
-        echo "ZENODO_TOKEN is required."
-        exit 1
-      fi
-      if [ -z "$ZENODO_CONCEPT_DOI" ] && [ -z "$ZENODO_DRAFT_ID" ]; then
-        echo "Provide ZENODO_CONCEPT_DOI or ZENODO_DRAFT_ID to publish drafts."
-        exit 1
-      fi
-    - python dist/publish_zenodo.py --tag "$CI_COMMIT_TAG"
+# zenodo-upload:
+#   stage: release
+#   rules:
+#     - if: $CI_COMMIT_TAG
+#       when: on_success
+#   allow_failure: true
+#   script:
+#     - |
+#       if [ -z "$ZENODO_TOKEN" ]; then
+#         echo "ZENODO_TOKEN is required."
+#         exit 1
+#       fi
+#       if [ -z "$ZENODO_CONCEPT_DOI" ] && [ -z "$ZENODO_DRAFT_ID" ]; then
+#         echo "Provide ZENODO_CONCEPT_DOI or ZENODO_DRAFT_ID to publish drafts."
+#         exit 1
+#       fi
+#     - python dist/publish_zenodo.py --tag "$CI_COMMIT_TAG"
 
 ########################################
 # Docs from default branch  -> /stable/
@@ -481,8 +482,6 @@ docs-dev:
 ########################################
 docs-tagged:
   <<: *default-docs
-  needs:
-    - job: zenodo-upload
   rules:
     - if: $CI_COMMIT_TAG
       when: on_success
