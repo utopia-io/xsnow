@@ -296,7 +296,9 @@ performance-parser:
     - python dist/update_footer_citation.py
   cache:
     key: "pip-docs"
-    paths: [ .cache/pip ]
+    paths:
+      - .cache/pip
+      - public/
     policy: pull-push
   artifacts:
     paths: [ public ]
