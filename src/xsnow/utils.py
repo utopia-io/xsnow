@@ -557,12 +557,12 @@ def reorder_dims(
 
 def cite(fmt: str = "bibtex", display: bool = True) -> Optional[str]:
     """
-    Render the package citation from CITATION.cff using cffconvert.
+    Render the package citation from CITATION.cff without external converters.
 
     Args:
-        fmt: Output format, one of {"biblatex", "bibtex", "apa", "csljson"}.
-            Defaults to "bibtex" to avoid BibLaTeX warnings; use "biblatex"
-            when available for @software entries.
+        fmt: Output format, one of {"biblatex", "bibtex", "apa", "copernicus"}.
+            Defaults to "bibtex". "copernicus" follows the citation style
+            used in Copernicus journals for software/data references.
         display: When True (default), print the rendered citation (BibTeX/BibLaTeX
             is aligned for readability). When False, return the string.
 
@@ -570,65 +570,120 @@ def cite(fmt: str = "bibtex", display: bool = True) -> Optional[str]:
         The rendered citation string if display is False; otherwise None.
 
     Raises:
-        RuntimeError: If cffconvert is not installed (with install hint).
         FileNotFoundError: If CITATION.cff is missing.
         ValueError: If an unsupported format is requested.
     """
     fmt_norm = fmt.lower()
-    preferred_methods = {
-        "biblatex": ("as_biblatex", "as_bibtex"),  # fall back to bibtex if biblatex is unavailable
-        "bibtex": ("as_bibtex",),
-        "apa": ("as_apalike",),
-        "csljson": ("as_csljson", "as_csl"),  # cffconvert versions vary on naming
-    }
-    if fmt_norm not in preferred_methods:
-        raise ValueError(f"Unsupported format '{fmt}'. Choose from {sorted(preferred_methods)}.")
-
-    try:
-        from cffconvert import Citation
-    except ImportError as exc:
-        raise RuntimeError(
-            "cffconvert is required for cite(). Install with `pip install .[release]` "
-            "or `pip install cffconvert ruamel.yaml`. Citation info is also available at "
-            "https://xsnow.avacollabra.org."
-        ) from exc
+    supported = {"biblatex", "bibtex", "apa", "copernicus"}
+    if fmt_norm not in supported:
+        raise ValueError(f"Unsupported format '{fmt}'. Choose from {sorted(supported)}.")
 
     cff_path = Path(__file__).resolve().parents[2] / "CITATION.cff"
     if not cff_path.exists():
         raise FileNotFoundError(f"CITATION.cff not found at {cff_path}")
 
-    cff_text = cff_path.read_text(encoding="utf-8")
-    citation = Citation(cff_text)
-    bib_key = _bib_key_from_cff(cff_text)
+    metadata = _load_cff_metadata(cff_path)
+    authors = metadata.get("authors", [])
+    if not isinstance(authors, list):
+        authors = []
+    title = metadata.get("title")
+    version = str(metadata.get("version", "")).strip() or None
+    doi = metadata.get("doi")
+    url = metadata.get("url")
+    publisher = metadata.get("publisher")
+    date_released = metadata.get("date-released")
+    year, month = _year_month(date_released)
 
-    for method_name in preferred_methods[fmt_norm]:
-        if hasattr(citation, method_name):
-            if fmt_norm == "biblatex" and method_name != "as_biblatex":
-                warnings.warn(
-                    "cffconvert does not expose biblatex in this environment; falling back to BibTeX (@misc).",
-                    RuntimeWarning,
-                )
-            if fmt_norm == "csljson" and method_name != "as_csljson":
-                warnings.warn(
-                    "cffconvert does not expose csljson; falling back to csl.",
-                    RuntimeWarning,
-                )
-            formatter = getattr(citation, method_name)
-            rendered = formatter()
-            if fmt_norm in {"bibtex", "biblatex"}:
-                rendered = _override_bib_key(rendered, key=bib_key)
-            if display:
-                if fmt_norm in {"bibtex", "biblatex"}:
-                    builtins.print(_format_bib_block(rendered))
-                else:
-                    builtins.print(rendered)
-                return None
-            return rendered
+    if fmt_norm in {"bibtex", "biblatex"}:
+        entry_type = "misc" if fmt_norm == "bibtex" else "software"
+        bib_key = _bib_key_from_version(version)
+        fields: list[tuple[str, str]] = []
+        author_str = _format_author_bibtex(authors)
+        if author_str:
+            fields.append(("author", author_str))
+        if title:
+            fields.append(("title", title))
+        if year:
+            fields.append(("year", year))
+        if month:
+            fields.append(("month", month))
+        if version:
+            fields.append(("version", version))
+        if publisher:
+            fields.append(("publisher", publisher))
+        if doi:
+            fields.append(("doi", doi))
+        if url:
+            fields.append(("url", url))
 
-    raise RuntimeError(
-        f"cffconvert does not support '{fmt_norm}' with available methods. "
-        f"Found methods: {', '.join(sorted(m for m in dir(citation) if m.startswith('as_')))}"
-    )
+        rendered = f"@{entry_type}{{{bib_key},\n"
+        rendered += "\n".join(f"  {k} = {{{v}}}," for k, v in fields)
+        rendered += "\n}"
+
+        if display:
+            builtins.print(_format_bib_block(rendered))
+            return None
+        return rendered
+
+    if fmt_norm == "apa":
+        author_str = _format_author_apa(authors)
+        parts = []
+        if author_str:
+            parts.append(author_str)
+        if year:
+            parts.append(f"({year}).")
+        if title:
+            parts.append(f"{title}")
+        if version:
+            parts.append(f"(version {version}).")
+        if publisher:
+            parts.append(f"{publisher}.")
+        url_parts = []
+        if doi:
+            url_parts.append(f"https://doi.org/{doi}")
+        if url:
+            url_parts.append(url)
+        if url_parts:
+            parts.append(", ".join(url_parts))
+        rendered = " ".join(parts).strip()
+        if not rendered.endswith("."):
+            rendered += "."
+        if display:
+            builtins.print(rendered)
+            return None
+        return rendered
+
+    if fmt_norm == "copernicus":
+        author_str = _format_author_copernicus(authors)
+        title_part = title or "xsnow"
+        if version:
+            title_part = f"{title_part} (version {version})"
+        title_part = f"{title_part} [software]"
+
+        rest_parts = [title_part]
+        if publisher:
+            rest_parts.append(publisher)
+        url_parts = []
+        if doi:
+            url_parts.append(f"https://doi.org/{doi}")
+        if url:
+            url_parts.append(url)
+        if url_parts:
+            rest_parts.append(", ".join(url_parts))
+        if year:
+            rest_parts.append(year)
+
+        rest = ", ".join(rest_parts)
+        if author_str:
+            rendered = f"{author_str}: {rest}"
+        else:
+            rendered = rest
+        if not rendered.endswith("."):
+            rendered += "."
+        if display:
+            builtins.print(rendered)
+            return None
+        return rendered
 
 
 def _format_bib_block(bib_str: str) -> str:
@@ -662,23 +717,168 @@ def _format_bib_block(bib_str: str) -> str:
 
     return "\n".join([header, *formatted_body, footer])
 
-def _override_bib_key(bib_str: str, key: str = "xsnow") -> str:
-    """
-    Replace the default cffconvert key (YourReferenceHere) with a stable one.
-    """
-    return bib_str.replace("YourReferenceHere", key, 1)
 
-def _bib_key_from_cff(cff_text: str) -> str:
+def _bib_key_from_version(version: str | None) -> str:
     """
-    Build a BibTeX key from the package name and the CFF version.
+    Build a BibTeX key from the package name and version.
     Example: version 0.1.2 -> xsnow_v0_1_2
     """
-    match = re.search(r"^version:\s*[\"']?([^\s\"']+)", cff_text, re.MULTILINE)
-    if not match:
+    if not version:
         return "xsnow"
-    version = match.group(1)
     normalized = re.sub(r"[^A-Za-z0-9]+", "_", version).strip("_")
     if not normalized:
         return "xsnow"
     return f"xsnow_v{normalized}"
 
+
+def _strip_value(value: str) -> str:
+    stripped = value.strip()
+    if (stripped.startswith('"') and stripped.endswith('"')) or (
+        stripped.startswith("'") and stripped.endswith("'")
+    ):
+        return stripped[1:-1]
+    return stripped
+
+
+def _parse_cff_text(text: str) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    authors: list[dict[str, str]] = []
+    in_authors = False
+    current: dict[str, str] | None = None
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+
+        if not line.startswith(" "):  # top-level key
+            in_authors = False
+            key, sep, value = line.partition(":")
+            if not sep:
+                continue
+            key = key.strip()
+            if key == "authors":
+                in_authors = True
+                meta["authors"] = authors
+                current = None
+            else:
+                meta[key] = _strip_value(value)
+            continue
+
+        if in_authors:
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                current = {}
+                authors.append(current)
+                stripped = stripped[2:]
+            if stripped.startswith("family-names:"):
+                if current is None:
+                    current = {}
+                    authors.append(current)
+                current["family-names"] = _strip_value(stripped.split(":", 1)[1])
+            elif stripped.startswith("given-names:"):
+                if current is None:
+                    current = {}
+                    authors.append(current)
+                current["given-names"] = _strip_value(stripped.split(":", 1)[1])
+
+    return meta
+
+
+def _load_cff_metadata(cff_path: Path) -> dict[str, Any]:
+    text = cff_path.read_text(encoding="utf-8")
+    for loader in ("ruamel.yaml", "yaml"):
+        try:
+            if loader == "ruamel.yaml":
+                from ruamel.yaml import YAML  # type: ignore
+
+                yaml = YAML()
+                data = yaml.load(text)
+            else:
+                import yaml  # type: ignore
+
+                data = yaml.safe_load(text)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            continue
+    return _parse_cff_text(text)
+
+
+def _format_author_bibtex(authors: list[dict[str, str]]) -> str:
+    names = []
+    for author in authors:
+        family = author.get("family-names")
+        given = author.get("given-names")
+        if family and given:
+            names.append(f"{family}, {given}")
+        elif family:
+            names.append(family)
+        elif given:
+            names.append(given)
+    return " and ".join(names)
+
+
+def _given_to_initials(given: str) -> str:
+    parts = []
+    for word in given.split():
+        subparts = [p for p in word.split("-") if p]
+        initials = "-".join(f"{p[0].upper()}." for p in subparts if p)
+        if initials:
+            parts.append(initials)
+    return " ".join(parts)
+
+
+def _format_author_apa(authors: list[dict[str, str]]) -> str:
+    formatted = []
+    for author in authors:
+        family = author.get("family-names")
+        given = author.get("given-names")
+        if family and given:
+            formatted.append(f"{family}, {_given_to_initials(given)}")
+        elif family:
+            formatted.append(family)
+        elif given:
+            formatted.append(given)
+
+    if not formatted:
+        return ""
+    if len(formatted) == 1:
+        return formatted[0]
+    if len(formatted) == 2:
+        return f"{formatted[0]}, & {formatted[1]}"
+    return ", ".join(formatted[:-1]) + f", & {formatted[-1]}"
+
+
+def _format_author_copernicus(authors: list[dict[str, str]]) -> str:
+    formatted = []
+    for author in authors:
+        family = author.get("family-names")
+        given = author.get("given-names")
+        if family and given:
+            formatted.append(f"{family}, {_given_to_initials(given)}")
+        elif family:
+            formatted.append(family)
+        elif given:
+            formatted.append(given)
+
+    if not formatted:
+        return ""
+    if len(formatted) == 1:
+        return formatted[0]
+    if len(formatted) == 2:
+        return f"{formatted[0]} and {formatted[1]}"
+    return ", ".join(formatted[:-1]) + f", and {formatted[-1]}"
+
+
+def _year_month(date_value: str | None) -> tuple[Optional[str], Optional[str]]:
+    if not date_value:
+        return None, None
+    parts = date_value.split("-")
+    year = parts[0] if parts else None
+    month = None
+    if len(parts) >= 2:
+        try:
+            month = str(int(parts[1]))
+        except ValueError:
+            month = parts[1]
+    return year, month
