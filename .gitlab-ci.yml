@@ -202,10 +202,11 @@ performance-save-baseline:
     policy: pull-push
   script:
     - pip install -e ".[testing]"
-    - pytest tests/performance/ --benchmark-only -m "not slow" \
-        --benchmark-save=baseline \
-        --benchmark-json=baseline-results.json \
-        -v
+    - >
+      pytest tests/performance/ --benchmark-only -m "not slow"
+      --benchmark-save=baseline
+      --benchmark-json=baseline-results.json
+      -v
     - echo "✓ Baseline saved for future comparisons"
   artifacts:
     when: always
@@ -228,10 +229,11 @@ performance-full:
     policy: pull-push
   script:
     - pip install -e ".[testing]"
-    - pytest tests/performance/ --benchmark-only \
-        --benchmark-json=full-benchmark-results.json \
-        --benchmark-columns=all \
-        -v -s
+    - >
+      pytest tests/performance/ --benchmark-only
+      --benchmark-json=full-benchmark-results.json
+      --benchmark-columns=all
+      -v -s
   artifacts:
     when: always
     expire_in: 30 days
