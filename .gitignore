@@ -18,6 +18,8 @@ __pycache__/
 data/
 tests/data/
 tests/__pycache__/
+.benchmarks
+.pytest_cache
 
 # ── Documentation builds ────────────────────────────────
 docs/_build/
