@@ -172,6 +172,10 @@ def read(
         
         >>> # Force eager loading for quick access
         >>> ds = read("small_dataset/", lazy=False, n_cpus_use=4)
+        
+    See Also
+    --------
+    to_netcdf : Save datasets to NetCDF with proper formatting
     """
     # --- Step 1: Setup ---
     logger = get_logger(__name__, logger=logger)
@@ -246,11 +250,18 @@ def read(
 
 
 
-def _read_xsnow_netcdf(source: Union[str, Path]) -> Optional["xsnowDataset"]:
-    """Read xsnow's custom netcdf format
+def _read_xsnow_netcdf(source: Union[str, Path]) -> Optional[xsnowDataset]:
+    """
+    Read xsnow's custom netcdf format.
 
     This includes proper json decoding of any 'mapping' attribute and
     handling of fixed-length byte coordinate strings.
+    
+    Args:
+        source: Path to the NetCDF file.
+        
+    Returns:
+        An xsnowDataset instance, or None if reading fails.
     """
     # open lazily, then materialize metadata/coords eagerly
     with xr.open_dataset(source) as _ds:
@@ -267,15 +278,11 @@ def _read_xsnow_netcdf(source: Union[str, Path]) -> Optional["xsnowDataset"]:
                 ]
                 ds[coord_name] = (coord_data.dims, decoded_values)
 
-    # if 'inclination' in ds.coords:
-    #     logger.debug(f"read NetCDF: inclination AFTER load = {ds.inclination.values}")
-    #     logger.debug(f"read NetCDF: inclination dims = {ds.inclination.dims}")
-
     # Restore mapping attrs from JSON
     ds = _decode_mapping_attrs_from_netcdf(ds)
 
     return xsnowDataset(ds)
-
+    
 
 def _decode_mapping_attrs_from_netcdf(ds: xr.Dataset) -> xr.Dataset:
     """
@@ -1282,7 +1289,10 @@ def _create_pro_dataset(
         )
 
         for i, profile_values in enumerate(profile_data):
-            np_array[0, i, 0, 0, :] = profile_values
+            np_array[0, i, 0, 0, :] = np.clip(profile_values, 
+                                              np.finfo(np_array.dtype).min,
+                                              np.finfo(np_array.dtype).max
+                                              )
 
         # Convert to dask if needed
         if use_dask:
@@ -2210,13 +2220,16 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path],
               logger: Optional[logging.Logger]=None, **kwargs):
     """
     Saves the dataset to a NetCDF file.
-
     This method provides a convenient wrapper around the underlying
     `xarray.Dataset.to_netcdf()` method for easy caching and interoperability.
     
+    Automatically converts slope-varying coordinates (azimuth, aspect, 
+    inclination) to data variables to ensure files are mergeable without
+    conflicts.
+    
     The location mapping dictionary is converted to NetCDF-compatible format
     by encoding it as JSON in a string attribute.
-
+    
     Args:
         ds (xsnowDataset): The dataset instance to save.
         path (Union[str, Path]): The destination file path for the .nc file.
@@ -2230,14 +2243,45 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path],
     # Create a copy to avoid modifying the original
     ds_to_save = ds.to_xarray().copy()
     
+    # Convert slope-varying coordinates to data variables for mergeability
+    SLOPE_VARYING_COORDS = ['azimuth', 'aspect', 'inclination']
+    
+    converted = []
+    for coord in SLOPE_VARYING_COORDS:
+        if coord in ds_to_save.coords:
+            # Check if it's a problematic 1D slope coordinate
+            if ds_to_save.coords[coord].dims == ('slope',):
+                logger.debug(
+                    f"Converting '{coord}' from coordinate to data variable "
+                    f"(prevents merge conflicts)"
+                )
+                
+                # Broadcast 1D (slope,) to 2D (location, slope)
+                # Each location gets the same slope values
+                coord_1d = ds_to_save.coords[coord]
+                
+                # Create 2D array by broadcasting
+                coord_2d = coord_1d.broadcast_like(
+                    ds_to_save['temperature'].isel(time=0, realization=0, layer=0)
+                )
+                
+                # Add as data variable and remove from coordinates
+                ds_to_save[coord] = coord_2d
+                ds_to_save = ds_to_save.reset_coords(coord)
+                
+                converted.append(coord)
+    
+    if converted:
+        logger.info(
+            f"Converted {len(converted)} slope-varying coordinate(s) to "
+            f"data variable(s): {', '.join(converted)}"
+        )    
     # DEBUG: Check slope coordinates before saving
     if 'inclination' in ds_to_save.coords:
         logger.debug(f"to_netcdf: inclination BEFORE save = {ds_to_save.inclination.values}")
         logger.debug(f"to_netcdf: inclination dims = {ds_to_save.inclination.dims}")
-
     # Encode any dict attrs named 'mapping' as JSON
     ds_to_save = _encode_mapping_attrs_for_netcdf(ds_to_save)
-
     # Encode string coordinates as fixed-length bytes for NetCDF classic compatibility
     for coord_name in ("location", "realization"):
         if coord_name in ds_to_save.coords:
@@ -2255,11 +2299,11 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path],
                     "complevel": 4,
                 }
                 logger.debug(f"Encoding coord '{coord_name}' as S{max_len}")
-
     path = Path(path)
     ds_to_save.to_netcdf(path, **kwargs)
     logger.info(f"Dataset successfully saved to {path}")
-
+    
+    
 @register_xsnowDataset_method
 def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = None, **kwargs):
     """
