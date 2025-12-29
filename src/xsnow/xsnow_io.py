@@ -197,6 +197,16 @@ def read(
             logger.warning(f"Failed to read NetCDF file {source}: {e}")
             return None
     
+    # Handle Zarr archives (similar to NetCDF handling)
+    if isinstance(source, (str, Path)) and (Path(source).suffix == '.zarr' or 
+                                            (Path(source).is_dir() and 
+                                             (Path(source) / 'zarr.json').exists())):
+        try:
+            return _read_zarr(source, time_sel, location_sel, slope_sel, realization_sel, logger)
+        except Exception as e:
+            logger.warning(f"Failed to read Zarr archive {source}: {e}")
+            return None
+    
     # Continue with normal .pro/.smet file processing
     try:
         pro_files, smet_files = _resolve_filepaths(source, recursive, logger)
@@ -326,6 +336,91 @@ def _decode_mapping_attrs_from_netcdf(ds: xr.Dataset) -> xr.Dataset:
             del var.attrs["mapping_json"]
 
     return reorder_dims(ds)
+
+def _read_zarr(
+    path: Union[str, Path],
+    time_sel: Optional[TimeSelector] = None,
+    location_sel: Optional[LocationSelector] = None,
+    slope_sel: Optional[SlopeSelector] = None,
+    realization_sel: Optional[RealizationSelector] = None,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[xsnowDataset]:
+    """
+    Internal function to read a Zarr archive.
+    
+    Called by read() when it detects a .zarr file or directory.
+    Similar to _read_xsnow_netcdf() for NetCDF files.
+
+    Internal function to read a Zarr archive.
+    
+    Called by read() when it detects a .zarr file or directory.
+    Similar to _read_xsnow_netcdf() for NetCDF files.
+    
+    Zarr archives are directory-based storage format that provides:
+    - Better stability (pure Python, no HDF5 crashes)
+    - Lower memory usage (streaming reads)
+    - Cloud-friendly (works with S3, GCS)
+    - Same xarray interface as NetCDF
+    
+    Args:
+        path: Path to the .zarr directory
+        time_sel: TimeSelector for filtering by time (already coerced)
+        location_sel: LocationSelector for filtering by location (already coerced)
+        slope_sel: SlopeSelector for filtering by slope (already coerced)
+        realization_sel: RealizationSelector for filtering by realization (already coerced)
+        logger: Logger instance
+        
+    Returns:
+        xsnowDataset with the loaded data, or None if loading fails
+    """
+    logger = get_logger(__name__, logger=logger)
+    
+    try:
+        path = Path(path)
+        
+        # Verify it's a Zarr directory
+        if not path.exists():
+            raise FileNotFoundError(f"Zarr archive not found: {path}")
+        
+        if not path.is_dir():
+            raise ValueError(f"Path is not a directory: {path}")
+            
+        # Check for Zarr metadata (v2 or v3)
+        has_zarr_v3 = (path / 'zarr.json').exists()
+        has_zarr_v2 = (path / '.zarray').exists() or (path / '.zattrs').exists()
+        
+        if not (has_zarr_v3 or has_zarr_v2):
+            raise ValueError(f"Directory does not appear to be a Zarr archive: {path}")
+        
+        logger.info(f"Reading Zarr archive: {path}")
+        
+        # Open with xarray
+        ds_raw = xr.open_zarr(path)
+        
+        logger.info(f"  Loaded: {len(ds_raw.location):,} locations, "
+                   f"{len(ds_raw.time):,} timesteps, "
+                   f"{len(ds_raw.data_vars)} variables")
+        
+        # Wrap in xsnowDataset
+        ds = xsnowDataset(ds_raw)
+        
+        # Apply selectors if provided (already coerced by read())
+        if time_sel:
+            ds = ds.where(time=time_sel)
+        if location_sel:
+            ds = ds.where(location=location_sel)
+        if slope_sel:
+            ds = ds.where(slope=slope_sel)
+        if realization_sel:
+            ds = ds.where(realization=realization_sel)
+        
+        return ds
+        
+    except Exception as e:
+        logger.error(f"Failed to read Zarr archive: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return None
 
 # --------------------------------------------------------------------------- #
 #                    EAGER LOADING WITH MULTIPROCESSING                       #
@@ -2257,13 +2352,34 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path],
                 )
                 
                 # Broadcast 1D (slope,) to 2D (location, slope)
-                # Each location gets the same slope values
                 coord_1d = ds_to_save.coords[coord]
                 
-                # Create 2D array by broadcasting
-                coord_2d = coord_1d.broadcast_like(
-                    ds_to_save['temperature'].isel(time=0, realization=0, layer=0)
-                )
+                # Find a template variable with (location, slope) dimensions
+                template_var = None
+                for var in ds_to_save.data_vars:
+                    if 'location' in ds_to_save[var].dims and 'slope' in ds_to_save[var].dims:
+                        template = ds_to_save[var]
+                        # Select first index for any extra dimensions
+                        for dim in template.dims:
+                            if dim not in ['location', 'slope']:
+                                template = template.isel({dim: 0})
+                        template_var = template
+                        break
+                
+                if template_var is not None:
+                    # Broadcast using template
+                    coord_2d = coord_1d.broadcast_like(template_var)
+                else:
+                    # Fallback: manual broadcast
+                    import numpy as np
+                    n_locations = len(ds_to_save.location)
+                    n_slopes = len(ds_to_save.slope)
+                    values_2d = np.broadcast_to(coord_1d.values, (n_locations, n_slopes))
+                    coord_2d = xr.DataArray(
+                        values_2d,
+                        dims=('location', 'slope'),
+                        coords={'location': ds_to_save.location, 'slope': ds_to_save.slope}
+                    )
                 
                 # Add as data variable and remove from coordinates
                 ds_to_save[coord] = coord_2d
@@ -2275,7 +2391,7 @@ def to_netcdf(ds: xsnowDataset, path: Union[str, Path],
         logger.info(
             f"Converted {len(converted)} slope-varying coordinate(s) to "
             f"data variable(s): {', '.join(converted)}"
-        )    
+        )   
     # DEBUG: Check slope coordinates before saving
     if 'inclination' in ds_to_save.coords:
         logger.debug(f"to_netcdf: inclination BEFORE save = {ds_to_save.inclination.values}")
@@ -2474,7 +2590,141 @@ def to_pro(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = Non
                         
                         
     logging.info(f"Dataset successfully saved to {path}")    
+
+@register_xsnowDataset_method
+def to_zarr(
+    ds: xsnowDataset,
+    path: Union[str, Path],
+    mode: str = 'w',
+    append_dim: Optional[str] = None,
+    consolidated: bool = True,
+    **kwargs
+) -> None:
+    """
+    Save dataset to Zarr format with automatic slope coordinate handling.
     
+    Zarr format provides better stability and performance for large datasets
+    compared to NetCDF, with pure Python implementation (no HDF5 crashes).
+    
+    This function automatically converts 1D slope coordinates (azimuth, inclination)
+    to 2D data variables with (location, slope) dimensions, ensuring compatibility
+    with the rest of xsnow and avoiding merge conflicts.
+    
+    Args:
+        ds: The xsnowDataset to save
+        path: Output path (should end in .zarr)
+        mode: Write mode - 'w' (overwrite), 'a' (append), 'w-' (fail if exists)
+        append_dim: Dimension to append along (e.g., 'time' for time-series updates)
+        consolidated: Whether to consolidate metadata (improves read performance)
+        **kwargs: Additional arguments passed to xarray.Dataset.to_zarr()
+        
+    Returns:
+        None
+        
+    Examples:
+        >>> # Save complete dataset
+        >>> ds.to_zarr('archive_2024.zarr')
+        
+        >>> # Append new data along time dimension
+        >>> new_data.to_zarr('archive_2024.zarr', mode='a', append_dim='time')
+        
+        >>> # Create with custom compression
+        >>> import numcodecs
+        >>> encoding = {var: {'compressor': numcodecs.Blosc(cname='zstd', clevel=5)}
+        ...            for var in ds.data_vars}
+        >>> ds.to_zarr('archive.zarr', encoding=encoding)
+        
+    See Also:
+        read_zarr : Read Zarr archives
+        to_netcdf : Save to NetCDF format
+    """
+    if ds.data is None:
+        raise ValueError("Cannot save an empty dataset.")
+    
+    logger = logging.getLogger(__name__)
+    
+    # Make copy to avoid modifying original
+    ds_to_save = ds.data.copy()
+    
+    # Convert 1D slope coordinates to 2D data variables
+    # This prevents merge conflicts and maintains xsnow conventions
+    slope_coords_converted = []
+    
+    for coord in ['azimuth', 'inclination', 'aspect']:
+        if coord in ds_to_save.coords:
+            coord_var = ds_to_save.coords[coord]
+            
+            # Check if it's a 1D slope coordinate
+            if coord_var.dims == ('slope',):
+                logger.debug(f"Converting {coord} from coordinate to data variable")
+                
+                # Remove from coordinates
+                ds_to_save = ds_to_save.reset_coords(coord)
+                
+                # Broadcast to 2D if needed
+                if 'location' in ds_to_save.dims and 'slope' in ds_to_save.dims:
+                    # Find a template variable with (location, slope) dims
+                    template = None
+                    for var_name in ds_to_save.data_vars:
+                        var = ds_to_save[var_name]
+                        if 'location' in var.dims and 'slope' in var.dims:
+                            template = var
+                            # Select first index for any extra dimensions
+                            for dim in var.dims:
+                                if dim not in ['location', 'slope']:
+                                    template = template.isel({dim: 0})
+                            break
+                    
+                    if template is not None:
+                        # Broadcast slope coordinate to 2D
+                        coord_2d = ds_to_save[coord].broadcast_like(template)
+                        ds_to_save[coord] = coord_2d
+                        slope_coords_converted.append(coord)
+                    else:
+                        # Fallback: create 2D using np.broadcast_to
+                        n_loc = ds_to_save.sizes['location']
+                        n_slope = ds_to_save.sizes['slope']
+                        coord_1d = ds_to_save[coord].values
+                        coord_2d_vals = np.broadcast_to(coord_1d, (n_loc, n_slope))
+                        ds_to_save[coord] = (('location', 'slope'), coord_2d_vals)
+                        slope_coords_converted.append(coord)
+    
+    if slope_coords_converted:
+        logger.info(f"Converted slope coordinates to 2D data variables: {slope_coords_converted}")
+    
+    # Ensure path ends with .zarr
+    path = Path(path)
+    if not str(path).endswith('.zarr'):
+        path = Path(str(path) + '.zarr')
+        logger.warning(f"Added .zarr extension: {path}")
+    
+    # Save to Zarr
+    logger.info(f"Saving to Zarr: {path}")
+    
+    try:
+        # Note: Zarr v3 uses default compression automatically
+        # Custom encoding can be passed via kwargs if needed
+        ds_to_save.to_zarr(
+            path,
+            mode=mode,
+            consolidated=consolidated,
+            **kwargs
+        )
+        
+        logger.info(f"✅ Dataset saved to {path}")
+        
+        # Report size
+        import subprocess
+        result = subprocess.run(['du', '-sh', str(path)],
+                              capture_output=True, text=True)
+        if result.returncode == 0:
+            size_str = result.stdout.split()[0]
+            logger.info(f"   Size: {size_str}")
+        
+    except Exception as e:
+        logger.error(f"Failed to save Zarr archive: {e}")
+        raise    
+
 @register_xsnowDataset_method
 def to_json(ds: xsnowDataset, path: Union[str, Path], **kwargs):
     """Saves the dataset to a structured JSON file. (Not Implemented)"""
