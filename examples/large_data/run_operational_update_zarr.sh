@@ -1,11 +1,11 @@
 #!/bin/bash
 #
-# run_operational_update.sh
+# run_operational_update.sh - ZARR VERSION (FIXED)
 # 
-# Production wrapper for SNOWPACK operational archive updates
+# Production wrapper for SNOWPACK operational archive updates using Zarr format
 # Handles safety checks, logging, locking, and error notifications
 #
-# Usage: ./run_operational_update.sh /data/snowpack
+# Usage: ./run_operational_update_zarr.sh /data/snowpack
 
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
@@ -15,13 +15,39 @@ set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_SCRIPT="${SCRIPT_DIR}/operational_archive.py"
-LOG_DIR="./log/snowpack-archive"
+PYTHON_SCRIPT="${SCRIPT_DIR}/operational_archive_zarr.py"
+LOG_DIR="./logs/snowpack-archive"
 LOCK_FILE="./snowpack-archive.lock"
 
-# Archive settings
-ARCHIVE_FILE="./data/operational.nc"
+# Virtual environment (xsnow/.venv from xsnow/examples/large_data)
+VENV_PATH="$(dirname "$(dirname "${SCRIPT_DIR}")")/.venv"
+PYTHON_EXE="${VENV_PATH}/bin/python3"
+
+# Verify venv exists
+if [ ! -f "${PYTHON_EXE}" ]; then
+    echo "ERROR: Virtual environment not found at ${VENV_PATH}"
+    echo "Expected: ${PYTHON_EXE}"
+    echo "Current directory: ${SCRIPT_DIR}"
+    exit 1
+fi
+
+# Archive settings (ZARR FORMAT)
 WINDOW_DAYS=14
+
+# Archive naming mode
+# - "rolling": Use same filename (operational.zarr) - gets updated each run
+# - "timestamped": Create dated archives (operational_2024-12-29_14:00-2024-12-29_20:00.zarr)
+ARCHIVE_NAMING="timestamped"           # Options: "rolling" or "timestamped"
+ARCHIVE_BASENAME="operational"     # Base name for archive
+
+# Base archive path (will be modified if timestamped mode)
+ARCHIVE_FILE="./data/${ARCHIVE_BASENAME}.zarr"
+
+# Process priority (for concurrent execution with SNOWPACK)
+# Lower priority = less interference with SNOWPACK
+NICE_LEVEL=19           # CPU priority (0=normal, 19=lowest)
+IONICE_CLASS=2          # I/O class (2=best-effort)
+IONICE_LEVEL=7          # I/O priority (0=highest, 7=lowest)
 
 # Resource limits
 MIN_DISK_GB=50        # Minimum free disk space (GB)
@@ -97,6 +123,60 @@ check_snowpack_running() {
     else
         log "SNOWPACK not running - processing finalized files"
         return 0
+    fi
+}
+
+get_priority_command() {
+    # Build priority command prefix
+    # Uses nice for CPU priority, ionice for I/O priority (if available)
+    
+    local cmd="nice -n ${NICE_LEVEL}"
+    
+    # Check if ionice is available
+    if command -v ionice >/dev/null 2>&1; then
+        cmd="${cmd} ionice -c ${IONICE_CLASS} -n ${IONICE_LEVEL}"
+    fi
+    
+    echo "${cmd}"
+}
+
+get_archive_filename() {
+    # Generate archive filename based on naming mode
+    # IMPORTANT: This function ONLY outputs the filename to stdout
+    # NO log() calls allowed here - they pollute stdout!
+    
+    local data_dir="$1"
+    
+    if [ "${ARCHIVE_NAMING}" = "timestamped" ]; then
+        # Find most recent .pro file to determine SNOWPACK end time
+        local newest_file=$(find "${data_dir}" -name "*.pro" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+        
+        if [ -z "${newest_file}" ]; then
+            # Fallback to rolling mode if can't determine SNOWPACK runtime
+            echo "./data/${ARCHIVE_BASENAME}.zarr"
+            return
+        fi
+        
+        # Get modification time of newest file (SNOWPACK end time)
+        local end_timestamp=$(stat -c %Y "${newest_file}" 2>/dev/null)
+        if [ -z "${end_timestamp}" ]; then
+            echo "./data/${ARCHIVE_BASENAME}.zarr"
+            return
+        fi
+        
+        local end_date=$(date -d "@${end_timestamp}" +"%Y-%m-%d_%H:%M" 2>/dev/null)
+        
+        # Calculate start time (end - window_days)
+        local start_timestamp=$((end_timestamp - WINDOW_DAYS * 86400))
+        local start_date=$(date -d "@${start_timestamp}" +"%Y-%m-%d_%H:%M" 2>/dev/null)
+        
+        local timestamped_file="./data/${ARCHIVE_BASENAME}_${start_date}_${end_date}.zarr"
+        
+        # Output ONLY the filename - nothing else!
+        echo "${timestamped_file}"
+    else
+        # Rolling mode - same filename
+        echo "${ARCHIVE_FILE}"
     fi
 }
 
@@ -193,18 +273,33 @@ fi
 
 DATA_DIR="$1"
 
-# Create log directory
+# Create log directory FIRST
 mkdir -p "${LOG_DIR}"
+
+# Determine archive filename (capture function output cleanly)
+# Redirect stderr to /dev/null to avoid pollution
+ARCHIVE_FILE=$(get_archive_filename "${DATA_DIR}" 2>/dev/null)
 
 # Create data directory for archive file
 mkdir -p "$(dirname "${ARCHIVE_FILE}")"
 
+# Now log everything (after filename is determined)
 log "========================================================================"
-log "SNOWPACK Operational Archive Update - Starting"
+log "SNOWPACK Operational Archive Update - ZARR VERSION"
 log "========================================================================"
 log "Data directory: ${DATA_DIR}"
 log "Archive file: ${ARCHIVE_FILE}"
 log "Window: ${WINDOW_DAYS} days"
+log "Naming mode: ${ARCHIVE_NAMING}"
+
+# If timestamped, show the time range
+if [ "${ARCHIVE_NAMING}" = "timestamped" ]; then
+    # Extract dates from filename for display
+    if [[ "${ARCHIVE_FILE}" =~ _([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}:[0-9]{2})_([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}:[0-9]{2}) ]]; then
+        log "Time range: ${BASH_REMATCH[1]} to ${BASH_REMATCH[2]}"
+    fi
+fi
+
 log ""
 
 # Pre-flight checks
@@ -234,6 +329,9 @@ fi
 # Verify Python script exists
 if [ ! -f "${PYTHON_SCRIPT}" ]; then
     log_error "Python script not found: ${PYTHON_SCRIPT}"
+    log_error ""
+    log_error "Please copy operational_archive_zarr.py to: ${SCRIPT_DIR}/"
+    log_error "Or update PYTHON_SCRIPT variable in this script"
     exit 1
 fi
 
@@ -244,7 +342,12 @@ log ""
 # Run the update with timeout
 START_TIME=$(date +%s)
 
-timeout ${MAX_RUNTIME_HOURS}h python3 "${PYTHON_SCRIPT}" \
+# Get priority command (nice and ionice if available)
+PRIORITY_CMD=$(get_priority_command)
+log "Using priority command: ${PRIORITY_CMD}"
+
+# Execute with low priority for concurrent operation
+${PRIORITY_CMD} timeout ${MAX_RUNTIME_HOURS}h "${PYTHON_EXE}" "${PYTHON_SCRIPT}" \
     "${DATA_DIR}" \
     --archive "${ARCHIVE_FILE}" \
     --window-days ${WINDOW_DAYS} \
@@ -269,17 +372,11 @@ if [ ${EXIT_CODE} -eq 0 ]; then
     log "Duration: ${DURATION_MIN} minutes"
     
     # Verify archive was updated
-    if [ -f "${ARCHIVE_FILE}" ]; then
-        ARCHIVE_AGE=$(($(date +%s) - $(stat -c %Y "${ARCHIVE_FILE}")))
-        ARCHIVE_SIZE=$(du -h "${ARCHIVE_FILE}" | cut -f1)
+    if [ -e "${ARCHIVE_FILE}" ]; then
+        ARCHIVE_SIZE=$(du -sh "${ARCHIVE_FILE}" | cut -f1)
         
         log "Archive file: ${ARCHIVE_FILE}"
         log "Archive size: ${ARCHIVE_SIZE}"
-        log "Archive age: ${ARCHIVE_AGE} seconds"
-        
-        if [ ${ARCHIVE_AGE} -gt 600 ]; then
-            log_error "WARNING: Archive file not recently updated!"
-        fi
     else
         log_error "WARNING: Archive file not found!"
     fi
@@ -291,6 +388,8 @@ else
     
     if [ ${EXIT_CODE} -eq 124 ]; then
         log_error "Update exceeded ${MAX_RUNTIME_HOURS} hour timeout"
+    elif [ ${EXIT_CODE} -eq 127 ]; then
+        log_error "Command not found - check Python script path"
     fi
 fi
 

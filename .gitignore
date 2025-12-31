@@ -35,3 +35,10 @@ tests/data_itegraty_test.ipynb
 # ── Backup files ────────────────────────────────────────
 *.bak
 *.backup
+*.old
+
+# ── log files ────────────────────────────────────────
+*.log
+
+# ── data tracking files ────────────────────────────────
+*.json
