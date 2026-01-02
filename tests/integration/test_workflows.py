@@ -499,14 +499,16 @@ class TestSlopeCoordinateBugFixes:
             assert not np.isnan(azi), f"{loc}: azimuth is NaN"
     
     def test_append_latest_preserves_slope_coords(self, synthetic_pro, tmp_path):
-        """Test that append_latest preserves slope coordinates.
-        
-        Bug: coords='minimal' in concat operations within append_latest() caused
-        slope coordinates to be dropped or become NaN.
-        Fix: Changed to coords='all' in all concat operations.
+        """Test that append_latest preserves slope coordinate values.
+
+        Bug: Coordinate/data variable mismatch during concat caused ValueError when
+        mixing cached NetCDF data (slope coords as data vars) with fresh .pro files
+        (slope coords as coordinates).
+        Fix: Convert slope coordinates to data variables before concat to ensure
+        consistent structure.
         """
         archive_dir = tmp_path / "archive"
-        archive_dir.mkdir()
+        archive_dir.mkdir() 
         
         # Create initial data with valid slope coordinates
         synthetic_pro.varying_layers(
@@ -539,8 +541,8 @@ class TestSlopeCoordinateBugFixes:
         ds_updated = ds_cached.append_latest(archive_dir)
         
         # BUG CHECK: Slope coordinates should still be valid after append_latest
-        assert 'inclination' in ds_updated.data.coords
-        assert 'azimuth' in ds_updated.data.coords
+        assert 'inclination' in ds_updated.data.data_vars
+        assert 'azimuth' in ds_updated.data.data_vars
         
         updated_incl = float(ds_updated.data.inclination.values.flat[0])
         updated_azi = float(ds_updated.data.azimuth.values.flat[0])

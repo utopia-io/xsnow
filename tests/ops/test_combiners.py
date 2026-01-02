@@ -126,9 +126,9 @@ def test_concat_inner_uses_inner_for_time_but_union_for_layer():
     assert list(result["layer"].values) == [0, 1, 2]
 
     # Shape: realization x time x layer
-    assert result.dims["realization"] == 2
-    assert result.dims["time"] == 1
-    assert result.dims["layer"] == 3
+    assert result.sizes["realization"] == 2
+    assert result.sizes["time"] == 1
+    assert result.sizes["layer"] == 3
 
     # assert explicit values
     v = result["v"]
@@ -1492,6 +1492,13 @@ def test_merge_augment_with_smets_ignores_profile_status(
     """
     xs_layered = snp_gridded_xs
     xs_smets = snp_gridded_smets_xs
+    
+    slope_coords = ['azimuth', 'inclination', 'aspect']
+    for coord in slope_coords:
+        if coord in xs_layered.coords:
+            xs_layered = xs_layered.reset_coords(coord)
+        if coord in xs_smets.coords:
+            xs_smets = xs_smets.reset_coords(coord)
 
     met_vars = ["TA", "RH", "VW", "DW", "ISWR", "profile_status"]
     have_any_met = any(v in xs_layered.data_vars for v in met_vars)

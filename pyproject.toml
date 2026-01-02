@@ -27,6 +27,7 @@ dependencies = [
     "matplotlib>=3.10.6",
     "folium>=0.20.0",
 ]
+
 keywords = ["snow", "stratigraphy", "avalanche", "xarray", "post-processing"]
 classifiers = [
   "License :: OSI Approved :: GNU Affero General Public License v3",

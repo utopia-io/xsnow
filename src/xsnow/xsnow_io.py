@@ -2265,6 +2265,16 @@ def append_latest(existing_ds: xsnowDataset, source: Union[str, List[str], Path]
             )
 
     JoinMode = Literal["left", "right", "outer", "inner", "union"]
+    
+    # Fix: Convert slope coordinates to data variables to prevent concat mismatch
+    # Cached NetCDF data has them as data vars, fresh .pro files have them as coords
+    slope_coords = ['azimuth', 'inclination', 'aspect']
+    for coord in slope_coords:
+        if coord in base_filtered.coords:
+            base_filtered = base_filtered.reset_coords(coord)
+        if coord in new_data.coords:
+            new_data = new_data.reset_coords(coord)
+    
     combined = xsnow_concat(
         [existing_ds.__class__(base_filtered), xsnowDataset(new_data)],
         dim="time",

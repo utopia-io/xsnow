@@ -197,6 +197,16 @@ def _combine_two(
             copy=False,
         )
 
+    # 1.5) Normalize slope coordinates to data variables immediately
+    # This must happen before _ensure_profile_status or any alignment
+    # to avoid ambiguous coordinate/variable errors (MergeError) downstream.
+    slope_coords = ['azimuth', 'inclination', 'aspect']
+    for coord in slope_coords:
+        if coord in left.coords:
+            left = left.reset_coords(coord)
+        if coord in right.coords:
+            right = right.reset_coords(coord)
+
     # 2) Ensure profile_status on both; align
     left = _ensure_profile_status(left)
     right = _ensure_profile_status(right)
@@ -206,7 +216,7 @@ def _combine_two(
     )
     status_left = status_left.astype("float32").fillna(0).astype("i1")
     status_right = status_right.astype("float32").fillna(0).astype("i1")
-
+               
     # Valid profile mask on core dims (status >= 1 means valid profile)
     has_left = status_left >= 1
     has_right = status_right >= 1
@@ -217,7 +227,7 @@ def _combine_two(
 
     # 3) Prepare output as a copy of left (coords + attrs)
     out = left.copy()
-
+    
     # Build combined profile_status explicitly
     combined_status = xr.where(
         use_left_core,
