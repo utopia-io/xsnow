@@ -123,8 +123,36 @@ class ZarrTestHelper:
 
 @pytest.fixture
 def sample_data_dir():
-    """Fixture providing sample data directory."""
-    return snp_gridded_dir()
+    """Fixture providing sample data directory with actual .pro files."""
+    # Get base cache directory
+    cache_dir = snp_gridded_dir()
+    cache_path = Path(cache_dir)
+    
+    # Try to find .pro files in common locations
+    search_paths = [
+        cache_path / 'pros' / 'gridded',
+        cache_path / 'pros',
+        cache_path,
+    ]
+    
+    for search_path in search_paths:
+        if search_path.exists():
+            pro_files = list(search_path.glob('*.pro'))
+            if pro_files:
+                print(f"\n✅ Found {len(pro_files)} .pro files in {search_path}")
+                return str(search_path)
+    
+    # If no .pro files found anywhere, try searching recursively
+    all_pro_files = list(cache_path.rglob('*.pro'))
+    if all_pro_files:
+        # Use parent directory of first file found
+        data_dir = all_pro_files[0].parent
+        print(f"\n✅ Found .pro files in {data_dir}")
+        return str(data_dir)
+    
+    # Last resort: return cache dir and hope xsnow.read can handle it
+    print(f"\n⚠️ No .pro files found, returning cache dir: {cache_dir}")
+    return str(cache_dir)
 
 
 @pytest.fixture
@@ -151,11 +179,18 @@ def test_read_sample_data_eager(sample_data_dir):
     print(f"\n{'='*70}")
     print("TEST: Read Sample Data (Eager)")
     print(f"{'='*70}")
+    print(f"Sample data directory: {sample_data_dir}")
     
-    # Read with eager loading
-    ds = xsnow.read(sample_data_dir, lazy=False)
+    # Verify directory has files
+    sample_path = Path(sample_data_dir)
+    pro_files = list(sample_path.glob('*.pro'))
+    smet_files = list(sample_path.glob('*.smet'))
+    print(f"Found {len(pro_files)} .pro files, {len(smet_files)} .smet files")
     
-    assert ds is not None, "Dataset is None"
+    # Read with eager loading (n_workers=1 to avoid multiprocessing issues in pytest)
+    ds = xsnow.read(sample_data_dir, lazy=False, n_workers=1)
+    
+    assert ds is not None, f"Dataset is None. Directory: {sample_data_dir}"
     assert ds.data is not None, "Dataset.data is None"
     
     data = ds.data
@@ -166,7 +201,7 @@ def test_read_sample_data_eager(sample_data_dir):
     
     # Check some data
     print(f"✅ Loaded eagerly")
-    print(f"  Dimensions: {dict(data.dims)}")
+    print(f"  Dimensions: {dict(data.sizes)}")
     print(f"  Variables: {len(data.data_vars)}")
     print(f"  Coordinates: {list(data.coords)}")
 
@@ -177,8 +212,8 @@ def test_read_sample_data_lazy(sample_data_dir):
     print("TEST: Read Sample Data (Lazy)")
     print(f"{'='*70}")
     
-    # Read with lazy loading
-    ds = xsnow.read(sample_data_dir, lazy=True)
+    # Read with lazy loading (n_workers=1 to avoid multiprocessing issues in pytest)
+    ds = xsnow.read(sample_data_dir, lazy=True, n_workers=1)
     
     assert ds is not None, "Dataset is None"
     assert ds.data is not None, "Dataset.data is None"
@@ -195,7 +230,7 @@ def test_read_sample_data_lazy(sample_data_dir):
             print(f"✅ Variable '{var}' is lazy (has chunks)")
             break
     
-    print(f"  Dimensions: {dict(data.dims)}")
+    print(f"  Dimensions: {dict(data.sizes)}")
     print(f"  Variables: {len(data.data_vars)}")
 
 
@@ -210,7 +245,7 @@ def test_write_zarr_basic(sample_data_dir, temp_zarr_dir, helper):
     print(f"{'='*70}")
     
     # Read sample data
-    ds = xsnow.read(sample_data_dir, lazy=False)
+    ds = xsnow.read(sample_data_dir, lazy=False, n_workers=1)
     data = ds.data
     
     # Prepare for save
@@ -244,13 +279,23 @@ def test_write_zarr_with_int8(sample_data_dir, temp_zarr_dir, helper):
     print(f"{'='*70}")
     
     # Read sample data
-    ds = xsnow.read(sample_data_dir, lazy=False)
+    ds = xsnow.read(sample_data_dir, lazy=False, n_workers=1)
     data = ds.data
     
-    # Add a test int8 variable
+    # Get actual dimensions
+    n_locations = len(data.location)
+    n_times = len(data.time)
+    print(f"  Dataset dimensions: location={n_locations}, time={n_times}")
+    
+    # Add a test int8 variable matching actual dimensions
+    test_array = np.full((n_locations, n_times), 1, dtype='int8')
+    test_array[0, 0] = 2  # Add some variation
+    test_array[0, 1] = -128  # Test the fill value
+    
     data['test_int8'] = xr.DataArray(
-        np.array([[1, 2, -128]], dtype='int8'),
+        test_array,
         dims=['location', 'time'],
+        coords={'location': data.location, 'time': data.time},
         attrs={'description': 'Test int8 variable'}
     )
     
@@ -283,7 +328,7 @@ def test_read_zarr_eager(sample_data_dir, temp_zarr_dir, helper):
     print(f"{'='*70}")
     
     # Create Zarr file first
-    ds = xsnow.read(sample_data_dir, lazy=False)
+    ds = xsnow.read(sample_data_dir, lazy=False, n_workers=1)
     data = ds.data
     data_preprocessed = helper.preprocess_for_merge(data)
     chunks = helper.get_optimal_chunks(data_preprocessed)
@@ -308,7 +353,7 @@ def test_read_zarr_eager(sample_data_dir, temp_zarr_dir, helper):
     assert len(ds_read.dims) > 0, "No dimensions"
     
     print(f"✅ Read successfully (eager)")
-    print(f"  Dimensions: {dict(ds_read.dims)}")
+    print(f"  Dimensions: {dict(ds_read.sizes)}")
     print(f"  Variables: {len(ds_read.data_vars)}")
 
 
@@ -319,7 +364,7 @@ def test_read_zarr_lazy(sample_data_dir, temp_zarr_dir, helper):
     print(f"{'='*70}")
     
     # Create Zarr file first
-    ds = xsnow.read(sample_data_dir, lazy=False)
+    ds = xsnow.read(sample_data_dir, lazy=False, n_workers=1)
     data = ds.data
     data_preprocessed = helper.preprocess_for_merge(data)
     chunks = helper.get_optimal_chunks(data_preprocessed)
@@ -346,7 +391,7 @@ def test_read_zarr_lazy(sample_data_dir, temp_zarr_dir, helper):
             break
     
     assert has_chunks, "Data not lazy loaded"
-    print(f"  Dimensions: {dict(ds_read.dims)}")
+    print(f"  Dimensions: {dict(ds_read.sizes)}")
 
 
 # =============================================================================
@@ -360,7 +405,7 @@ def test_roundtrip_eager(sample_data_dir, temp_zarr_dir, helper):
     print(f"{'='*70}")
     
     # Read original
-    ds_orig = xsnow.read(sample_data_dir, lazy=False)
+    ds_orig = xsnow.read(sample_data_dir, lazy=False, n_workers=1)
     data_orig = ds_orig.data
     
     # Save to Zarr
@@ -414,7 +459,7 @@ def test_roundtrip_lazy(sample_data_dir, temp_zarr_dir, helper):
     print(f"{'='*70}")
     
     # Read original (lazy)
-    ds_orig = xsnow.read(sample_data_dir, lazy=True)
+    ds_orig = xsnow.read(sample_data_dir, lazy=True, n_workers=1)
     data_orig = ds_orig.data
     
     # Save to Zarr
@@ -454,7 +499,7 @@ def test_adaptive_chunking_profile_data(sample_data_dir, helper):
     print(f"{'='*70}")
     
     # Read sample data (likely has layer dimension)
-    ds = xsnow.read(sample_data_dir, lazy=False)
+    ds = xsnow.read(sample_data_dir, lazy=False, n_workers=1)
     data = ds.data
     
     # Get chunks
@@ -515,7 +560,7 @@ def test_preprocess_slope_coordinates(sample_data_dir, helper):
     print(f"{'='*70}")
     
     # Read sample data
-    ds = xsnow.read(sample_data_dir, lazy=False)
+    ds = xsnow.read(sample_data_dir, lazy=False, n_workers=1)
     data = ds.data
     
     print(f"  Original coordinates: {list(data.coords)}")
@@ -592,7 +637,7 @@ def test_compare_eager_vs_lazy_write(sample_data_dir, temp_zarr_dir, helper):
     # Test eager
     print("  Testing EAGER loading...")
     start = time.time()
-    ds_eager = xsnow.read(sample_data_dir, lazy=False)
+    ds_eager = xsnow.read(sample_data_dir, lazy=False, n_workers=1)
     data_eager = ds_eager.data
     data_preprocessed = helper.preprocess_for_merge(data_eager)
     chunks = helper.get_optimal_chunks(data_preprocessed)
@@ -611,7 +656,7 @@ def test_compare_eager_vs_lazy_write(sample_data_dir, temp_zarr_dir, helper):
     # Test lazy
     print("  Testing LAZY loading...")
     start = time.time()
-    ds_lazy = xsnow.read(sample_data_dir, lazy=True)
+    ds_lazy = xsnow.read(sample_data_dir, lazy=True, n_workers=1)
     data_lazy = ds_lazy.data
     data_preprocessed = helper.preprocess_for_merge(data_lazy)
     chunks = helper.get_optimal_chunks(data_preprocessed)
