@@ -20,7 +20,7 @@ from ..plugin import register_xsnowDataset_method
 from ..registry import registry
 from ..utils import get_logger
 
-from .base import _round_coord, _sanitize_station_name
+from .base import _open_any_as_text, _round_coord, _sanitize_station_name
 
 
 def _read_smet_files(
@@ -95,7 +95,7 @@ def read_smet(
 
     header = {}
     data_start_line = -1
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with _open_any_as_text(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
         for i, line in enumerate(f):
             if line.strip() == '[DATA]':
                 data_start_line = i + 1
@@ -273,7 +273,7 @@ def to_smet(
     # Squeeze and convert to dataframe, keeping only data variables
     df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()
 
-    with open(path, 'w') as f:
+    with _open_any_as_text(path, 'wt') as f:
         f.write("SMET 1.1 ASCII\n")
         f.write("[HEADER]\n")
         f.write(f"station_name = {ds.location.item()}\n")

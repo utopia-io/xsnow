@@ -7,9 +7,13 @@ I/O modules (pro, smet, netcdf, zarr).
 """
 from __future__ import annotations
 
+import bz2
+import gzip
+import lzma
 import re
 import logging
-from typing import Dict, Any, Optional, List
+from pathlib import Path
+from typing import Dict, Any, IO, Optional, List, Union
 from collections import Counter
 
 import numpy as np
@@ -44,6 +48,34 @@ HEADER_MAP: Dict[str, str] = {
     'TimeZone=': 'tz',
     'timezone=': 'tz',
 }
+
+PRO_FILE_REGEX = re.compile(r".*\.pro(|\.gz|\.bz2|\.xz)$")
+SMET_FILE_REGEX = re.compile(r".*\.smet(|\.gz|\.bz2|\.xz)$")
+
+
+def _ext_is(filename: Union[str, Path], ext: str) -> bool:
+    """Determine extension for str or Path."""
+    if isinstance(filename, str):
+        return filename.endswith(ext)
+    elif isinstance(filename, Path):
+        return filename.suffix == ext
+    else:
+        raise ValueError(f"Unsupported filename type: {type(filename)}")
+
+
+def _open_any_as_text(filename: Union[str, Path], mode="rt", encoding="utf-8", **kwargs) -> IO:
+    """Opens either uncompressed or compressed file in text mode. For compatability across different
+    `open` implementations, mode is always coerced to text mode."""
+    if "t" not in mode:
+        mode += "t"
+    if _ext_is(filename, ".gz"):
+        return gzip.open(filename, mode, encoding=encoding, **kwargs)
+    elif _ext_is(filename, ".bz2"):
+        return bz2.open(filename, mode, encoding=encoding, **kwargs)
+    elif _ext_is(filename, ".xz"):
+        return lzma.open(filename, mode, encoding=encoding, **kwargs)
+    else:
+        return open(filename, mode, encoding=encoding, **kwargs)
 
 
 def _round_coord(val: Any, ndigits: int = 6) -> float:
