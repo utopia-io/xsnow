@@ -5,7 +5,7 @@ Focus: Core coordinate functionality independent of I/O.
 """
 import pytest
 import numpy as np
-from xsnow.xsnow_io import _sanitize_station_name, _handle_duplicate_names
+from xsnow.io.base import _handle_duplicate_names, _sanitize_station_name
 
 
 class TestStationNameSanitization:

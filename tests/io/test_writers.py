@@ -311,7 +311,7 @@ def test_to_smet_only_exports_time_series(real_file_subset, tmp_path):
     ds.to_smet(output_file)
     
     # Read back and check
-    from xsnow.xsnow_io import read_smet
+    from xsnow.io.smet import read_smet
     ds_smet = read_smet(output_file)
     
     # Should have no layer dimension

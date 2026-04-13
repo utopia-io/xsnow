@@ -6,7 +6,7 @@ Focus: Correct synthesis and addition of surface hoar layers.
 import pytest
 import numpy as np
 from xsnow import read
-from xsnow.xsnow_io import _read_pro_raw
+from xsnow.io.pro import _read_pro_raw
 
 
 @pytest.mark.synthetic

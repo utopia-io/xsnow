@@ -16,14 +16,14 @@ import pandas as pd
 import xarray as xr
 from pathlib import Path
 
-from xsnow.xsnow_io import (
-    _read_pro_raw,
+from xsnow.io.pro import (
     _create_pro_dataset,
-    read_smet,
-    _scan_pro_for_max_layers,
     _get_layer_count,
-    _read_pro_metadata
+    _read_pro_metadata,
+    _read_pro_raw,
+    _scan_pro_for_max_layers,
 )
+from xsnow.io.smet import read_smet
 
 
 # ============================================================================

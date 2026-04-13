@@ -316,13 +316,13 @@ class TestBenchmarks:
         
         # Benchmark file discovery
         timer.start('file_discovery')
-        from xsnow.xsnow_io import _resolve_filepaths
+        from xsnow.io.merge import _resolve_filepaths
         pro_files, smet_files = _resolve_filepaths(data_dir)
         timer.stop('file_discovery')
         
         # Benchmark pre-scan
         timer.start('pre_scan')
-        from xsnow.xsnow_io import _scan_pro_for_max_layers
+        from xsnow.io.pro import _scan_pro_for_max_layers
         max_layers = max(_scan_pro_for_max_layers(fp, True, True) for fp in pro_files)
         timer.stop('pre_scan')
         
