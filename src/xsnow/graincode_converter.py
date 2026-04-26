@@ -46,11 +46,11 @@ def _primary_labels_SLF(codes: np.ndarray) -> np.ndarray:
     """
     Vectorized primary ICSSG label computation from 1/2/3-digit SLF codes.
     codes: numpy array of float/int; NaN allowed
-    returns: numpy object array of labels or None for missing/invalid
+    returns: numpy object array of labels or nan for missing/invalid
     """
     a = codes.astype("float64", copy=False)  # for NaN support
     out = np.empty(a.shape, dtype=object)
-    out[:] = None  # default
+    out[:] = np.nan  # default
 
     valid = ~np.isnan(a)
     if not np.any(valid):
@@ -101,7 +101,7 @@ def _secondary_labels_SLF(codes: np.ndarray) -> np.ndarray:
     """
     a = codes.astype("float64", copy=False)
     out = np.empty(a.shape, dtype=object)
-    out[:] = None
+    out[:] = np.nan
 
     valid = ~np.isnan(a)
     if not np.any(valid):
@@ -159,7 +159,7 @@ def slf_graincode_to_ICSSG_primary(
     >>> import xarray as xr
     >>> codes = xr.DataArray([3, 33, 332, np.nan])
     >>> slf_graincode_to_ICSSG_primary(codes).values
-    array(['RG', 'RG', 'MFcr', None], dtype=object)
+    array(['RG', 'RG', 'MFcr', nan], dtype=object)
     """
     if isinstance(graincodes, xr.DataArray):
         labels = xr.apply_ufunc(
@@ -202,7 +202,7 @@ def slf_graincode_to_ICSSG_secondary(
     >>> import xarray as xr
     >>> codes = xr.DataArray([3, 33, 332, np.nan])
     >>> slf_graincode_to_ICSSG_secondary(codes).values
-    array(['RG', 'RG', 'RG', None], dtype=object)
+    array(['RG', 'RG', 'RG', nan], dtype=object)
     """
     if isinstance(graincodes, xr.DataArray):
         labels = xr.apply_ufunc(

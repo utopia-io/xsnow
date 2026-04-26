@@ -105,7 +105,7 @@ class LabelsAccessor:
                 pass
             if isinstance(v, np.integer):
                 v = int(v)
-            return self._mapping.get(v, None)
+            return self._mapping.get(v, np.nan)
 
         return xr.apply_ufunc(
             np.vectorize(_lookup, otypes=[object]),
@@ -544,11 +544,8 @@ def _normalize_tz_attr_value(tz: Union[int, float, ZoneInfo, str]) -> str:
 
 def _as_datetime_index(values) -> pd.DatetimeIndex:
     """
-    Return a pandas.DatetimeIndex for either scalar or array-like datetime64[ns] values.
+    Return a pandas.DatetimeIndex for either scalar or array-like datetime64 values.
     """
-    # Ensure numpy datetime64[ns] array, even for scalars
     if np.ndim(values) == 0:
-        arr = np.array([values], dtype="datetime64[ns]")
-    else:
-        arr = np.asarray(values).astype("datetime64[ns]", copy=False)
-    return pd.DatetimeIndex(arr)
+        return pd.DatetimeIndex([values])
+    return pd.DatetimeIndex(np.asarray(values))

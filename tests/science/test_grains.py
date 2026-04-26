@@ -1,7 +1,6 @@
 import pytest
 import xarray as xr
 import numpy as np
-import xsnow
 from xsnow.graincode_converter import slf_graincode_to_ICSSG_primary, slf_graincode_to_ICSSG_secondary
 
 
@@ -52,13 +51,9 @@ def test_nan_and_invalid_handling():
     prim = slf_graincode_to_ICSSG_primary(da)
     sec  = slf_graincode_to_ICSSG_secondary(da)
 
-    # Expect missing for NaN/invalid positions; 'MFcr' for 332 primary; 'RG' for 332 secondary
-    # xarray may return nan (float) or None for missing — use pd.isna for comparison
-    import pandas as pd
-    prim_list = prim.to_series().tolist()
-    sec_list  = sec.to_series().tolist()
-    assert pd.isna(prim_list[0]) and pd.isna(prim_list[1]) and prim_list[2] == "MFcr" and pd.isna(prim_list[3])
-    assert pd.isna(sec_list[0])  and pd.isna(sec_list[1])  and sec_list[2]  == "RG"   and pd.isna(sec_list[3])
+    # Expect nan for missing/invalid; 'MFcr' for 332 primary; 'RG' for 332 secondary
+    xr.testing.assert_equal(prim, xr.DataArray(np.array([np.nan, np.nan, "MFcr", np.nan], dtype=object)))
+    xr.testing.assert_equal(sec,  xr.DataArray(np.array([np.nan, np.nan, "RG",   np.nan], dtype=object)))
 
 
 def test_shape_and_coords_preserved():
