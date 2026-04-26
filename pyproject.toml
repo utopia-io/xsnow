@@ -16,7 +16,7 @@ authors = [
 dependencies = [
     "netcdf4>=1.7.2",
     "numpy>=2.3.2",
-    "pandas>=2.3.1",
+    "pandas>=2.3.1, <4",
     "xarray>=2025.7.1",
     "scipy>=1.16.1",
     "bottleneck>=1.5.0",
@@ -41,7 +41,6 @@ classifiers = [
 testing = [
   "pytest>=8.0",
   "pytest-cov",
-  "pytz>=2024.1",
   "psutil>=7.1.0",
   "pytest-benchmark>=5.1.0",
   "memory-profiler>=0.61.0",

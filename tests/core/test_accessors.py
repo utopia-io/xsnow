@@ -5,10 +5,16 @@ import numpy as np
 import pandas as pd
 import warnings
 import xarray as xr
-import pytz
 import xsnow
-from zoneinfo import ZoneInfo
-from xsnow import accessors
+
+# In pandas 2, tz_localize throws pytz exceptions, but throws ValueError in pandas 3
+if pd.__version__ >= "3":
+    _NonExistentTimeError = ValueError
+    _AmbiguousTimeError = ValueError
+else:
+    from pytz.exceptions import NonExistentTimeError as _NonExistentTimeError
+    from pytz.exceptions import AmbiguousTimeError as _AmbiguousTimeError
+
 from xsnow.sample_data import snp_snowobs_dir
 
 @pytest.fixture
@@ -140,21 +146,29 @@ def empty_time_coord():
         attrs={"timezone": "UTC"},
     )
 
+def _assert_str_nan_equal(actual, expected):
+    """Assert two object arrays are equal, treating nan as equal to nan."""
+    actual = np.asarray(actual, dtype=object)
+    expected = np.asarray(expected, dtype=object)
+    _isnan = np.frompyfunc(lambda x: isinstance(x, float) and np.isnan(x), 1, 1)
+    nan_a = _isnan(actual).astype(bool)
+    nan_e = _isnan(expected).astype(bool)
+    assert np.array_equal(nan_a, nan_e)
+    assert np.array_equal(actual[~nan_a], expected[~nan_e])
+
+
 ## ------- LabelsAccessor ----------------------------------- ##
 def test_labels_accessor_get(indexed_coord):
     """
     Tests that the .labels.get() method successfully retrieves the DataArray of labels.
     """
-    expected_vals = ['station_A', 'station_A', 'station_B', None]
+    expected_da = xr.DataArray(
+        np.array(['station_A', 'station_A', 'station_B', np.nan], dtype=object),
+        dims=['location'], name='location')
     actual_da = indexed_coord.labels.get()
 
     assert isinstance(actual_da, xr.DataArray)
-    # Use pandas for comparison since None == None is False in numpy
-    pd.testing.assert_series_equal(
-        pd.Series(actual_da.values),
-        pd.Series(expected_vals),
-        check_names=False,
-    )
+    xr.testing.assert_equal(actual_da, expected_da)
 
 def test_labels_accessor_get_dict(indexed_coord):
     """
@@ -197,27 +211,20 @@ def test_icssg_accessor_on_snowobs_data():
         341., 421., 430., 431., 440., 450., 490., 550., 591., 660., 770.,
         772., 951., 990., np.nan
     ])
-    expected_primary = np.array([
+    expected_primary = [
         'PP', 'PP', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'RG', 'RG',
         'RG', 'FC', 'FC', 'FC', 'FC', 'FC', 'FC', 'DH', 'DH', 'SH', 'MF',
         'MFcr', 'FCxr', 'FCxr', np.nan
-    ], dtype=object)
-    expected_secondary = np.array([
+    ]
+    expected_secondary = [
         'PP', 'DF', 'PP', 'PP', 'DF', 'RG', 'RG', 'FC', 'FC', 'DF', 'RG',
         'FC', 'DF', 'RG', 'RG', 'FC', 'DH', 'FCxr', 'DH', 'FCxr', 'SH',
         'MF', 'MF', 'DH', 'FCxr', np.nan
-    ], dtype=object)
-
-    def _array_eq_nan_none(a, b):
-        """Compare object arrays treating nan and None as equal missing values."""
-        a_null = np.array([x is None or (isinstance(x, float) and np.isnan(x)) for x in a])
-        b_null = np.array([x is None or (isinstance(x, float) and np.isnan(x)) for x in b])
-        return (np.array_equal(a_null, b_null) and
-                np.array_equal(np.asarray(a)[~a_null], np.asarray(b)[~b_null]))
+    ]
 
     assert np.array_equal(unique_codes, expected_codes, equal_nan=True)
-    assert _array_eq_nan_none(unique_primary, expected_primary)
-    assert _array_eq_nan_none(unique_secondary, expected_secondary)
+    _assert_str_nan_equal(unique_primary, expected_primary)
+    _assert_str_nan_equal(unique_secondary, expected_secondary)
 
 ## ------- TimezoneAccessor ----------------------------------- ##
 def test_set_get_attr(ds):
@@ -259,7 +266,7 @@ def test_localize_as_series(ds):
     pd.testing.assert_index_equal(ser.index, ds.indexes["time"])
 
 def test_localize_handles_nonexistent_times(dst_gap_time_coord):
-    with pytest.raises((pytz.NonExistentTimeError, ValueError)):
+    with pytest.raises(_NonExistentTimeError):
         dst_gap_time_coord.tz.localize()
 
     shifted = dst_gap_time_coord.tz.localize(nonexistent="shift_forward")
@@ -271,7 +278,7 @@ def test_localize_handles_nonexistent_times(dst_gap_time_coord):
     assert nat_idx.isna().sum() == 2  # nonexistent times become NaT
 
 def test_localize_handles_ambiguous_times(dst_fall_time_coord):
-    with pytest.raises((pytz.AmbiguousTimeError, ValueError)):
+    with pytest.raises(_AmbiguousTimeError):
         dst_fall_time_coord.tz.localize()
 
     ambiguous_as_nat = dst_fall_time_coord.tz.localize(ambiguous="NaT")
