@@ -2279,6 +2279,7 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
     # Squeeze and convert to dataframe, keeping only data variables
     df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()  # ADD drop=True
 
+    _nodata = -999.0
     with open(path, 'w') as f:
         f.write("SMET 1.1 ASCII\n")
         f.write("[HEADER]\n")
@@ -2291,13 +2292,22 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
         f.write(f"latitude = {lat:.4f}\n")
         f.write(f"longitude = {lon:.4f}\n")
         f.write(f"altitude = {alt:.0f}\n")
-        f.write("nodata = -999\n")
+        f.write("nodata = {_nodata}\n")
         fields = "timestamp " + " ".join(df.columns)
         f.write(f"fields = {fields}\n")
         f.write("[DATA]\n")
 
     df.index.name = 'timestamp'
-    df.to_csv(path, sep=' ', mode='a', header=False, date_format='%Y-%m-%dT%H:%M:%S')
+    df.to_csv(
+            path,
+            sep='\t',
+            mode='a',
+            na_repr=_nodata,
+            header=False,
+            quoting=3,  # no quotes around strings
+            float_format='%.5f',
+            date_format='%Y-%m-%dT%H:%M:%S'
+    )
     logging.info(f"Dataset successfully saved to {path}")
 
 
