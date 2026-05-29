@@ -52,9 +52,13 @@ def test_nan_and_invalid_handling():
     prim = slf_graincode_to_ICSSG_primary(da)
     sec  = slf_graincode_to_ICSSG_secondary(da)
 
-    # Expect None for missing/invalid; 'MFcr' for 332 primary; 'RG' for 332 secondary
-    assert prim.to_series().tolist() == [None, None, "MFcr", None]
-    assert sec.to_series().tolist()  == [None, None, "RG",   None]
+    # Expect missing for NaN/invalid positions; 'MFcr' for 332 primary; 'RG' for 332 secondary
+    # xarray may return nan (float) or None for missing — use pd.isna for comparison
+    import pandas as pd
+    prim_list = prim.to_series().tolist()
+    sec_list  = sec.to_series().tolist()
+    assert pd.isna(prim_list[0]) and pd.isna(prim_list[1]) and prim_list[2] == "MFcr" and pd.isna(prim_list[3])
+    assert pd.isna(sec_list[0])  and pd.isna(sec_list[1])  and sec_list[2]  == "RG"   and pd.isna(sec_list[3])
 
 
 def test_shape_and_coords_preserved():

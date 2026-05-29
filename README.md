@@ -10,6 +10,19 @@ Visit [**xsnow.avacollabra.org**](xsnow.avacollabra.org) for more detailed infor
 
 
 
+## Installation
+
+```bash
+pip install xsnow
+```
+
+To run the test suite:
+
+```bash
+pip install xsnow[testing]
+pytest
+```
+
 ##### Getting involved
 We are looking for community feedback on bugs and suggestions for improvement (API, code implementation, etc).  
 Check out the website section [Contributing to xsnow](https://xsnow.avacollabra.org/dev/tutorials/contributing2xsnow.html) for more details and ways for getting involved.

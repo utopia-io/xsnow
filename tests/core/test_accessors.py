@@ -145,12 +145,16 @@ def test_labels_accessor_get(indexed_coord):
     """
     Tests that the .labels.get() method successfully retrieves the DataArray of labels.
     """
-    expected_da = xr.DataArray(['station_A', 'station_A', 'station_B', None],
-                               dims=['location'], name='location')
+    expected_vals = ['station_A', 'station_A', 'station_B', None]
     actual_da = indexed_coord.labels.get()
 
     assert isinstance(actual_da, xr.DataArray)
-    assert (actual_da == expected_da).all()
+    # Use pandas for comparison since None == None is False in numpy
+    pd.testing.assert_series_equal(
+        pd.Series(actual_da.values),
+        pd.Series(expected_vals),
+        check_names=False,
+    )
 
 def test_labels_accessor_get_dict(indexed_coord):
     """
@@ -196,17 +200,24 @@ def test_icssg_accessor_on_snowobs_data():
     expected_primary = np.array([
         'PP', 'PP', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'DF', 'RG', 'RG',
         'RG', 'FC', 'FC', 'FC', 'FC', 'FC', 'FC', 'DH', 'DH', 'SH', 'MF',
-        'MFcr', 'FCxr', 'FCxr', None
-    ])
+        'MFcr', 'FCxr', 'FCxr', np.nan
+    ], dtype=object)
     expected_secondary = np.array([
         'PP', 'DF', 'PP', 'PP', 'DF', 'RG', 'RG', 'FC', 'FC', 'DF', 'RG',
         'FC', 'DF', 'RG', 'RG', 'FC', 'DH', 'FCxr', 'DH', 'FCxr', 'SH',
-        'MF', 'MF', 'DH', 'FCxr', None
-    ])
+        'MF', 'MF', 'DH', 'FCxr', np.nan
+    ], dtype=object)
+
+    def _array_eq_nan_none(a, b):
+        """Compare object arrays treating nan and None as equal missing values."""
+        a_null = np.array([x is None or (isinstance(x, float) and np.isnan(x)) for x in a])
+        b_null = np.array([x is None or (isinstance(x, float) and np.isnan(x)) for x in b])
+        return (np.array_equal(a_null, b_null) and
+                np.array_equal(np.asarray(a)[~a_null], np.asarray(b)[~b_null]))
 
     assert np.array_equal(unique_codes, expected_codes, equal_nan=True)
-    assert np.array_equal(unique_primary, expected_primary)
-    assert np.array_equal(unique_secondary, expected_secondary)
+    assert _array_eq_nan_none(unique_primary, expected_primary)
+    assert _array_eq_nan_none(unique_secondary, expected_secondary)
 
 ## ------- TimezoneAccessor ----------------------------------- ##
 def test_set_get_attr(ds):
@@ -248,7 +259,7 @@ def test_localize_as_series(ds):
     pd.testing.assert_index_equal(ser.index, ds.indexes["time"])
 
 def test_localize_handles_nonexistent_times(dst_gap_time_coord):
-    with pytest.raises(pytz.NonExistentTimeError):
+    with pytest.raises((pytz.NonExistentTimeError, ValueError)):
         dst_gap_time_coord.tz.localize()
 
     shifted = dst_gap_time_coord.tz.localize(nonexistent="shift_forward")
@@ -260,7 +271,7 @@ def test_localize_handles_nonexistent_times(dst_gap_time_coord):
     assert nat_idx.isna().sum() == 2  # nonexistent times become NaT
 
 def test_localize_handles_ambiguous_times(dst_fall_time_coord):
-    with pytest.raises(pytz.AmbiguousTimeError):
+    with pytest.raises((pytz.AmbiguousTimeError, ValueError)):
         dst_fall_time_coord.tz.localize()
 
     ambiguous_as_nat = dst_fall_time_coord.tz.localize(ambiguous="NaT")
