@@ -2302,7 +2302,7 @@ def to_smet(ds: xsnowDataset, path: Union[str, Path], max_files: int | None = No
             path,
             sep='\t',
             mode='a',
-            na_repr=_nodata,
+            na_rep=_nodata,
             header=False,
             quoting=3,  # no quotes around strings
             float_format='%.5f',
