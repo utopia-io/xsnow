@@ -1,6 +1,6 @@
 from collections.abc import Hashable, Mapping
 from pathlib import Path
-from typing import Any, Self, overload
+from typing import Any, overload
 
 import xarray as xr
 
@@ -34,7 +34,7 @@ class xsnowDataset(xr.Dataset):
 
     data: xr.Dataset
 
-    def __init__(self, source: xr.Dataset | Self) -> None: ...
+    def __init__(self, source: "xr.Dataset | xsnowDataset") -> None: ...
 
     @overload
     def __getitem__(self, key: Hashable) -> xr.DataArray: ...

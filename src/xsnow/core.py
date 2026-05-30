@@ -42,7 +42,7 @@ The package uses a physically intuitive vertical coordinate system.
 """
 
 from collections.abc import Hashable, Mapping
-from typing import Self, Sequence, Union, Any, List, Optional, overload
+from typing import Sequence, Union, Any, List, Optional, overload
 from pathlib import Path
 
 import pandas as pd
@@ -67,7 +67,7 @@ class xsnowDataset:
     _REPR_EST_BYTES_PER_SEC = 200 * 1024 * 1024  # heuristic throughput used for repr auto-compute
     _REPR_DASK_BLOCK_OVERHEAD = 0.005  # assumed per-block scheduler overhead for lazy arrays
 
-    def __init__(self, source: xr.Dataset | Self) -> None:
+    def __init__(self, source: "xr.Dataset | xsnowDataset") -> None:
         """
         Initializes the xsnowDataset from an existing xarray.Dataset.
 
@@ -675,7 +675,7 @@ class xsnowDataset:
     
     def update_profile_status(
         self,
-    ) -> Self:
+    ) -> "xsnowDataset":
         """
         Attach or update `profile_status` with very simple semantics:
 
