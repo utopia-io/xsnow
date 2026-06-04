@@ -375,8 +375,8 @@ StationName= STATION_{i}
 class TestBenchmarks:
     """Benchmark tests to quantify improvements."""
     
-    def test_smart_detection_vs_full_scan_speed(self, tmp_path, benchmark):
-        """Compare smart detection vs full scan performance."""
+    def test_smart_detection_speed(self, tmp_path, benchmark):
+        """Benchmark smart max_layers detection performance."""
         # Create 50 files (enough to show difference)
         for i in range(50):
             filepath = tmp_path / f"station_{i:03d}.pro"

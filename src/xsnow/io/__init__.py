@@ -57,7 +57,8 @@ __all__ = [
 
 def read(
     source: Union[str, List[str], Path, List[Path]],
-    recursive: bool = False, 
+    *,
+    recursive: bool = False,
     time: Optional[TimeLike] = None,
     location: Optional[LocationLike] = None,
     slope: Optional[SlopeLike] = None,
@@ -74,8 +75,11 @@ def read(
     Reads, parses, and combines snowpack data into a unified xsnowDataset.
 
     This is the primary user-facing function for loading data. It orchestrates
-    the discovery, parallel processing, and merging of snow profile (.pro)
-    and time series (.smet) files into a single, coherent dataset.
+    file discovery, optional parallel processing, and merging of snow profile
+    (.pro) and meteorological time series (.smet) files into one dataset.
+    NetCDF and Zarr are currently opened only as one direct source at a time:
+    a single .nc file or a single .zarr archive path. Direct multi-file
+    NetCDF/Zarr expansion and merging is not supported here.
 
     Args:
         source: The data source. Can be a path to a single file (e.g.,
@@ -93,31 +97,41 @@ def read(
             parallel processing (good for small to medium datasets). If None
             (default), auto-detect based on file count.
         lazy_threshold: Number of files above which lazy loading is enabled
-                       when lazy=None (auto-detect). Default: 30 files.
+            when lazy=None (auto-detect). Default: 30 files.
         parallel_lazy_creation: If True (default), parallelize the creation of lazy
             datasets using ThreadPoolExecutor. This speeds up the metadata parsing
             phase by 5-15x when working with hundreds or thousands of files.
         n_cpus_use: The number of CPU cores to use. If not provided, defaults
             to min(32, total_cores - 1), with a minimum of 1.
         logger: An optional, pre-configured logger instance.
-        chunks: Chunk sizes for dask arrays when lazy=True.       
-                Dict with keys 'time' and 'layer'.                  
-                Default: {'time': 100, 'layer': -1}                
+        chunks: Chunk sizes for dask arrays when lazy=True. Expected keys are
+            usually 'time' and 'layer'. Default: {'time': 100, 'layer': -1}.
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions:
-            - `max_layers`: Max layer dimension; `'auto'` (default) scans files to pick
-              the maximum, or set an int to force a fixed size.
-            - `force_smart_detection`: If True, skip file validation for smart detection.
-            - `validation_threshold_days`: Maximum time spread (in days) for files to be
-              considered homogeneous. Default: 7.0 days.
-            - `trim_padding`: If True, automatically trim NaN padding after loading.
+            - `max_layers`: Max layer dimension. `'auto'` (default) uses the
+              smart detector to scan the largest .pro files and add a buffer
+              when only a subset is scanned. Set an int to force a fixed layer
+              dimension.
+            - `force_smart_detection`: If True, skip the homogeneity validation
+              before smart max-layer detection. This is faster for known-safe
+              archives, but can be wrong for heterogeneous file sets.
+            - `validation_threshold_days`: Maximum file modification time
+              spread, in days, for files to be considered homogeneous by smart
+              detection. Default: 7.0 days.
+            - `trim_padding`: If True, automatically trim trailing all-NaN
+              padding after loading. For lazy datasets this calls
+              `trim_padding()` and therefore computes data to detect padding.
             - `remove_soil`: If True (default), drops soil layers during parsing.
             - `add_surface_sh_as_layer`: If True (default), inserts a surface hoar
               layer explicitly as layer when indicated by the PRO file.
-            - `norm_slopes`: Controls slope normalization. Options:
-                * `'auto'` (default): normalize when slopes are consistent.
-                * True: force normalization.
-                * False: skip normalization entirely.
+            - `norm_slopes`: Controls slope coordinate normalization during
+              final merging:
+                * `'auto'` (default): normalize when slopes are consistent
+                  across locations; preserve per-location slopes when they
+                  differ.
+                * True: force normalization to `(slope,)`, even if slope
+                  metadata varies by location.
+                * False: skip `normalize_slope_coords` entirely.
 
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
@@ -132,6 +146,9 @@ def read(
         
         >>> # Force eager loading with trimmed padding
         >>> ds = read("small_dataset/", lazy=False, trim_padding=True)
+
+        >>> # Use a fixed layer dimension when the smart detector is unsuitable
+        >>> ds = read("mixed_archive/", max_layers=120)
 
     See Also
     --------
@@ -251,4 +268,3 @@ def read(
         final_dataset = final_dataset.trim_padding()
     
     return final_dataset
-

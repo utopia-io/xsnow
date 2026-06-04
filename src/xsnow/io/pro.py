@@ -423,7 +423,9 @@ def _determine_max_layers_smart(
         validation_threshold_days: Maximum time spread for homogeneous files
         
     Returns:
-        Safe max_layers value (with 10% buffer if partial scan, exact if full scan)
+        Safe max_layers value. A 10% buffer is added when only a subset of
+        files is scanned; the result is exact only when every file is scanned
+        because the archive has 10 or fewer .pro files.
         
     Raises:
         ValueError: If validation fails and force=False
@@ -454,13 +456,16 @@ def _determine_max_layers_smart(
             logger.warning("  2. Force smart detection (fast but risky):")
             logger.warning("     ds = read(path, max_layers='auto', force_smart_detection=True)")
             logger.warning("")
-            logger.warning("  3. Use full scan (slower but safe):")
-            logger.warning("     ds = read(path, lazy=False)  # Scans all files exactly")
+            logger.warning("  3. Split the archive into homogeneous batches, or inspect")
+            logger.warning("     the files separately and pass a safe manual max_layers.")
+            logger.warning("")
+            logger.warning("Note: lazy=False still uses smart detection when max_layers='auto'.")
             logger.warning("=" * 70)
             
             raise ValueError(
                 f"Dataset validation failed for smart detection: {reason}\n"
-                f"See log for options. Set max_layers manually or use force_smart_detection=True."
+                f"See log for options. Set max_layers manually, split the archive, "
+                f"or use force_smart_detection=True."
             )
     
     # Step 1: Get file sizes
@@ -667,21 +672,30 @@ def _read_pro_raw(
 
     This low-level function reads a SNOWPACK .pro file line by line, extracting
     metadata from the header and parsing each time-stamped snow profile from
-    the data section.
+    the data section into an intermediate representation used by
+    `_create_pro_dataset()`. Profiles outside the optional time window are
+    skipped before they are stored.
 
     Args:
         filepath: Path to the .pro file.
-        datetime_start: The start of the time range to parse.
-        datetime_end: The end of the time range to parse.
-        code_map: A dictionary mapping parameter codes to variable names.
-        logger: An optional logger instance.
-        remove_soil: If True, remove soil layers from the bottom.
-        add_surface_sh_as_layer: If True, synthesize a surface hoar layer.
+        datetime_start: Optional inclusive start of the time range to parse.
+            Profiles before this timestamp are skipped.
+        datetime_end: Optional inclusive end of the time range to parse.
+            Profiles after this timestamp are skipped.
+        code_map: Mapping from SNOWPACK parameter codes, such as '0501', to
+            xsnow variable names, such as 'height'. Defaults to
+            `CODE_TO_NAME_MAP`.
+        logger: Optional logger instance.
+        remove_soil: If True, remove bottom layers identified as soil during
+            parsing.
+        add_surface_sh_as_layer: If True, keep the surface-hoar-at-surface
+            information needed to synthesize an explicit surface hoar layer
+            later in `_create_pro_dataset()`.
 
     Returns:
         A tuple containing:
             - metadata (Dict): Station parameters from the header.
-            - temp_profiles (List[Dict]): List of profile dictionaries.
+            - temp_profiles (List[Dict]): One dictionary per parsed profile.
     """
     logger = get_logger(__name__, logger=logger)
 
@@ -736,20 +750,39 @@ def _create_pro_dataset(
     Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
 
     This function transforms the intermediate raw data from `_read_pro_raw`
-    into a fully-formed, 5-dimensional xarray.Dataset.
+    into an xarray Dataset with xsnow's standard dimensions:
+    `location`, `time`, `slope`, `realization`, and, for layered variables,
+    `layer`.
+
+    Layered variables are padded with NaN values up to `max_layers` so that all
+    profiles in the file have the same shape. If a profile has more values than
+    `max_layers`, the values beyond `max_layers` are truncated by the current
+    implementation. When surface hoar is enabled and present in a profile, an
+    explicit layer is synthesized at the top of the snowpack before padding.
+
+    If no profiles are supplied but metadata is available, a minimal dataset is
+    still returned. It contains station/slope coordinates, an empty `time`
+    coordinate, and a non-time-varying `profile_status` value. This is used to
+    preserve file/status information for empty or failed parses.
 
     Args:
         metadata: A dictionary containing SNOWPACK .pro file header.
         profiles: A list of dictionaries, each representing a single profile.
         max_layers: The number of layers to pad the profile data to.
-        add_surface_sh_as_layer: If True, synthesize a surface hoar layer.
-        use_dask: If True, create dask arrays instead of numpy arrays.
-        chunks: Chunk sizes for dask arrays if use_dask=True.
-        empty_profile_status_default: Default status value when no profiles exist.
+        add_surface_sh_as_layer: If True, synthesize a surface hoar layer from
+            `SH_at_surface` data where available.
+        use_dask: If True, wrap created arrays as Dask arrays. The raw profile
+            values have already been parsed before this function is called.
+        chunks: Chunk sizes for Dask arrays if `use_dask=True`. Defaults to
+            {'time': 100, 'layer': -1}.
+        empty_profile_status_default: Status value for the minimal no-profile
+            dataset. The loading code uses `-1` for parse failures and `0` for
+            ordinary no-layer-data cases.
 
     Returns:
-        An xarray.Dataset containing the structured snow profile data,
-        or None if the input profiles list is empty.
+        An xarray.Dataset containing structured snow profile data. The return
+        type remains Optional for compatibility, but the current implementation
+        returns a minimal dataset when `profiles` is empty and metadata exists.
     """
     chunks = chunks or {'time': 100, 'layer': -1}
 
@@ -981,7 +1014,10 @@ def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
     """
     Worker function for eager loading of a single .pro file.
     
-    This function is designed to be called by multiprocessing workers.
+    This function is designed to be called by multiprocessing workers. It
+    parses one file, converts it to a padded xarray Dataset with the shared
+    `max_layers` dimension, and returns a minimal `profile_status=-1` dataset
+    when parsing fails but metadata can still be recovered.
     """
     filepath, max_layers, datetime_start, datetime_end, parser_kwargs = task_args
     
@@ -1024,8 +1060,28 @@ def _read_pro_files_eager(
 ) -> List[xr.Dataset]:
     """
     Eagerly loads and processes .pro files using direct multiprocessing.
-    
-    Best for small to medium datasets (<100 files) where memory is sufficient.
+
+    This path parses files immediately and returns numpy-backed datasets. When
+    `parser_kwargs["max_layers"]` is `'auto'`, it uses the smart max-layer
+    detector: files are validated for temporal homogeneity, then the largest
+    files by size are scanned to choose a layer dimension. A fixed integer
+    `max_layers` bypasses that detector.
+
+    Args:
+        pro_files: Paths to .pro files.
+        datetime_start: Optional inclusive start timestamp for profile parsing.
+        datetime_end: Optional inclusive end timestamp for profile parsing.
+        n_cpus_use: Number of worker processes to use when there is more than
+            one file.
+        logger: Logger instance.
+        parser_kwargs: Parser options, including `max_layers`,
+            `remove_soil`, `add_surface_sh_as_layer`,
+            `force_smart_detection`, and `validation_threshold_days`.
+
+    Returns:
+        A list of successfully created xarray Datasets. Files that cannot be
+        parsed may contribute a minimal error-status dataset if metadata can be
+        recovered; otherwise they are dropped.
     """
     if not pro_files:
         return []
@@ -1086,6 +1142,10 @@ def _create_dataset_from_pro_file(
 ) -> Optional[xr.Dataset]:
     """
     A Dask-delayed function to create a single xarray.Dataset from one .pro file.
+
+    It mirrors `_process_pro_file_eager()` but is scheduled through Dask. Parse
+    failures are represented as minimal datasets with `profile_status=-1` when
+    metadata can be recovered.
     """
     try:
         remove_soil = parser_kwargs.get('remove_soil', True)
@@ -1132,9 +1192,34 @@ def _read_pro_files_lazy(
     parser_kwargs: Dict
 ) -> List[xr.Dataset]:
     """
-    Parses and creates datasets from .pro files with TRUE lazy loading.
-    
-    Uses file size heuristic to determine max_layers efficiently.
+    Parses .pro files for the lazy loading path and returns Dask-backed datasets.
+
+    When `parser_kwargs["max_layers"]` is `'auto'`, this function uses the
+    smart max-layer detector before creating datasets. With `use_dask=True`
+    (the normal path from `read(..., lazy=True)`), per-file loading is wrapped
+    in delayed tasks and each file is checked against the chosen `max_layers`.
+    The delayed dataset-creation tasks are computed before this function
+    returns, while the resulting data variables are Dask-backed arrays.
+
+    With `use_dask=False`, this function uses Dask only as a parallel task
+    scheduler and returns in-memory datasets.
+
+    Args:
+        pro_files: Paths to .pro files.
+        datetime_start: Optional inclusive start timestamp for profile parsing.
+        datetime_end: Optional inclusive end timestamp for profile parsing.
+        n_cpus_use: Number of workers for smart scanning and delayed task
+            computation.
+        parallel_lazy_creation: If True, compute delayed dataset creation with
+            a threaded scheduler when `use_dask=True`.
+        logger: Logger instance.
+        parser_kwargs: Parser options, including `max_layers`, `use_dask`,
+            `chunks`, `remove_soil`, `add_surface_sh_as_layer`,
+            `force_smart_detection`, and `validation_threshold_days`.
+
+    Returns:
+        A list of created xarray Datasets. In the normal lazy path, layered
+        variables are backed by Dask arrays with the configured chunks.
     """
     if not pro_files:
         return []
@@ -1353,4 +1438,3 @@ def to_pro(
                         formatted_values = [f"{val:.4f}" for val in data_array.flatten()]
                         data_str = ",".join(formatted_values)
                         f.write(f"{param_code},{num_layers},{data_str}\n")
-

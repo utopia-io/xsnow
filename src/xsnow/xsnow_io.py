@@ -102,8 +102,10 @@ __all__ = [
 
 # =============================================================================
 # TEMPORARY: append_latest and trim_padding 
-# These functions should eventually be moved to core.py
-# They are kept here for backward compatibility until the migration is complete
+# These functions could eventually be moved, but are kept here for backward compatibility.
+# Possible new destinations:
+# - trim_padding --> if useful for end user: utils; otherwise remain in io/
+# - append_latest --> xsnow_io (currently), io/base or io/__init()__ (next to read())
 # =============================================================================
 
 import logging
@@ -132,6 +134,53 @@ def append_latest(
 ) -> xsnowDataset:
     """
     Incrementally extend a dataset by appending newer timestamps from files.
+
+    This method is a convenience wrapper around time selection, `read()`, and
+    `xsnow.concat()`. It is intended for cache/update workflows where an
+    existing dataset should be extended with only the timestamps that are newer
+    than the existing time coordinate.
+
+    Semantics:
+        1. Determine a read start time:
+           - If `from_time` is None, use max(existing time) + 1 second.
+           - If `from_time` is provided, keep existing times strictly before
+             `from_time` and read new data starting at `from_time` inclusive.
+        2. Read `source` with that time filter.
+        3. Reject overlapping timestamps between the retained existing data
+           and the newly read data.
+        4. Concatenate along `time` using `xsnow.concat`.
+
+    Args:
+        existing_ds: Dataset instance to extend.
+        source: Path, list of paths, or directory to pass to `read()` for new
+            data.
+        from_time: Optional explicit update boundary. Existing data at or
+            after this timestamp is dropped before new data is appended.
+            Accepts strings, Python datetimes, pandas timestamps, or numpy
+            datetimes.
+        join: Join mode for non-time dimensions forwarded to `xsnow.concat`.
+            The default, 'left', keeps the existing non-time coordinate domain.
+            Use 'outer' or 'right' when new non-time coordinates should be
+            allowed into the result.
+        logger: Optional logger for status and warning messages.
+        **kwargs: Additional keyword arguments forwarded to `xsnow.concat`,
+            such as `compat`, `coords`, or `combine_attrs`.
+
+    Returns:
+        An `xsnowDataset` containing the retained existing data plus newly
+        appended timestamps. If no new time steps are found, returns a dataset
+        built from the retained existing data.
+
+    Raises:
+        ValueError: If retained existing data and newly read data contain
+            overlapping timestamps.
+
+    Notes:
+        The current implementation resets `azimuth`, `inclination`, and
+        `aspect` from coordinates to data variables before concatenation to
+        avoid coordinate/variable structure mismatches. This affects the
+        returned dataset structure and should be considered part of the current
+        behavior, not a statement about the desired long-term data model.
     """
     from .io import read
     from .selectors import TimeSelector
@@ -240,6 +289,42 @@ def trim_padding(
 ) -> xsnowDataset:
     """
     Remove NaN padding from layer dimension to reduce memory usage.
+
+    Loading .pro files with a fixed or auto-detected `max_layers` can create
+    trailing layers that are NaN for every variable. This method finds the last
+    index containing data along each requested dimension and trims all trailing
+    all-NaN slices.
+
+    Args:
+        ds: Dataset instance to trim.
+        dims: Dimensions to trim. Defaults to ['layer'].
+        keep_buffer: Number of extra slices to keep after the last non-NaN
+            slice. This is useful when a dataset will be appended to later.
+            The result is never expanded beyond the original size.
+        inplace: If True, modify and return `ds`. If False (default), trim a
+            copy and leave the original unchanged.
+
+    Returns:
+        The trimmed `xsnowDataset`. This is the same object when
+        `inplace=True`, otherwise a new wrapper around copied data.
+
+    Examples:
+        >>> # Dataset padded to 50 layers, but only 12 contain data
+        >>> ds_trimmed = ds.trim_padding()
+        >>> ds_trimmed.sizes["layer"]
+        12
+
+        >>> # Keep two empty layers as future append buffer
+        >>> ds.trim_padding(keep_buffer=2)
+
+        >>> # Modify the existing dataset object
+        >>> ds.trim_padding(inplace=True)
+
+    Notes:
+        This method assumes padding is at the end of the dimension. It checks
+        all data variables that contain each requested dimension. For Dask
+        backed arrays, the `.values` access used to detect non-NaN slices
+        triggers computation.
     """
     logger = logging.getLogger(__name__)
     
