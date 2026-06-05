@@ -30,6 +30,14 @@ parts:
     chapters:
       - file: api/index
         sections:
+          - file: api/_generated/xsnow.io
+            sections:
+              - file: api/_generated/xsnow.io.pro
+              - file: api/_generated/xsnow.io.smet
+              - file: api/_generated/xsnow.io.netcdf
+              - file: api/_generated/xsnow.io.zarr
+              - file: api/_generated/xsnow.io.merge
+              - file: api/_generated/xsnow.io.base
           - file: api/_generated/xsnow.xsnow_io
           - file: api/_generated/xsnow.core
           - file: api/_generated/xsnow.sample_data
@@ -45,4 +53,3 @@ parts:
           - file: api/_generated/xsnow.extensions.classification
           - file: api/_generated/xsnow.extensions.hazard_chart
           - file: api/_generated/xsnow.extensions.critical_crack_length
-

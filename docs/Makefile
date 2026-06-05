@@ -19,7 +19,10 @@ api:
 
 html: api
 	sed -i '1s/^xsnow\.extensions\.//' api/_generated/*.rst  # make extension titles more legible
+	sed -i '1s/^xsnow\.io\./io./' api/_generated/*.rst  # keep I/O module titles under xsnow readable
 	sed -i '1s/^xsnow\.//' api/_generated/*.rst  # make module titles more legible
+	sed -i '/^Submodules$$/,/^Module contents$$/ { /^Module contents$$/!d; }' api/_generated/xsnow.io.rst  # avoid duplicate I/O submodule nav
+	sed -i '/^Module contents$$/,+2d' api/_generated/xsnow.io.rst  # remove redundant generated section heading
 	pip install -e ..
 	python ../dist/update_footer_citation.py
 	jupyter-book build $(SOURCEDIR) --path-output $(BUILDDIR)
