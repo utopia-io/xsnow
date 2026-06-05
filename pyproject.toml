@@ -71,6 +71,23 @@ largescale = [
   "psutil>=7.1.0",                # Memory monitoring (note: psutil is in testing deps)
 ]
 
+# uv dependency groups (PEP 735): installed by uv sync, not published with the
+# package. The `test` group mirrors the `testing` optional-dependencies extra,
+# which is kept for pip/CI (pip install -e ".[testing]"). Keep the two in sync.
+[dependency-groups]
+test = [
+  "pytest>=8.0",
+  "pytest-cov",
+  "pytz>=2024.1",
+  "psutil>=7.1.0",
+  "pytest-benchmark>=5.1.0",
+  "memory-profiler>=0.61.0",
+  "pytest-timeout>=2.4.0",
+]
+
+[tool.uv]
+default-groups = ["test"]
+
 [project.urls]
 "Homepage"      = "https://gitlab.com/avacollabra/postprocessing/xsnow"
 "Documentation" = "https://gitlab.com/avacollabra/postprocessing/xsnow"
@@ -105,4 +122,9 @@ markers = [
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:multiprocessing",
+    # Zarr v3 maturity warnings: fixed-length string dtype has no stable v3
+    # spec yet, and consolidated metadata isn't part of the v3 spec. Both are
+    # benign for xsnow's round-trip usage.
+    "ignore::zarr.errors.UnstableSpecificationWarning",
+    "ignore::zarr.errors.ZarrUserWarning",
 ]

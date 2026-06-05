@@ -81,26 +81,31 @@ def _read_zarr(
             f"{len(ds_raw.data_vars)} variables"
         )
         
-        # Wrap in xsnowDataset
-        ds = xsnowDataset(ds_raw)
-        
         # Apply selectors if provided (already coerced by read())
         if time_sel:
-            ds = ds.where(time=time_sel)
+            ds_raw = time_sel.apply(ds_raw)
         if location_sel:
-            ds = ds.where(location=location_sel)
+            ds_raw = location_sel.apply(ds_raw)
         if slope_sel:
-            ds = ds.where(slope=slope_sel)
+            ds_raw = slope_sel.apply(ds_raw)
         if realization_sel:
-            ds = ds.where(realization=realization_sel)
+            ds_raw = realization_sel.apply(ds_raw)
+
+        # Wrap in xsnowDataset
+        return xsnowDataset(ds_raw)
         
-        return ds
-        
-    except Exception as e:
+    except (FileNotFoundError, ValueError, OSError) as e:
+        # Expected failures: missing path, not a Zarr archive, or an I/O error
+        # while reading. Per this function's contract, report and return None.
         logger.error(f"Failed to read Zarr archive: {e}")
         import traceback
         logger.debug(traceback.format_exc())
         return None
+    except Exception:
+        # Unexpected errors (e.g. a programming bug like a wrong xarray call)
+        # must surface rather than be masked as a None "read failure".
+        logger.exception(f"Unexpected error reading Zarr archive: {path}")
+        raise
 
 
 @register_xsnowDataset_method
