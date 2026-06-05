@@ -321,6 +321,46 @@ def test_write_zarr_with_int8(sample_data_dir, temp_zarr_dir, helper):
 # READING TESTS
 # =============================================================================
 
+def test_read_zarr_with_time_selector_uses_xsnow_read(tmp_path, monkeypatch):
+    """Regression: public read(.zarr, time=...) should subset Zarr archives."""
+    zarr_path = tmp_path / 'archive.zarr'
+    zarr_path.mkdir()
+    (zarr_path / 'zarr.json').write_text('{}')
+
+    time_values = np.array(
+        ['2025-01-01T12:00:00', '2025-01-02T12:00:00', '2025-01-03T12:00:00'],
+        dtype='datetime64[ns]',
+    )
+    zarr_data = xr.Dataset(
+        data_vars={
+            'HS': (('location', 'time'), np.array([[0.3, 0.4, 0.5]])),
+        },
+        coords={
+            'location': ['TEST_STATION'],
+            'time': time_values,
+        },
+    )
+
+    def fake_open_zarr(path):
+        assert Path(path) == zarr_path
+        return zarr_data.copy()
+
+    monkeypatch.setattr(xr, 'open_zarr', fake_open_zarr)
+
+    plain = xsnow.read(zarr_path)
+    assert plain is not None
+    assert plain.data.sizes['time'] == 3
+
+    subset = xsnow.read(
+        zarr_path,
+        time=slice('2025-01-02T12:00:00', '2025-01-03T12:00:00'),
+    )
+
+    assert subset is not None
+    assert subset.data.sizes['time'] == 2
+    np.testing.assert_array_equal(subset.data.time.values, time_values[1:])
+
+
 def test_read_zarr_eager(sample_data_dir, temp_zarr_dir, helper):
     """Test reading Zarr files with eager loading."""
     print(f"\n{'='*70}")
