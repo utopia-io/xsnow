@@ -29,6 +29,7 @@ from ..utils import get_logger
 from .base import (
     CODE_TO_NAME_MAP, 
     HEADER_MAP, 
+    _open_any_as_text,
     _round_coord, 
     _sanitize_station_name
 )
@@ -88,7 +89,7 @@ def _extract_metadata_fast(
     profile_count = 0
     
     try:
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        with _open_any_as_text(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 stripped = line.strip()
                 if not stripped:
@@ -184,7 +185,7 @@ def _read_pro_metadata(
     has_header = False
 
     try:
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        with _open_any_as_text(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
             for raw_line in f:
                 line = raw_line.strip()
                 if not line:
@@ -306,7 +307,7 @@ def _scan_pro_for_max_layers(
     current_profile_lines: List[str] = []
     
     try:
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        with _open_any_as_text(filepath, 'rt', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 stripped_line = line.strip()
                 if not stripped_line:
@@ -706,7 +707,7 @@ def _read_pro_raw(
 
     code_map_to_use = code_map if code_map is not None else CODE_TO_NAME_MAP
 
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with _open_any_as_text(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
         lines = f.readlines()
 
     metadata = _read_pro_metadata(filepath, logger=logger, throw=True)
@@ -1403,7 +1404,7 @@ def to_pro(
         if 'layer' in var.dims
     }
 
-    with open(path, 'w') as f:
+    with _open_any_as_text(path, 'wt') as f:
         f.write("[STATION_PARAMETERS]\n")
         f.write(f"StationName= {single_loc_ds.location.item()}\n")
         f.write(f"Latitude= {single_loc_ds.latitude.item():.4f}\n")

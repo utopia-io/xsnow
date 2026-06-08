@@ -96,7 +96,8 @@ def read(
     Args:
         source: The data source. Can be a path to a single file (e.g.,
             '.pro', '.smet', '.nc'), a directory containing data files, or a
-            list of file paths.
+            list of file paths. If a file has extension .gz, .bz2, or .xz, it will
+            be read with the appropriate decompressor.
         recursive: If True, search subdirectories recursively for .pro and .smet
             files when source is a directory. Default is False for backward
             compatibility and to avoid accidentally including unwanted files.

@@ -13,7 +13,9 @@ Synthetic Data Strategy:
   - Each test gets isolated tmp_path
 """
 
-import os
+import bz2
+import gzip
+import lzma
 import subprocess
 import pytest
 import numpy as np
@@ -32,6 +34,8 @@ HERE = Path(__file__).parent
 TESTDATA_DIR = HERE / "data"
 TESTDATA_REPO = "https://gitlab.com/avalanche-warning/universal/archive/test-data"
 
+COMPRESSION_MODULES = {".gz": gzip, ".bz2": bz2, ".xz": lzma}
+ALL_FILE_EXTS = [""] + list(COMPRESSION_MODULES.keys())
 
 def _ensure_testdata_repo():
     """

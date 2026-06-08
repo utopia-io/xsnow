@@ -10,6 +10,7 @@ This module contains functions for:
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union, Literal
 
@@ -22,7 +23,7 @@ from ..registry import registry
 from ..selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
 from ..utils import get_logger, normalize_slope_coords
 
-from .base import _handle_duplicate_names
+from .base import _handle_duplicate_names, PRO_FILE_REGEX, SMET_FILE_REGEX
 
 
 _LOCATION_LEVEL_COORDS = ("latitude", "longitude", "altitude", "location")
@@ -434,17 +435,17 @@ def _resolve_filepaths(
             continue
         
         if p.is_dir():
-            pattern = '**/*.pro' if recursive else '*.pro'
-            resolved_files.extend(p.glob(pattern))
-            pattern = '**/*.smet' if recursive else '*.smet'
-            resolved_files.extend(p.glob(pattern))
+            pattern = '**/*.pro*' if recursive else '*.pro*'
+            resolved_files.extend(f for f in p.glob(pattern) if re.search(PRO_FILE_REGEX, str(f)))
+            pattern = '**/*.smet*' if recursive else '*.smet*'
+            resolved_files.extend(f for f in p.glob(pattern) if re.search(SMET_FILE_REGEX, str(f)))
         else:
             resolved_files.append(p)
 
     unique_files = sorted(list(dict.fromkeys(resolved_files)))
 
-    pro_files = [f for f in unique_files if f.suffix == '.pro']
-    smet_files = [f for f in unique_files if f.suffix == '.smet']
+    pro_files = [f for f in unique_files if re.search(PRO_FILE_REGEX, str(f))]
+    smet_files = [f for f in unique_files if re.search(SMET_FILE_REGEX, str(f))]
     
     return pro_files, smet_files
 
