@@ -39,6 +39,3 @@ tests/data_itegraty_test.ipynb
 
 # ── log files ────────────────────────────────────────
 *.log
-
-# ── data tracking files ────────────────────────────────
-*.json
