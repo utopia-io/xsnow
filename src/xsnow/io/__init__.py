@@ -81,6 +81,18 @@ def read(
     a single .nc file or a single .zarr archive path. Direct multi-file
     NetCDF/Zarr expansion and merging is not supported here.
 
+    PRO/SMET sources are merged conservatively. Merge and concat steps use
+    xarray's ``compat="no_conflicts"`` and
+    ``combine_attrs="no_conflicts"`` semantics: missing values can be filled
+    from another source, but conflicting non-null values or conflicting
+    attributes raise an exception. Files with identical SNOWPACK station names
+    are interpreted as belonging to the same xsnow location.
+
+    SMET files with slope metadata are treated as slope-specific and aligned
+    to matching profile slopes. SMET files without slope metadata are treated
+    as location-wide time series; when profile data defines multiple slopes
+    for that location, these generic SMET values are broadcast to all slopes.
+
     Args:
         source: The data source. Can be a path to a single file (e.g.,
             '.pro', '.smet', '.nc'), a directory containing data files, or a

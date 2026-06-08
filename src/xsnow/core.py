@@ -494,6 +494,12 @@ class xsnowDataset:
         file to avoid naming conflicts (e.g., when merging input forcing
         data with model output data).
 
+        The merge uses xarray's strict ``compat="no_conflicts"`` and
+        ``combine_attrs="no_conflicts"`` semantics. Missing values may be
+        filled from the SMET source, but conflicting non-null values or
+        conflicting attributes raise. Use ``var_prefix`` when overlapping SMET
+        variable names are intentional and should be kept separately.
+
         Args:
             source: Path to a .smet file, a directory, or a list of files.
             var_prefix (Optional[str]): A string prefix to add to all data

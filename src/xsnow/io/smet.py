@@ -65,6 +65,13 @@ def read_smet(
     data section into a pandas DataFrame, which is then converted into an
     xarray.Dataset. The data is filtered by the specified time range.
 
+    Slope metadata from the SMET header is stored as ``inclination`` and
+    ``azimuth`` coordinates when available. If no slope metadata is present,
+    the returned dataset contains one provisional slope with NaN slope
+    coordinates. During a later ``xsnow.read()`` merge with profile data, such
+    no-slope SMET data can be broadcast to all profile slopes at the same
+    location.
+
     Args:
         filepath: Path to the SMET file.
         datetime_start: The start of the time range to read. Data before
