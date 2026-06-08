@@ -31,9 +31,11 @@ registry = {
     },
     "temperature": {
         "param_code": "0503",
+        # SNOWPACK .pro element temperature is in °C and xsnow does not convert
+        # it, so the unit must read "degC" (was incorrectly "K").
         "aliases": ["temperature", "temp", "element temperature"],
         "standard_name": "temperature_of_snow",
-        "si_units": "K"
+        "si_units": "degC"
     },
     "lwc": {
         "param_code": "0506",

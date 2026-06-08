@@ -50,6 +50,9 @@ testing = [
 gpu = [
   "cupy-cuda12x; platform_system == 'Linux'",  # nvidia wheels
 ]
+viz = [
+  "plotly>=5.0",  # interactive plots (e.g. extensions.season_plot)
+]
 lint = [
   "mypy>=1.6",
   "flake8>=6",

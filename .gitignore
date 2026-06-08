@@ -8,6 +8,7 @@ dist/*
 *.egg-info/
 src/**/*.egg-info/
 src/xsnow/_version.py
+*.html
 
 # ── Python cache ─────────────────────────────────────────
 src/**/__pycache__
