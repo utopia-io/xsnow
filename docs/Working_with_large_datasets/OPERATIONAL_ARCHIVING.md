@@ -195,8 +195,7 @@ get_optimal_chunks(ds)
 #### Preprocessing
 ```python
 preprocess_for_merge(ds)
-# 1. Convert slope coordinates (azimuth, inclination) to data variables
-#    - Handles 1D → 2D broadcasting
+# 1. Keep slope metadata (azimuth, inclination) as coordinates
 # 2. Drop derived coordinates (z, x, y)
 # 3. Keep essential coordinates (lat, lon, altitude)
 ```

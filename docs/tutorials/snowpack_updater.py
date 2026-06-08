@@ -269,20 +269,20 @@ class SnowpackUpdater:
         """Process north aspects and calculate max HS."""
         logger.info(f"\n🧭 Processing data...")
         
-        # Filter for north aspects
-        if 'aspect' in ds.data:
+        # Filter for north-facing slopes by azimuth
+        if 'azimuth' in ds.data.coords:
             logger.info("   Filtering north aspects (315° - 45°)...")
-            north_mask = ((ds.data.aspect >= 315) | (ds.data.aspect <= 45))
+            north_mask = ((ds.data.azimuth >= 315) | (ds.data.azimuth <= 45))
             ds_north = ds.where(north_mask, drop=True)
             
-            n_north = len(ds_north.data.location)
-            n_total = len(ds.data.location)
+            n_north = ds_north.data.sizes.get('slope', 0)
+            n_total = ds.data.sizes.get('slope', 0)
             pct = (n_north / n_total * 100) if n_total > 0 else 0
             
-            logger.info(f"   North-facing: {n_north:,} / {n_total:,} ({pct:.1f}%)")
+            logger.info(f"   North-facing slopes: {n_north:,} / {n_total:,} ({pct:.1f}%)")
             ds = ds_north
         else:
-            logger.warning("   No 'aspect' variable - using all locations")
+            logger.warning("   No 'azimuth' coordinate - using all slopes")
         
         # Calculate max HS
         if 'HS' in ds.data:

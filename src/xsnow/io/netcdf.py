@@ -18,7 +18,7 @@ import xarray as xr
 
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
-from ..utils import get_logger, reorder_dims
+from ..utils import get_logger, _promote_slope_metadata_coords, reorder_dims
 
 from .base import _round_coord
 
@@ -53,6 +53,7 @@ def _read_xsnow_netcdf(source: Union[str, Path]) -> Optional[xsnowDataset]:
 
     # Restore mapping attrs from JSON
     ds = _decode_mapping_attrs_from_netcdf(ds)
+    ds = _promote_slope_metadata_coords(ds)
 
     return xsnowDataset(ds)
 
@@ -136,10 +137,6 @@ def to_netcdf(
     This method provides a convenient wrapper around the underlying
     `xarray.Dataset.to_netcdf()` method for easy caching and interoperability.
     
-    Automatically converts slope-varying coordinates (azimuth, aspect, 
-    inclination) to data variables to ensure files are mergeable without
-    conflicts.
-    
     The location mapping dictionary is converted to NetCDF-compatible format
     by encoding it as JSON in a string attribute.
     
@@ -155,65 +152,6 @@ def to_netcdf(
     
     # Create a copy to avoid modifying the original
     ds_to_save = ds.to_xarray().copy()
-    
-    # Convert slope-varying coordinates to data variables for mergeability
-    SLOPE_VARYING_COORDS = ['azimuth', 'aspect', 'inclination']
-    
-    converted = []
-    for coord in SLOPE_VARYING_COORDS:
-        if coord in ds_to_save.coords:
-            # Check if it's a problematic 1D slope coordinate
-            if ds_to_save.coords[coord].dims == ('slope',):
-                logger.debug(
-                    f"Converting '{coord}' from coordinate to data variable "
-                    f"(prevents merge conflicts)"
-                )
-                
-                # Broadcast 1D (slope,) to 2D (location, slope)
-                coord_1d = ds_to_save.coords[coord]
-                
-                # Find a template variable with (location, slope) dimensions
-                template_var = None
-                for var in ds_to_save.data_vars:
-                    if 'location' in ds_to_save[var].dims and 'slope' in ds_to_save[var].dims:
-                        template = ds_to_save[var]
-                        # Select first index for any extra dimensions
-                        for dim in template.dims:
-                            if dim not in ['location', 'slope']:
-                                template = template.isel({dim: 0})
-                        template_var = template
-                        break
-                
-                if template_var is not None:
-                    # Broadcast using template
-                    coord_2d = coord_1d.broadcast_like(template_var)
-                else:
-                    # Fallback: manual broadcast
-                    n_locations = len(ds_to_save.location)
-                    n_slopes = len(ds_to_save.slope)
-                    values_2d = np.broadcast_to(coord_1d.values, (n_locations, n_slopes))
-                    coord_2d = xr.DataArray(
-                        values_2d,
-                        dims=('location', 'slope'),
-                        coords={'location': ds_to_save.location, 'slope': ds_to_save.slope}
-                    )
-                
-                # Add as data variable and remove from coordinates
-                ds_to_save[coord] = coord_2d
-                ds_to_save = ds_to_save.reset_coords(coord)
-                
-                converted.append(coord)
-    
-    if converted:
-        logger.info(
-            f"Converted {len(converted)} slope-varying coordinate(s) to "
-            f"data variable(s): {', '.join(converted)}"
-        )
-        
-    # DEBUG: Check slope coordinates before saving
-    if 'inclination' in ds_to_save.coords:
-        logger.debug(f"to_netcdf: inclination BEFORE save = {ds_to_save.inclination.values}")
-        logger.debug(f"to_netcdf: inclination dims = {ds_to_save.inclination.dims}")
         
     # Encode any dict attrs named 'mapping' as JSON
     ds_to_save = _encode_mapping_attrs_for_netcdf(ds_to_save)
@@ -239,4 +177,3 @@ def to_netcdf(
     path = Path(path)
     ds_to_save.to_netcdf(path, **kwargs)
     logger.info(f"Dataset successfully saved to {path}")
-

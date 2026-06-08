@@ -120,7 +120,7 @@ import xarray as xr
 from .core import xsnowDataset
 from .plugin import register_xsnowDataset_method
 from .combiners import concat as xsnow_concat
-from .utils import get_logger
+from .utils import get_logger, _promote_slope_metadata_coords
 
 
 @register_xsnowDataset_method
@@ -175,12 +175,6 @@ def append_latest(
         ValueError: If retained existing data and newly read data contain
             overlapping timestamps.
 
-    Notes:
-        The current implementation resets `azimuth`, `inclination`, and
-        `aspect` from coordinates to data variables before concatenation to
-        avoid coordinate/variable structure mismatches. This affects the
-        returned dataset structure and should be considered part of the current
-        behavior, not a statement about the desired long-term data model.
     """
     from .io import read
     from .selectors import TimeSelector
@@ -251,13 +245,8 @@ def append_latest(
             raise ValueError(f"append_latest detected overlapping timestamps: {overlap[:5]!r}")
 
     JoinMode = Literal["left", "right", "outer", "inner", "union"]
-    
-    slope_coords = ['azimuth', 'inclination', 'aspect']
-    for coord in slope_coords:
-        if coord in base_filtered.coords:
-            base_filtered = base_filtered.reset_coords(coord)
-        if coord in new_data.coords:
-            new_data = new_data.reset_coords(coord)
+    base_filtered = _promote_slope_metadata_coords(base_filtered)
+    new_data = _promote_slope_metadata_coords(new_data)
     
     combined = xsnow_concat(
         [existing_ds.__class__(base_filtered), xsnowDataset(new_data)],

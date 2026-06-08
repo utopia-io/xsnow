@@ -80,38 +80,13 @@ class ZarrTestHelper:
         """
         Preprocess datasets for merging.
         
-        Converts slope coordinates and drops derived coordinates.
+        Keeps slope metadata as coordinates and drops derived coordinates.
         """
-        # Convert slope coordinates to data variables
-        slope_coords = ['azimuth', 'inclination', 'aspect']
-        
-        for coord in slope_coords:
-            if coord in ds.coords:
-                ds = ds.reset_coords(coord)
-                
-                # Broadcast 1D to 2D if needed
-                coord_var = ds[coord]
-                if coord_var.dims == ('slope',) and 'location' in ds.dims and 'slope' in ds.dims:
-                    template = None
-                    for var_name in ds.data_vars:
-                        if var_name == coord:
-                            continue
-                        var = ds[var_name]
-                        if 'location' in var.dims and 'slope' in var.dims:
-                            template = var
-                            for dim in var.dims:
-                                if dim not in ['location', 'slope']:
-                                    template = template.isel({dim: 0})
-                            break
-                    
-                    if template is not None:
-                        ds[coord] = ds[coord].broadcast_like(template)
-        
         # Drop derived and non-essential coordinates
         essential_coords = [
             'location', 'time', 'layer', 'slope', 'realization',
             'latitude', 'longitude', 'altitude', 'elevation',
-            'lat', 'lon'
+            'lat', 'lon', 'azimuth', 'inclination'
         ]
         
         coords_to_drop = [c for c in ds.coords if c not in essential_coords]
@@ -333,11 +308,14 @@ def test_read_zarr_with_time_selector_uses_xsnow_read(tmp_path, monkeypatch):
     )
     zarr_data = xr.Dataset(
         data_vars={
-            'HS': (('location', 'time'), np.array([[0.3, 0.4, 0.5]])),
+            'HS': (('location', 'time', 'slope'), np.array([[[0.3], [0.4], [0.5]]])),
+            'inclination': ('slope', np.array([35.0])),
+            'azimuth': ('slope', np.array([180.0])),
         },
         coords={
             'location': ['TEST_STATION'],
             'time': time_values,
+            'slope': [0],
         },
     )
 
@@ -350,6 +328,10 @@ def test_read_zarr_with_time_selector_uses_xsnow_read(tmp_path, monkeypatch):
     plain = xsnow.read(zarr_path)
     assert plain is not None
     assert plain.data.sizes['time'] == 3
+    assert 'inclination' in plain.data.coords
+    assert 'azimuth' in plain.data.coords
+    assert 'inclination' not in plain.data.data_vars
+    assert 'azimuth' not in plain.data.data_vars
 
     subset = xsnow.read(
         zarr_path,
@@ -358,6 +340,8 @@ def test_read_zarr_with_time_selector_uses_xsnow_read(tmp_path, monkeypatch):
 
     assert subset is not None
     assert subset.data.sizes['time'] == 2
+    assert 'inclination' in subset.data.coords
+    assert 'azimuth' in subset.data.coords
     np.testing.assert_array_equal(subset.data.time.values, time_values[1:])
 
 
@@ -594,7 +578,7 @@ def test_adaptive_chunking_timeseries_data(temp_zarr_dir, helper):
 # =============================================================================
 
 def test_preprocess_slope_coordinates(sample_data_dir, helper):
-    """Test preprocessing converts slope coordinates."""
+    """Test preprocessing keeps slope metadata as coordinates."""
     print(f"\n{'='*70}")
     print("TEST: Preprocess Slope Coordinates")
     print(f"{'='*70}")
@@ -610,14 +594,13 @@ def test_preprocess_slope_coordinates(sample_data_dir, helper):
     
     print(f"  After preprocessing: {list(data_preprocessed.coords)}")
     
-    # Check that slope coords moved to data vars
-    slope_coords = ['azimuth', 'inclination', 'aspect']
+    # Check that slope coords remain coordinates
+    slope_coords = ['azimuth', 'inclination']
     for coord in slope_coords:
         if coord in data.coords:
-            # Should now be data variable
-            assert coord in data_preprocessed.data_vars or coord not in data_preprocessed.coords, \
-                f"{coord} still a coordinate after preprocessing"
-            print(f"✅ '{coord}' converted from coordinate")
+            assert coord in data_preprocessed.coords
+            assert coord not in data_preprocessed.data_vars
+            print(f"✅ '{coord}' remains a coordinate")
 
 
 def test_preprocess_drops_derived_coords(temp_zarr_dir, helper):

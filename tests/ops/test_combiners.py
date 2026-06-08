@@ -62,6 +62,20 @@ def _make_simple_scalar_ds(value: float, time: int, attrs=None) -> xr.Dataset:
     )
 
 
+def _make_slope_metadata_ds(value: float, time: int) -> xr.Dataset:
+    return xr.Dataset(
+        {"v": (("location", "time", "slope", "realization"), np.array([[[[value]]]]))},
+        coords={
+            "location": ["A"],
+            "time": [time],
+            "slope": [0],
+            "realization": [0],
+            "inclination": ("slope", [35.0]),
+            "azimuth": ("slope", [180.0]),
+        },
+    )
+
+
 # =========================================================================
 # xsnow.concat tests -- SYNTHETIC DATA
 # =========================================================================
@@ -99,6 +113,34 @@ def test_concat_outer_with_xsnowdataset_wraps_output():
     # Underlying data should match pure xarray.concat
     expected = xr.concat([ds1.data, ds2], dim="realization", join="outer")
     xr.testing.assert_identical(result.data, expected)
+
+
+@pytest.mark.synthetic
+def test_concat_preserves_slope_metadata_as_coords():
+    ds1 = _make_slope_metadata_ds(1.0, 0)
+    ds2 = _make_slope_metadata_ds(2.0, 1)
+
+    result = xsnow.concat([xsnowDataset(ds1), xsnowDataset(ds2)], dim="time")
+    out = result.data
+
+    for coord in ("inclination", "azimuth"):
+        assert coord in out.coords
+        assert coord not in out.data_vars
+        assert out[coord].dims == ("slope",)
+
+
+@pytest.mark.synthetic
+def test_combine_promotes_legacy_slope_metadata_data_vars():
+    left = _make_slope_metadata_ds(1.0, 0)
+    right = _make_slope_metadata_ds(2.0, 1).reset_coords(["inclination", "azimuth"])
+
+    result = xsnow.combine([xsnowDataset(left), xsnowDataset(right)])
+    out = result.data
+
+    for coord in ("inclination", "azimuth"):
+        assert coord in out.coords
+        assert coord not in out.data_vars
+        assert out[coord].dims == ("slope",)
 
 
 @pytest.mark.synthetic
@@ -1493,13 +1535,6 @@ def test_merge_augment_with_smets_ignores_profile_status(
     xs_layered = snp_gridded_xs
     xs_smets = snp_gridded_smets_xs
     
-    slope_coords = ['azimuth', 'inclination', 'aspect']
-    for coord in slope_coords:
-        if coord in xs_layered.coords:
-            xs_layered = xs_layered.reset_coords(coord)
-        if coord in xs_smets.coords:
-            xs_smets = xs_smets.reset_coords(coord)
-
     met_vars = ["TA", "RH", "VW", "DW", "ISWR", "profile_status"]
     have_any_met = any(v in xs_layered.data_vars for v in met_vars)
     if not have_any_met:

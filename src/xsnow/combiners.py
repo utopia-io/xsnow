@@ -7,6 +7,7 @@ import xarray as xr
 
 from .core import xsnowDataset
 from .plugin import register_xsnowDataset_method
+from .utils import _promote_slope_metadata_coords
 
 
 JoinMode = Literal["left", "right", "outer", "inner", "union"]
@@ -30,8 +31,8 @@ def _as_xr_dataset(obj: Union["xsnowDataset", xr.Dataset]) -> xr.Dataset:
     Normalize inputs: xsnowDataset -> underlying xr.Dataset; pass-through xr.Dataset.
     """
     if isinstance(obj, xr.Dataset):
-        return obj
-    return obj.data
+        return _promote_slope_metadata_coords(obj)
+    return _promote_slope_metadata_coords(obj.data)
 
 
 def _ensure_profile_status(ds: xr.Dataset) -> xr.Dataset:
@@ -196,16 +197,6 @@ def _combine_two(
             {d: v for d, v in target_coords.items() if d in right.coords},
             copy=False,
         )
-
-    # 1.5) Normalize slope coordinates to data variables immediately
-    # This must happen before _ensure_profile_status or any alignment
-    # to avoid ambiguous coordinate/variable errors (MergeError) downstream.
-    slope_coords = ['azimuth', 'inclination', 'aspect']
-    for coord in slope_coords:
-        if coord in left.coords:
-            left = left.reset_coords(coord)
-        if coord in right.coords:
-            right = right.reset_coords(coord)
 
     # 2) Ensure profile_status on both; align
     left = _ensure_profile_status(left)
@@ -647,10 +638,10 @@ def concat(
     saw_xsnow = False
     for obj in objs:
         if isinstance(obj, xsnowDataset):
-            xr_objs.append(obj.data)
+            xr_objs.append(_promote_slope_metadata_coords(obj.data))
             saw_xsnow = True
         elif isinstance(obj, xr.Dataset):
-            xr_objs.append(obj)
+            xr_objs.append(_promote_slope_metadata_coords(obj))
         else:
             raise TypeError(
                 f"xsnow.concat only supports xsnowDataset or xarray.Dataset, got {type(obj)}"

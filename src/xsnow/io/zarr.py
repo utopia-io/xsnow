@@ -20,7 +20,7 @@ import xarray as xr
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
-from ..utils import get_logger
+from ..utils import get_logger, _promote_slope_metadata_coords
 
 # Define the allowed modes matching xarray/zarr requirements
 ZarrModes = Literal['w', 'w-', 'a', 'a-', 'r+', 'r']
@@ -74,6 +74,7 @@ def _read_zarr(
         
         # Open with xarray
         ds_raw = xr.open_zarr(path)
+        ds_raw = _promote_slope_metadata_coords(ds_raw)
         
         logger.info(
             f"  Loaded: {len(ds_raw.location):,} locations, "
@@ -194,4 +195,3 @@ def to_zarr(
     except Exception as e:
         logger.error(f"Failed to save Zarr archive: {e}")
         raise
-

@@ -13,6 +13,7 @@ Strategy:
 import pytest
 import numpy as np
 import pandas as pd
+import xarray as xr
 from pathlib import Path
 
 from xsnow import read
@@ -98,6 +99,72 @@ def test_to_netcdf_roundtrip(real_file_subset, tmp_path, compare_datasets):
     
     # Should be identical (within floating point tolerance)
     compare_datasets(ds_original, ds_loaded, rtol=1e-6)
+
+
+@pytest.mark.real_data
+def test_to_netcdf_roundtrip_preserves_slope_metadata_as_coords(real_file_subset, tmp_path):
+    """
+    Slope metadata remains coordinates in the stored file and after roundtrip.
+    """
+    ds_original = read(real_file_subset)
+    assert "inclination" in ds_original.data.coords
+    assert "azimuth" in ds_original.data.coords
+
+    nc_file = tmp_path / "slope_coords.nc"
+    ds_original.to_netcdf(nc_file)
+
+    with xr.open_dataset(nc_file) as raw:
+        raw_loaded = raw.load()
+
+    for coord in ("inclination", "azimuth"):
+        assert coord in raw_loaded.coords
+        assert coord not in raw_loaded.data_vars
+
+    ds_loaded = read(nc_file)
+    for coord in ("inclination", "azimuth"):
+        assert coord in ds_loaded.data.coords
+        assert coord not in ds_loaded.data.data_vars
+        np.testing.assert_allclose(
+            ds_loaded.data[coord].values,
+            ds_original.data[coord].values,
+            equal_nan=True,
+        )
+
+
+def test_read_netcdf_promotes_legacy_slope_metadata_data_vars(tmp_path):
+    """
+    Older files with demoted slope metadata are restored to coordinates.
+    """
+    legacy = xr.Dataset(
+        data_vars={
+            "HS": (
+                ("location", "time", "slope", "realization"),
+                np.array([[[[1.2], [1.3]]]]),
+            ),
+            "inclination": (("location", "slope"), np.array([[0.0, 35.0]])),
+            "azimuth": (("location", "slope"), np.array([[0.0, 180.0]])),
+        },
+        coords={
+            "location": ["A"],
+            "time": [pd.Timestamp("2025-01-01")],
+            "slope": [0, 1],
+            "realization": [0],
+        },
+    )
+    nc_file = tmp_path / "legacy_demoted_slope_coords.nc"
+    legacy.to_netcdf(nc_file)
+
+    loaded = read(nc_file)
+
+    for coord in ("inclination", "azimuth"):
+        assert coord in loaded.data.coords
+        assert coord not in loaded.data.data_vars
+        assert loaded.data[coord].dims == ("slope",)
+
+    subset = loaded.sel(slope=(loaded.azimuth == 180.0))
+    assert subset.sizes["slope"] == 1
+    assert float(subset.inclination.values[0]) == 35.0
+
 
 def _normalize_location_string(loc):
     """Helper to normalize location values that may be bytes or strings."""
