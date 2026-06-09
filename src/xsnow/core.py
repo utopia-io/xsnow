@@ -41,7 +41,8 @@ The package uses a physically intuitive vertical coordinate system.
   ground in meters.
 """
 
-from typing import Sequence, Union, Any, List, Optional
+from collections.abc import Hashable, Mapping
+from typing import Sequence, Union, Any, List, Optional, overload
 from pathlib import Path
 
 import pandas as pd
@@ -66,7 +67,7 @@ class xsnowDataset:
     _REPR_EST_BYTES_PER_SEC = 200 * 1024 * 1024  # heuristic throughput used for repr auto-compute
     _REPR_DASK_BLOCK_OVERHEAD = 0.005  # assumed per-block scheduler overhead for lazy arrays
 
-    def __init__(self, source: xr.Dataset):
+    def __init__(self, source: "xr.Dataset | xsnowDataset") -> None:
         """
         Initializes the xsnowDataset from an existing xarray.Dataset.
 
@@ -76,7 +77,7 @@ class xsnowDataset:
         and by extension functions that return a new `xsnowDataset` instance.
 
         Args:
-            source: An existing xarray.Dataset object.
+            source: An existing xsnowDataset or xarray.Dataset object.
         """
         if isinstance(source, xsnowDataset):
             self.data = source.data
@@ -131,7 +132,7 @@ class xsnowDataset:
             return "<xsnowDataset with data (exception occurred on summary)>"
 
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         """
         Proxy to underlying xarray.Dataset. Extension methods are real
         attributes on xsnowDataset attached at import-time by the decorator.
@@ -181,36 +182,50 @@ class xsnowDataset:
         return sorted([str(item) for item in combined_attrs])
 
 
-    def __getitem__(self, key: str) -> xr.DataArray:
+    @overload
+    def __getitem__(self, key: Hashable) -> xr.DataArray: ...
+    @overload
+    def __getitem__(self, key: List[Hashable]) -> xr.Dataset: ...
+    @overload
+    def __getitem__(self, key: Mapping[Any, Any]) -> xr.Dataset: ...
+    def __getitem__(
+        self, key: Hashable | list[Hashable] | Mapping[Any, Any]
+    ) -> xr.Dataset | xr.DataArray:
         """
         Forwards item access to the underlying xarray.Dataset.
 
         This allows for dictionary-like access to data variables.
 
         Args:
-            key: The name of the data variable to access.
+            key: The name or a list of names of the data variable to access. If
+                 key is a dict, xarray forwards it as kwargs to xarray.Dataset.isel.
 
         Returns:
-            The corresponding xarray.DataArray.
+            The corresponding xarray.DataArray or xarray.Dataset
         
         Examples
         --------
         >>> ds = xsnow.read('path/to/data')
         >>> # Access the 'density' DataArray
         >>> density_da = ds['density']
+        >>> # Return a Dataset with only density and temperature vars
+        >>> ds_subset = ds[['density', 'temperature']]
+        >>> # Dict key for integer index access
+        >>> ds[{"time": 2, "slope": 3}]
         """
         if self.data is None:
             raise KeyError("Dataset is not loaded.")
         return self.data[key]
 
-    def __setitem__(self, key: str, value: Any):
+    def __setitem__(self, key: Hashable | list[Hashable] | Mapping, value: Any) -> None:
         """
         Forwards item assignment to the underlying xarray.Dataset.
 
         This allows for dictionary-like assignment of new data variables.
 
         Args:
-            key: The name of the new data variable.
+            key: The name of the new data variable. Multiple keys can be set at once, see
+                 xarray.Dataset.__setitem__ for details.
             value: The xarray.DataArray or array-like object to assign.
         
         Examples
@@ -223,7 +238,7 @@ class xsnowDataset:
             raise KeyError("Dataset is not loaded.")
         self.data[key] = value
 
-    def __contains__(self, key: str) -> bool:
+    def __contains__(self, key: object) -> bool:
         """
         Check whether a variable exists in the dataset.
 
@@ -257,10 +272,10 @@ class xsnowDataset:
         and sometimes a raw ``xarray.Dataset``. ``xsnow`` consistently stores
         the concrete data in ``.data`` as an ``xarray.Dataset``.
         """
-        if isinstance(value, xr.Dataset):
-            return value
         if isinstance(value, xsnowDataset):
             return value.data
+        if isinstance(value, xr.Dataset):
+            return value
         raise TypeError(
             "Expected an xarray.Dataset or xsnowDataset (decorated is fine); "
             f"got {type(value)!r}."
@@ -660,7 +675,7 @@ class xsnowDataset:
     
     def update_profile_status(
         self,
-    ) -> xr.Dataset:
+    ) -> "xsnowDataset":
         """
         Attach or update `profile_status` with very simple semantics:
 
