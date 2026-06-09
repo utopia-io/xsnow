@@ -574,6 +574,38 @@ def plot_season(
         available options).
     KeyError
         If a requested parameter (or `height_var`) is not in the dataset.
+
+    Examples
+    --------
+    Enable the method by importing the extension, then call it on any dataset::
+
+        >>> import xsnow
+        >>> import xsnow.extensions.season_plot   # registers ds.plot_season(...)
+        >>> ds = xsnow.read("archive.zarr")
+
+    Single station/slope: omit `station`/`aspect` and write an HTML file::
+
+        >>> fig = ds.plot_season(path="season.html")
+
+    Pick a station and aspect, with a custom set of parameters. `aspect`
+    accepts a compass point or degrees::
+
+        >>> ds.plot_season(["grain_type", "density", "temperature"],
+        ...                 station="VIR3A", aspect="S")            # or aspect=180
+        >>> ds.plot_season(station="VIR1A", aspect=90, open_browser=True)
+
+    Compose the returned figure like any plotly Figure (e.g. show in a
+    notebook, or embed in a Dash app)::
+
+        >>> fig = ds.plot_season(["lwc", "hand_hardness"])
+        >>> fig.show()
+
+    Unknown selections raise with the available options listed::
+
+        >>> ds.plot_season(station="NOPE")
+        Traceback (most recent call last):
+            ...
+        ValueError: Station 'NOPE' not in dataset. Available stations: [...]
     """
     go, make_subplots = _import_plotly()
 
