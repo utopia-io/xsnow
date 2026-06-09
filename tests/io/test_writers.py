@@ -17,7 +17,7 @@ import xarray as xr
 from pathlib import Path
 
 from tests.conftest import ALL_FILE_EXTS, COMPRESSION_MODULES
-from xsnow import read
+from xsnow import read, xsnowDataset
 
 
 # ============================================================================
@@ -336,6 +336,66 @@ def test_to_smet_basic(real_file_subset, tmp_path):
         assert '[DATA]' in content
 
 
+@pytest.fixture
+def smet_writer_dataset():
+    """Single-location dataset with missing values and string data for SMET export."""
+    times = pd.date_range("2025-01-01", periods=2, freq="D")
+    ds = xr.Dataset(
+        data_vars={
+            "TA": (("location", "time", "slope"), [[[270.123456], [np.nan]]]),
+            "weather": (("location", "time", "slope"), [[["clear"], ["storm"]]]),
+            "density": (("location", "time", "slope", "layer"), [[[[100.0, 200.0]], [[np.nan, np.nan]]]]),
+        },
+        coords={
+            "location": ["TEST"],
+            "time": times,
+            "slope": [0],
+            "layer": [0, 1],
+            "latitude": ("location", [46.5]),
+            "longitude": ("location", [10.5]),
+            "altitude": ("location", [2500.0]),
+            "azimuth": ("slope", [180.0]),
+            "inclination": ("slope", [30.0]),
+        },
+    )
+    return xsnowDataset(ds)
+
+
+@pytest.mark.synthetic
+def test_to_smet_writes_nodata_precision_and_unquoted_strings(smet_writer_dataset, tmp_path):
+    """SMET writer should emit rectangular rows even when values are missing."""
+    output_file = tmp_path / "nodata.smet"
+    smet_writer_dataset.to_smet(output_file)
+
+    content = output_file.read_text()
+    assert "nodata = -999.0" in content
+    assert "fields = timestamp TA weather" in content
+    assert '"' not in content
+    assert "270.12346" in content
+    assert "-999.0" in content
+
+    data_lines = content.split("[DATA]\n", maxsplit=1)[1].splitlines()
+    assert data_lines
+    column_counts = {len(line.split()) for line in data_lines}
+    assert column_counts == {3}
+
+
+@pytest.mark.synthetic
+def test_to_smet_roundtrip_preserves_missing_values(smet_writer_dataset, tmp_path):
+    """A SMET written with nodata tokens should parse back to NaN values."""
+    from xsnow.io.smet import read_smet
+
+    output_file = tmp_path / "roundtrip_missing.smet"
+    smet_writer_dataset.to_smet(output_file)
+
+    loaded = read_smet(output_file)
+    assert loaded is not None
+    assert "TA" in loaded
+    assert np.isclose(loaded["TA"].isel(time=0).values, 270.12346).all()
+    assert np.isnan(loaded["TA"].isel(time=1).values).all()
+    assert "layer" not in loaded["TA"].dims
+
+
 @pytest.mark.synthetic
 @pytest.mark.edge_case
 def test_to_smet_max_files_limit(tmp_path, synthetic_pro):
@@ -366,7 +426,6 @@ def test_to_smet_single_location_requirement(real_file_subset, tmp_path):
 
 
 @pytest.mark.real_data
-@pytest.mark.skip(reason="SMET writer produces malformed output - needs investigation")
 def test_to_smet_only_exports_time_series(real_file_subset, tmp_path):
     """
     Test that SMET output only includes time series variables (no layers).

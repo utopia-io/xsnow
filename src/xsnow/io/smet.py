@@ -274,7 +274,8 @@ def to_smet(
         return
 
     # Squeeze and convert to dataframe, keeping only data variables
-    df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()
+    df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()[smet_vars]
+    nodata = -999.0
 
     with _open_any_as_text(path, 'wt') as f:
         f.write("SMET 1.1 ASCII\n")
@@ -287,12 +288,21 @@ def to_smet(
         f.write(f"latitude = {lat:.4f}\n")
         f.write(f"longitude = {lon:.4f}\n")
         f.write(f"altitude = {alt:.0f}\n")
-        f.write("nodata = -999\n")
+        f.write(f"nodata = {nodata:.1f}\n")
         fields = "timestamp " + " ".join(df.columns)
         f.write(f"fields = {fields}\n")
         f.write("[DATA]\n")
 
     df.index.name = 'timestamp'
-    df.to_csv(path, sep=' ', mode='a', header=False, date_format='%Y-%m-%dT%H:%M:%S')
+    df.to_csv(
+        path,
+        sep='\t',
+        mode='a',
+        na_rep=f"{nodata:.1f}",
+        header=False,
+        quoting=3,  # no quotes around strings
+        float_format='%.5f',
+        date_format='%Y-%m-%dT%H:%M:%S',
+    )
     logging.info(f"Dataset successfully saved to {path}")
     
