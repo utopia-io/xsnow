@@ -95,9 +95,10 @@ def read(
 
     Args:
         source: The data source. Can be a path to a single file (e.g.,
-            '.pro', '.smet', '.nc'), a directory containing data files, or a
-            list of file paths. If a file has extension .gz, .bz2, or .xz, it will
-            be read with the appropriate decompressor.
+            '.pro', '.smet', '.nc', '.zarr'), a list of paths (.pro and .smet),
+            or a directory (of .pro and .smet). PRO/SMET files can have extensions
+            (.gz, .bz2, or .xz), and will be read with the appropriate
+            decompressor.
         recursive: If True, search subdirectories recursively for .pro and .smet
             files when source is a directory. Default is False for backward
             compatibility and to avoid accidentally including unwanted files.
@@ -124,7 +125,10 @@ def read(
             - `max_layers`: Max layer dimension. `'auto'` (default) uses the
               smart detector to scan the largest .pro files and add a buffer
               when only a subset is scanned. Set an int to force a fixed layer
-              dimension.
+              dimension. For compressed .pro archives, compressed byte size is
+              a weaker proxy for layer count than uncompressed text size; use a
+              manual integer value for heterogeneous compressed archives when a
+              conservative layer dimension is important.
             - `force_smart_detection`: If True, skip the homogeneity validation
               before smart max-layer detection. This is faster for known-safe
               archives, but can be wrong for heterogeneous file sets.

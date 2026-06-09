@@ -64,8 +64,11 @@ def _ext_is(filename: Union[str, Path], ext: str) -> bool:
 
 
 def _open_any_as_text(filename: Union[str, Path], mode="rt", encoding="utf-8", **kwargs) -> IO:
-    """Opens either uncompressed or compressed file in text mode. For compatability across different
-    `open` implementations, mode is always coerced to text mode."""
+    """Open an uncompressed or compressed file in text mode.
+
+    For compatibility across different ``open`` implementations, ``mode`` is
+    always coerced to text mode.
+    """
     if "t" not in mode:
         mode += "t"
     if _ext_is(filename, ".gz"):
@@ -233,4 +236,3 @@ def _coerce_realization(sel: Optional[RealizationLike]) -> Optional[RealizationS
     if sel is None or isinstance(sel, RealizationSelector):
         return sel
     return RealizationSelector(sel=sel) 
-

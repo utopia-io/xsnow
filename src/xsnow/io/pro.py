@@ -1354,10 +1354,13 @@ def to_pro(
     This function iterates through each timestamp in the dataset and writes the
     vertical profile data (variables with a 'layer' dimension) into the .pro
     format. It only supports writing data for a single location.
+    If the destination path ends in '.gz', '.bz2', or '.xz', the output is
+    compressed with the corresponding compressor.
 
     Args:
         ds: The dataset instance to save.
-        path: The destination file path for the .pro file.
+        path: The destination file path for the .pro file. Supported suffixes
+            are '.pro', '.pro.gz', '.pro.bz2', and '.pro.xz'.
         max_files: The maximum number of profiles (timestamps) allowed.
         **kwargs: Reserved for future filtering options.
         

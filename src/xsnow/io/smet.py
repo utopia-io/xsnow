@@ -234,10 +234,13 @@ def to_smet(
     This function extracts data variables that do not have a 'layer' dimension
     (e.g., meteorological data, total snow height) and writes them into the
     SMET format. It only supports writing data for a single location.
+    If the destination path ends in '.gz', '.bz2', or '.xz', the output is
+    compressed with the corresponding compressor.
 
     Args:
         ds: The dataset instance to save.
-        path: The destination file path for the .smet file.
+        path: The destination file path for the .smet file. Supported suffixes
+            are '.smet', '.smet.gz', '.smet.bz2', and '.smet.xz'.
         max_files: The maximum number of locations allowed.
             If the dataset contains more locations, a ValueError is raised.
             Defaults to None (no limit).
