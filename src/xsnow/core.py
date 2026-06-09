@@ -830,7 +830,7 @@ class xsnowDataset:
             return self.__class__(gpu_ds)
         except (ImportError, RuntimeError):
             import logging
-            logging.getLogger(__name__).info("Cupy not found or GPU not available. Returning original dataset.")
+            logging.getLogger(__name__).warning("Cupy not found or GPU not available. Returning original dataset.")
             return self
     def to_cpu(self) -> 'xsnowDataset':
         """

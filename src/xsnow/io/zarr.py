@@ -70,13 +70,13 @@ def _read_zarr(
         if not (has_zarr_v3 or has_zarr_v2):
             raise ValueError(f"Directory does not appear to be a Zarr archive: {path}")
         
-        logger.info(f"Reading Zarr archive: {path}")
+        logger.debug(f"Reading Zarr archive: {path}")
         
         # Open with xarray
         ds_raw = xr.open_zarr(path)
         ds_raw = _promote_slope_metadata_coords(ds_raw)
         
-        logger.info(
+        logger.debug(
             f"  Loaded: {len(ds_raw.location):,} locations, "
             f"{len(ds_raw.time):,} timesteps, "
             f"{len(ds_raw.data_vars)} variables"
@@ -105,7 +105,7 @@ def _read_zarr(
     except Exception:
         # Unexpected errors (e.g. a programming bug like a wrong xarray call)
         # must surface rather than be masked as a None "read failure".
-        logger.exception(f"Unexpected error reading Zarr archive: {path}")
+        logger.error(f"Unexpected error reading Zarr archive: {path}")
         raise
 
 
@@ -169,7 +169,7 @@ def to_zarr(
         logger.warning(f"Added .zarr extension: {path}")
     
     # Save to Zarr
-    logger.info(f"Saving to Zarr: {path}")
+    logger.debug(f"Saving to Zarr: {path}")
     
     try:
         # Note: Zarr v3 uses default compression automatically
@@ -181,7 +181,7 @@ def to_zarr(
             **kwargs
         )
         
-        logger.info(f"✅ Dataset saved to {path}")
+        logger.info(f"Dataset saved to {path}")
         
         # Report size
         result = subprocess.run(

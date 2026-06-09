@@ -229,7 +229,7 @@ def read(
         parser_kwargs['use_dask'] = lazy
         parser_kwargs['chunks'] = chunks
 
-        logger.info("Using lazy loading with Dask")
+        logger.debug("Using lazy loading with Dask")
         pro_datasets = _read_pro_files_lazy(
             pro_files, datetime_start, datetime_end, 
             n_cpus_use, parallel_lazy_creation, logger, parser_kwargs
@@ -276,7 +276,7 @@ def read(
                     ds_sub = ds_sub.trim_padding()
                 """
             )
-        logger.info("Trimming NaN padding from layer dimension...")
+        logger.debug("Trimming NaN padding from layer dimension...")
         final_dataset = final_dataset.trim_padding()
     
     return final_dataset

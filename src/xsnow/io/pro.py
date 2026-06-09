@@ -469,7 +469,7 @@ def _determine_max_layers_smart(
             )
     
     # Step 1: Get file sizes
-    logger.info(f"Analyzing file sizes for {len(pro_files)} files...")
+    logger.debug(f"Analyzing file sizes for {len(pro_files)} files...")
     file_sizes: List[Tuple[Path, int]] = []
     for f in pro_files:
         try:
@@ -489,8 +489,8 @@ def _determine_max_layers_smart(
     largest_size = largest_files[0][1] if largest_files else 0
     smallest_size = min(file_sizes, key=lambda x: x[1])[1] if file_sizes else 0
     
-    logger.info(f"File size range: {smallest_size/1024:.1f}KB - {largest_size/1024:.1f}KB")
-    logger.info(f"Scanning {n_largest} largest files to determine max layer count...")
+    logger.debug(f"File size range: {smallest_size/1024:.1f}KB - {largest_size/1024:.1f}KB")
+    logger.debug(f"Scanning {n_largest} largest files to determine max layer count...")
     
     # Step 3: Scan only the largest files
     largest_file_paths = [f for f, _ in largest_files]
@@ -530,12 +530,12 @@ def _determine_max_layers_smart(
     
     elapsed = time.time() - start
     
-    logger.info(f"✅ Smart max_layers determination complete:")
-    logger.info(f"   - Checked: {total_files} file sizes")
-    logger.info(f"   - Scanned: {n_largest} largest files")
-    logger.info(f"   - Max layers found: {max_in_sample}")
-    logger.info(f"   - Using max_layers: {safe_max_layers} {buffer_msg}")
-    logger.info(f"   - Time elapsed: {elapsed:.2f} seconds")
+    logger.debug(f"Smart max_layers determination complete:")
+    logger.debug(f"  - Checked: {total_files} file sizes")
+    logger.debug(f"  - Scanned: {n_largest} largest files")
+    logger.debug(f"  - Max layers found: {max_in_sample}")
+    logger.debug(f"  - Using max_layers: {safe_max_layers} {buffer_msg}")
+    logger.debug(f"  - Time elapsed: {elapsed:.2f} seconds")
     
     return safe_max_layers
 
@@ -1102,7 +1102,7 @@ def _read_pro_files_eager(
     else:
         max_layers_to_use = int(max_layers_arg)
     
-    logger.info(f"Loading {len(pro_files)} datasets eagerly with {n_cpus_use} workers...")
+    logger.info(f"Parsing {len(pro_files)} datasets eagerly with {n_cpus_use} workers...")
     
     if n_cpus_use > 1 and len(pro_files) > 1:
         ctx = multiprocessing.get_context('spawn')
@@ -1241,16 +1241,12 @@ def _read_pro_files_lazy(
         )
     elif isinstance(max_layers_arg, int):
         default_max_layers = max_layers_arg
-        logger.info(f"Using user-specified max_layers={default_max_layers}")
+        logger.debug(f"Using user-specified max_layers={default_max_layers}")
     else:
         default_max_layers = 200
         logger.warning(f"Invalid max_layers value '{max_layers_arg}', using default=200")
     
     if use_dask:
-        logger.info("Creating TRULY LAZY datasets using dask.delayed...")
-        logger.info(f"Using max_layers dimension: {default_max_layers}")
-        logger.info("Profile data will NOT be read until .compute() or .load() is called")
-        
         chunks = parser_kwargs.get('chunks', {'time': 100, 'layer': -1})
         
         @delayed
@@ -1296,28 +1292,28 @@ def _read_pro_files_lazy(
                     pass
                 return None
         
-        logger.info(f"Building delayed loading graph for {len(pro_files)} files...")
+        logger.debug(f"Building delayed loading graph for {len(pro_files)} files...")
         delayed_datasets = [load_single_file_with_validation(fp) for fp in pro_files]
         
-        logger.info(f"✅ Lazy structure created successfully!")
-        logger.info(f"   - Files: {len(pro_files)}")
-        logger.info(f"   - Layer dimension: {default_max_layers}")
-        logger.info(f"   - Data loaded: NONE (truly lazy!)")
-        logger.info(f"   - Call .compute() or .load() to read files")
+        logger.debug(f"Lazy structure created successfully!")
+        logger.debug(f"  - Files: {len(pro_files)}")
+        logger.debug(f"  - Layer dimension: {default_max_layers}")
+        logger.debug(f"  - Data loaded: NONE (truly lazy!)")
+        logger.debug(f"  - Call .compute() or .load() to read files")
         
         if parallel_lazy_creation and n_cpus_use > 1:
-            logger.info(f"Computing delayed datasets with {n_cpus_use} workers...")
+            logger.info(f"Computing {len(pro_files)} delayed datasets with {n_cpus_use} workers...")
             final_datasets = list(compute(*delayed_datasets, scheduler='threads', num_workers=n_cpus_use))
         else:
-            logger.info("Computing delayed datasets sequentially...")
+            logger.info(f"Computing {len(pro_files)} delayed datasets sequentially...")
             final_datasets = [ds.compute() for ds in delayed_datasets]
         
         final_datasets = [ds for ds in final_datasets if ds is not None]
-        logger.info(f"Created {len(final_datasets)} datasets")
+        logger.debug(f"Created {len(final_datasets)} datasets")
         return final_datasets
         
     else:
-        logger.info("Building Dask graph for parallel dataset creation...")
+        logger.debug("Building Dask graph for parallel dataset creation...")
         lazy_datasets = [
             _create_dataset_from_pro_file(
                 fp, default_max_layers, datetime_start, datetime_end, logger, parser_kwargs
