@@ -16,6 +16,7 @@ import pandas as pd
 import xarray as xr
 from pathlib import Path
 
+from tests.conftest import ALL_FILE_EXTS, COMPRESSION_MODULES
 from xsnow import read
 
 
@@ -229,17 +230,18 @@ def test_to_pro_basic(sample_pro_file, tmp_path):
     # Read a single station
     ds = read(sample_pro_file)
     
-    output_file = tmp_path / "output.pro"
-    ds.to_pro(output_file)
+    for ext in ALL_FILE_EXTS:
+        output_file = tmp_path / ("output.pro" + ext)
+        ds.to_pro(output_file)
     
-    # File should exist and have content
-    assert output_file.exists()
-    assert output_file.stat().st_size > 0
-    
-    # Should have proper structure
-    content = output_file.read_text()
-    assert '[STATION_PARAMETERS]' in content
-    assert '[DATA]' in content
+        # File should exist and have content
+        assert output_file.exists()
+        assert output_file.stat().st_size > 0
+        
+        # Should have proper structure
+        content = read_compressed(output_file)
+        assert '[STATION_PARAMETERS]' in content
+        assert '[DATA]' in content
 
 
 @pytest.mark.real_data
@@ -251,21 +253,22 @@ def test_to_pro_roundtrip_structure(sample_pro_file, tmp_path):
     """
     ds_original = read(sample_pro_file)
     
-    # Write to .pro
-    output_file = tmp_path / "roundtrip.pro"
-    ds_original.to_pro(output_file)
-    
-    # Read back
-    ds_loaded = read(output_file)
-    
-    # Check dimensions match
-    assert ds_loaded.sizes['location'] == ds_original.sizes['location']
-    assert ds_loaded.sizes['time'] == ds_original.sizes['time']
-    
-    # Check variables present
-    for var in ['height', 'density']:
-        if var in ds_original.data:
-            assert var in ds_loaded.data
+    for ext in ALL_FILE_EXTS:
+        # Write to .pro
+        output_file = tmp_path / ("roundtrip.pro" + ext)
+        ds_original.to_pro(output_file)
+        
+        # Read back
+        ds_loaded = read(output_file)
+        
+        # Check dimensions match
+        assert ds_loaded.sizes['location'] == ds_original.sizes['location']
+        assert ds_loaded.sizes['time'] == ds_original.sizes['time']
+        
+        # Check variables present
+        for var in ['height', 'density']:
+            if var in ds_original.data:
+                assert var in ds_loaded.data
 
 
 @pytest.mark.synthetic
@@ -319,17 +322,18 @@ def test_to_smet_basic(real_file_subset, tmp_path):
         first_location = str(ds.data.location.values[0])
         ds = ds.sel(location=first_location)
     
-    output_file = tmp_path / "output.smet"
-    ds.to_smet(output_file)
-    
-    # File should exist
-    assert output_file.exists()
-    
-    # Should have SMET structure
-    content = output_file.read_text()
-    assert 'SMET' in content
-    assert '[HEADER]' in content
-    assert '[DATA]' in content
+    for ext in ALL_FILE_EXTS:
+        output_file = tmp_path / ("output.smet" + ext)
+        ds.to_smet(output_file)
+
+        # File should exist
+        assert output_file.exists()
+
+        # Should have SMET structure
+        content = read_compressed(output_file)
+        assert 'SMET' in content
+        assert '[HEADER]' in content
+        assert '[DATA]' in content
 
 
 @pytest.mark.synthetic
@@ -673,6 +677,19 @@ StationName= {long_name}
         
         # Should be preserved (up to 64 chars)
         assert original[:64] == loaded[:64]
+
+# ============================================================================
+# UTILITY
+# ============================================================================
+
+def read_compressed(filepath: Path):
+    if filepath.suffix in COMPRESSION_MODULES.keys():
+        module = COMPRESSION_MODULES[filepath.suffix]
+        with module.open(filepath, "rt") as f:
+            content = f.read()
+    else:
+        content = filepath.read_text()
+    return content
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
