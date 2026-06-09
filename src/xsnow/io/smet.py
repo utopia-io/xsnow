@@ -20,7 +20,7 @@ from ..plugin import register_xsnowDataset_method
 from ..registry import registry
 from ..utils import get_logger
 
-from .base import _round_coord, _sanitize_station_name
+from .base import _open_any_as_text, _round_coord, _sanitize_station_name
 
 
 def _read_smet_files(
@@ -95,7 +95,7 @@ def read_smet(
 
     header = {}
     data_start_line = -1
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with _open_any_as_text(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
         for i, line in enumerate(f):
             if line.strip() == '[DATA]':
                 data_start_line = i + 1
@@ -234,10 +234,13 @@ def to_smet(
     This function extracts data variables that do not have a 'layer' dimension
     (e.g., meteorological data, total snow height) and writes them into the
     SMET format. It only supports writing data for a single location.
+    If the destination path ends in '.gz', '.bz2', or '.xz', the output is
+    compressed with the corresponding compressor.
 
     Args:
         ds: The dataset instance to save.
-        path: The destination file path for the .smet file.
+        path: The destination file path for the .smet file. Supported suffixes
+            are '.smet', '.smet.gz', '.smet.bz2', and '.smet.xz'.
         max_files: The maximum number of locations allowed.
             If the dataset contains more locations, a ValueError is raised.
             Defaults to None (no limit).
@@ -271,9 +274,10 @@ def to_smet(
         return
 
     # Squeeze and convert to dataframe, keeping only data variables
-    df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()
+    df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()[smet_vars]
+    nodata = -999.0
 
-    with open(path, 'w') as f:
+    with _open_any_as_text(path, 'wt') as f:
         f.write("SMET 1.1 ASCII\n")
         f.write("[HEADER]\n")
         f.write(f"station_name = {ds.location.item()}\n")
@@ -284,12 +288,21 @@ def to_smet(
         f.write(f"latitude = {lat:.4f}\n")
         f.write(f"longitude = {lon:.4f}\n")
         f.write(f"altitude = {alt:.0f}\n")
-        f.write("nodata = -999\n")
+        f.write(f"nodata = {nodata:.1f}\n")
         fields = "timestamp " + " ".join(df.columns)
         f.write(f"fields = {fields}\n")
         f.write("[DATA]\n")
 
     df.index.name = 'timestamp'
-    df.to_csv(path, sep=' ', mode='a', header=False, date_format='%Y-%m-%dT%H:%M:%S')
+    df.to_csv(
+        path,
+        sep='\t',
+        mode='a',
+        na_rep=f"{nodata:.1f}",
+        header=False,
+        quoting=3,  # no quotes around strings
+        float_format='%.5f',
+        date_format='%Y-%m-%dT%H:%M:%S',
+    )
     logging.info(f"Dataset successfully saved to {path}")
     

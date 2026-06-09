@@ -16,7 +16,8 @@ import pandas as pd
 import xarray as xr
 from pathlib import Path
 
-from xsnow import read
+from tests.conftest import ALL_FILE_EXTS, COMPRESSION_MODULES
+from xsnow import read, xsnowDataset
 
 
 # ============================================================================
@@ -229,17 +230,18 @@ def test_to_pro_basic(sample_pro_file, tmp_path):
     # Read a single station
     ds = read(sample_pro_file)
     
-    output_file = tmp_path / "output.pro"
-    ds.to_pro(output_file)
+    for ext in ALL_FILE_EXTS:
+        output_file = tmp_path / ("output.pro" + ext)
+        ds.to_pro(output_file)
     
-    # File should exist and have content
-    assert output_file.exists()
-    assert output_file.stat().st_size > 0
-    
-    # Should have proper structure
-    content = output_file.read_text()
-    assert '[STATION_PARAMETERS]' in content
-    assert '[DATA]' in content
+        # File should exist and have content
+        assert output_file.exists()
+        assert output_file.stat().st_size > 0
+        
+        # Should have proper structure
+        content = read_compressed(output_file)
+        assert '[STATION_PARAMETERS]' in content
+        assert '[DATA]' in content
 
 
 @pytest.mark.real_data
@@ -251,21 +253,22 @@ def test_to_pro_roundtrip_structure(sample_pro_file, tmp_path):
     """
     ds_original = read(sample_pro_file)
     
-    # Write to .pro
-    output_file = tmp_path / "roundtrip.pro"
-    ds_original.to_pro(output_file)
-    
-    # Read back
-    ds_loaded = read(output_file)
-    
-    # Check dimensions match
-    assert ds_loaded.sizes['location'] == ds_original.sizes['location']
-    assert ds_loaded.sizes['time'] == ds_original.sizes['time']
-    
-    # Check variables present
-    for var in ['height', 'density']:
-        if var in ds_original.data:
-            assert var in ds_loaded.data
+    for ext in ALL_FILE_EXTS:
+        # Write to .pro
+        output_file = tmp_path / ("roundtrip.pro" + ext)
+        ds_original.to_pro(output_file)
+        
+        # Read back
+        ds_loaded = read(output_file)
+        
+        # Check dimensions match
+        assert ds_loaded.sizes['location'] == ds_original.sizes['location']
+        assert ds_loaded.sizes['time'] == ds_original.sizes['time']
+        
+        # Check variables present
+        for var in ['height', 'density']:
+            if var in ds_original.data:
+                assert var in ds_loaded.data
 
 
 @pytest.mark.synthetic
@@ -319,17 +322,78 @@ def test_to_smet_basic(real_file_subset, tmp_path):
         first_location = str(ds.data.location.values[0])
         ds = ds.sel(location=first_location)
     
-    output_file = tmp_path / "output.smet"
-    ds.to_smet(output_file)
-    
-    # File should exist
-    assert output_file.exists()
-    
-    # Should have SMET structure
+    for ext in ALL_FILE_EXTS:
+        output_file = tmp_path / ("output.smet" + ext)
+        ds.to_smet(output_file)
+
+        # File should exist
+        assert output_file.exists()
+
+        # Should have SMET structure
+        content = read_compressed(output_file)
+        assert 'SMET' in content
+        assert '[HEADER]' in content
+        assert '[DATA]' in content
+
+
+@pytest.fixture
+def smet_writer_dataset():
+    """Single-location dataset with missing values and string data for SMET export."""
+    times = pd.date_range("2025-01-01", periods=2, freq="D")
+    ds = xr.Dataset(
+        data_vars={
+            "TA": (("location", "time", "slope"), [[[270.123456], [np.nan]]]),
+            "weather": (("location", "time", "slope"), [[["clear"], ["storm"]]]),
+            "density": (("location", "time", "slope", "layer"), [[[[100.0, 200.0]], [[np.nan, np.nan]]]]),
+        },
+        coords={
+            "location": ["TEST"],
+            "time": times,
+            "slope": [0],
+            "layer": [0, 1],
+            "latitude": ("location", [46.5]),
+            "longitude": ("location", [10.5]),
+            "altitude": ("location", [2500.0]),
+            "azimuth": ("slope", [180.0]),
+            "inclination": ("slope", [30.0]),
+        },
+    )
+    return xsnowDataset(ds)
+
+
+@pytest.mark.synthetic
+def test_to_smet_writes_nodata_precision_and_unquoted_strings(smet_writer_dataset, tmp_path):
+    """SMET writer should emit rectangular rows even when values are missing."""
+    output_file = tmp_path / "nodata.smet"
+    smet_writer_dataset.to_smet(output_file)
+
     content = output_file.read_text()
-    assert 'SMET' in content
-    assert '[HEADER]' in content
-    assert '[DATA]' in content
+    assert "nodata = -999.0" in content
+    assert "fields = timestamp TA weather" in content
+    assert '"' not in content
+    assert "270.12346" in content
+    assert "-999.0" in content
+
+    data_lines = content.split("[DATA]\n", maxsplit=1)[1].splitlines()
+    assert data_lines
+    column_counts = {len(line.split()) for line in data_lines}
+    assert column_counts == {3}
+
+
+@pytest.mark.synthetic
+def test_to_smet_roundtrip_preserves_missing_values(smet_writer_dataset, tmp_path):
+    """A SMET written with nodata tokens should parse back to NaN values."""
+    from xsnow.io.smet import read_smet
+
+    output_file = tmp_path / "roundtrip_missing.smet"
+    smet_writer_dataset.to_smet(output_file)
+
+    loaded = read_smet(output_file)
+    assert loaded is not None
+    assert "TA" in loaded
+    assert np.isclose(loaded["TA"].isel(time=0).values, 270.12346).all()
+    assert np.isnan(loaded["TA"].isel(time=1).values).all()
+    assert "layer" not in loaded["TA"].dims
 
 
 @pytest.mark.synthetic
@@ -362,7 +426,6 @@ def test_to_smet_single_location_requirement(real_file_subset, tmp_path):
 
 
 @pytest.mark.real_data
-@pytest.mark.skip(reason="SMET writer produces malformed output - needs investigation")
 def test_to_smet_only_exports_time_series(real_file_subset, tmp_path):
     """
     Test that SMET output only includes time series variables (no layers).
@@ -673,6 +736,19 @@ StationName= {long_name}
         
         # Should be preserved (up to 64 chars)
         assert original[:64] == loaded[:64]
+
+# ============================================================================
+# UTILITY
+# ============================================================================
+
+def read_compressed(filepath: Path):
+    if filepath.suffix in COMPRESSION_MODULES.keys():
+        module = COMPRESSION_MODULES[filepath.suffix]
+        with module.open(filepath, "rt") as f:
+            content = f.read()
+    else:
+        content = filepath.read_text()
+    return content
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
