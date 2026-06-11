@@ -213,8 +213,8 @@ registry = {
         'si_units': 'm',
     },
     'rc_flat': {
-        "param_code": None,
-        "aliases": ['Critical Cut Length (Flat Terrain)', 'rc_flat'],
+        "param_code": "0606",
+        "aliases": ['critical_cut_length', 'critical_crack_length', 'rc_flat', 'rc'],
         'standard_name': 'critical_cut_length_for_flat_terrain',
         'long_name': 'Critical Cut Length (Flat Terrain)',
         'si_units': 'm',
