@@ -41,7 +41,7 @@ The package uses a physically intuitive vertical coordinate system.
   ground in meters.
 """
 
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from typing import Sequence, Union, Any, List, Optional, overload
 from pathlib import Path
 
@@ -66,6 +66,8 @@ class xsnowDataset:
     _REPR_MAX_AUTO_COMPUTE_SECONDS = 3
     _REPR_EST_BYTES_PER_SEC = 200 * 1024 * 1024  # heuristic throughput used for repr auto-compute
     _REPR_DASK_BLOCK_OVERHEAD = 0.005  # assumed per-block scheduler overhead for lazy arrays
+
+    data: xr.Dataset
 
     def __init__(self, source: "xr.Dataset | xsnowDataset") -> None:
         """
@@ -185,11 +187,9 @@ class xsnowDataset:
     @overload
     def __getitem__(self, key: Hashable) -> xr.DataArray: ...
     @overload
-    def __getitem__(self, key: List[Hashable]) -> xr.Dataset: ...
-    @overload
-    def __getitem__(self, key: Mapping[Any, Any]) -> xr.Dataset: ...
+    def __getitem__(self, key: Iterable[Hashable]) -> xr.Dataset: ...  # pyright: ignore[reportOverlappingOverload]
     def __getitem__(
-        self, key: Hashable | list[Hashable] | Mapping[Any, Any]
+        self, key: Hashable | Iterable[Hashable]
     ) -> xr.Dataset | xr.DataArray:
         """
         Forwards item access to the underlying xarray.Dataset.

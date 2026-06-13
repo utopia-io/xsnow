@@ -117,7 +117,7 @@ def to_zarr(
     consolidated: bool = True,
     logger: Optional[logging.Logger] = None,
     **kwargs
-):
+) -> None:
     """
     Saves the dataset to a Zarr archive.
 
