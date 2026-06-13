@@ -320,13 +320,13 @@ class xsnowDataset:
     def to_dataframe(self, dim_order: Sequence[Hashable] | None = None) -> pd.DataFrame:
         """Forwarded to ``xarray.Dataset.to_dataframe``; see the xarray documentation for details."""
         ...
-    def equals(self, other: "xsnowDataset | xr.Dataset") -> bool:
+    def equals(self, other: xsnowDataset | xr.Dataset) -> bool:
         """Forwarded to ``xarray.Dataset.equals``; see the xarray documentation for details."""
         ...
-    def identical(self, other: "xsnowDataset | xr.Dataset") -> bool:
+    def identical(self, other: xsnowDataset | xr.Dataset) -> bool:
         """Forwarded to ``xarray.Dataset.identical``; see the xarray documentation for details."""
         ...
-    def broadcast_equals(self, other: "xsnowDataset | xr.Dataset") -> bool:
+    def broadcast_equals(self, other: xsnowDataset | xr.Dataset) -> bool:
         """Forwarded to ``xarray.Dataset.broadcast_equals``; see the xarray documentation for details."""
         ...
 
