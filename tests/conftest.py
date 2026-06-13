@@ -25,6 +25,13 @@ from pathlib import Path
 import shutil
 
 from xsnow import xsnowDataset, read
+import xsnow.plugin
+
+# Snapshot the "core" xsnowDataset surface at conftest import time, i.e.
+# before any test module has a chance to `import xsnow.extensions.*` and
+# permanently monkeypatch `xsnowDataset` via `register_xsnowDataset_method`.
+DEFAULT_XSNOWDATASET_ATTRS = frozenset(dir(xsnowDataset))
+DEFAULT_REGISTERED_METHODS = frozenset(xsnow.plugin.list_registered_methods())
 
 # ============================================================================
 # TEST DATA REPOSITORY MANAGEMENT
@@ -647,6 +654,16 @@ def snow_profile_xr_dataset():
 def xsnow_dataset(snow_profile_xr_dataset):
     """xsnowDataset wrapper around snow profile data."""
     return xsnowDataset(snow_profile_xr_dataset)
+
+
+@pytest.fixture(scope="session")
+def default_xsnowdataset_attrs() -> frozenset[str]:
+    return DEFAULT_XSNOWDATASET_ATTRS
+
+
+@pytest.fixture(scope="session")
+def default_registered_methods() -> frozenset[str]:
+    return DEFAULT_REGISTERED_METHODS
 
 
 # ============================================================================

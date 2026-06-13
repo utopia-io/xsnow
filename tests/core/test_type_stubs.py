@@ -205,20 +205,20 @@ def test_public_stub_methods_have_runtime_return_checks() -> None:
     assert not missing
 
 
-def test_runtime_public_methods_are_in_stub() -> None:
+def test_runtime_public_methods_are_in_stub(default_xsnowdataset_attrs: frozenset[str]) -> None:
     """Every public xsnowDataset runtime method must be listed in core.pyi."""
     stubbed_methods = {name for name in _stub_method_nodes() if not name.startswith("__")} | _stub_alias_names()
-    runtime_only = sorted(_runtime_public_method_names() - stubbed_methods)
+    core_runtime_methods = _runtime_public_method_names() & default_xsnowdataset_attrs
+    runtime_only = sorted(core_runtime_methods - stubbed_methods)
     assert not runtime_only, (
         "Public xsnowDataset runtime methods are not listed in core.pyi: "
         + ", ".join(runtime_only)
     )
 
 
-def test_registered_methods_are_in_stub() -> None:
+def test_registered_methods_are_in_stub(default_registered_methods: frozenset[str]) -> None:
     """Every method registered via @register_xsnowDataset_method must be stubbed in core.pyi."""
-    registered = set(xsnow.plugin.list_registered_methods())
-    assert registered <= set(_stub_method_nodes()) | _stub_alias_names()
+    assert default_registered_methods <= set(_stub_method_nodes()) | _stub_alias_names()
 
 
 @pytest.mark.parametrize("name", sorted(XSNOW_RETURN_CASES))
