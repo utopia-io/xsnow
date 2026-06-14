@@ -44,7 +44,60 @@ class xsnowDataset:
 
     def __init__(self, source: xr.Dataset | xsnowDataset) -> None: ...
 
-    # Basic xarray-like dataset state exposed by the wrapper.
+    # Mirrors xarray.Dataset.__getitem__'s typing. pyright's reportOverlappingOverload
+    # warns (possibly incorrectly?) so suppress the warning.
+    @overload
+    def __getitem__(self, key: Hashable) -> xr.DataArray: ...
+    @overload
+    def __getitem__(self, key: Iterable[Hashable]) -> xr.Dataset: ...  # pyright: ignore[reportOverlappingOverload]
+
+    def __setitem__(
+        self,
+        key: Hashable | list[Hashable] | Mapping[Any, Any],
+        value: Any,
+    ) -> None: ...
+    def __contains__(self, key: object) -> bool: ...
+    def __dir__(self) -> Sequence[str]: ...
+    def __repr__(self, *, force_details: bool = False) -> str: ...
+
+    # Escape hatch for forwarded xarray attributes, dynamic coordinates, and
+    # data variables. This keeps valid runtime use type-checkable, but the
+    # returned object is intentionally Any.
+    def __getattr__(self, name: str) -> Any: ...
+
+    # Explicitly defined xsnowDataset public methods.
+    def copy(self, deep: bool = False) -> xsnowDataset: ...
+    def merge_smet(
+        self,
+        source: str | list[str] | Path | list[Path],
+        var_prefix: str | None = None,
+        **kwargs: Any,
+    ) -> xsnowDataset: ...
+    def to_xarray(self) -> xr.Dataset: ...
+    def compute_hs(self) -> xsnowDataset: ...
+    def compute_z_depth(self) -> xsnowDataset: ...
+    def update_profile_status(self) -> xsnowDataset: ...
+    def profile_status_summary(self) -> None: ...
+    def to_gpu(self) -> xsnowDataset: ...
+    def to_cpu(self) -> xsnowDataset: ...
+
+    # Methods registered from I/O and helper modules. These are registered by
+    # default on xsnow import. Each is bound directly to its implementing free 
+    # function, so the stub signature is identical to the runtime signature.
+    append_latest = _append_latest
+    trim_padding = _trim_padding
+    reorder_dims = _reorder_dims
+    print = _print
+    to_pro = _to_pro
+    to_smet = _to_smet
+    to_netcdf = _to_netcdf
+    to_zarr = _to_zarr
+    fill_gaps_with = _fill_gaps_with
+    overwrite_with = _overwrite_with
+    update = _update
+    combine_first = _combine_first
+
+    # Basic dataset-state properties from xarray 
     @property
     def attrs(self) -> dict[Any, Any]:
         """Forwarded to ``xarray.Dataset.attrs``; see the xarray documentation for details."""
@@ -78,60 +131,7 @@ class xsnowDataset:
         """Forwarded to ``xarray.Dataset.variables``; see the xarray documentation for details."""
         ...
 
-    # Mirrors xarray.Dataset.__getitem__'s typing. pyright's reportOverlappingOverload
-    # warns (possibly incorrectly?) so suppress the warning.
-    @overload
-    def __getitem__(self, key: Hashable) -> xr.DataArray: ...
-    @overload
-    def __getitem__(self, key: Iterable[Hashable]) -> xr.Dataset: ...  # pyright: ignore[reportOverlappingOverload]
-
-    def __setitem__(
-        self,
-        key: Hashable | list[Hashable] | Mapping[Any, Any],
-        value: Any,
-    ) -> None: ...
-    def __contains__(self, key: object) -> bool: ...
-    def __dir__(self) -> Sequence[str]: ...
-    def __repr__(self, *, force_details: bool = False) -> str: ...
-
-    # Escape hatch for forwarded xarray attributes, dynamic coordinates, and
-    # data variables. This keeps valid runtime use type-checkable, but the
-    # returned object is intentionally Any.
-    def __getattr__(self, name: str) -> Any: ...
-
-    # xsnow-native core methods.
-    def copy(self, deep: bool = False) -> xsnowDataset: ...
-    def merge_smet(
-        self,
-        source: str | list[str] | Path | list[Path],
-        var_prefix: str | None = None,
-        **kwargs: Any,
-    ) -> xsnowDataset: ...
-    def to_xarray(self) -> xr.Dataset: ...
-    def compute_hs(self) -> xsnowDataset: ...
-    def compute_z_depth(self) -> xsnowDataset: ...
-    def update_profile_status(self) -> xsnowDataset: ...
-    def profile_status_summary(self) -> None: ...
-    def to_gpu(self) -> xsnowDataset: ...
-    def to_cpu(self) -> xsnowDataset: ...
-
-    # xsnow-native methods registered from I/O and helper modules. Each is
-    # bound directly to its implementing free function, so the stub
-    # signature is the runtime signature.
-    append_latest = _append_latest
-    trim_padding = _trim_padding
-    reorder_dims = _reorder_dims
-    print = _print
-    to_pro = _to_pro
-    to_smet = _to_smet
-    to_netcdf = _to_netcdf
-    to_zarr = _to_zarr
-    fill_gaps_with = _fill_gaps_with
-    overwrite_with = _overwrite_with
-    update = _update
-    combine_first = _combine_first
-
-    # Curated xarray methods that return a Dataset at runtime and are rewrapped
+    # Curated methods that return a Dataset at runtime and are rewrapped
     # by xsnowDataset.__getattr__.
     def sel(
         self,
@@ -313,7 +313,7 @@ class xsnowDataset:
         """Forwarded to ``xarray.Dataset.unify_chunks``; see the xarray documentation for details."""
         ...
 
-    # Common conversions and comparisons that do not return xsnowDataset.
+    # Common conversions and comparisons from xarray that do not return xsnowDataset.
     def to_array(self, dim: Hashable = "variable", name: Hashable | None = None) -> xr.DataArray:
         """Forwarded to ``xarray.Dataset.to_array``; see the xarray documentation for details."""
         ...

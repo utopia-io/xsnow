@@ -868,8 +868,6 @@ class xsnowDataset:
         return self if self.data is None else self.__class__(self.data.as_numpy())
     
 
-
-
 class DatasetDecorator(xsnowDataset):
     """
     Base class for extension "decorators" that layer functionality onto an ``xsnowDataset``.
@@ -962,7 +960,7 @@ class DatasetDecorator(xsnowDataset):
 
         return new
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         # 1) Prefer the xsnowDataset surface (user methods, registered extensions, etc.)
         if hasattr(self.base, name):
             attr = getattr(self.base, name)

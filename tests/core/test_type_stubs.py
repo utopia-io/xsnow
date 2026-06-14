@@ -256,6 +256,24 @@ class TestRuntimeMatchesStub:
                 f"but the stub signature for {name} in core.pyi cannot accept it"
             )
 
+    @pytest.mark.parametrize("name", sorted(XSNOW_RETURN_CASES))
+    def test_xsnow_required_params_are_in_stub(self, xsnow_dataset: xsnow.xsnowDataset, name: str) -> None:
+        """Required runtime parameters for xsnow-native methods must be in the stub."""
+        node = _stub_method_nodes()[name]
+        stub_params = set(_explicit_stub_parameters(node))
+        stub_accepts_extra = node.args.vararg is not None or node.args.kwarg is not None
+
+        target = getattr(xsnow_dataset, name)
+        for param_name, param in inspect.signature(target).parameters.items():
+            if param.default is not inspect.Parameter.empty:
+                continue
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            assert param_name in stub_params or stub_accepts_extra, (
+                f"{name} requires {param_name!r} at runtime, "
+                f"but the stub signature for {name} in core.pyi cannot accept it"
+            )
+
 
 class TestStubReturnTypes:
     """Stub's advertised return types must match runtime behavior."""
