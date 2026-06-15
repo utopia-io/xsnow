@@ -28,7 +28,7 @@ B_RICHTER = -2.0         # Richter et al. (2019) parameter "b"
 E0 = 5.07e9              # Pa, modulus prefactor in Richter et al. (2019)
 E_EXP = 5.13             # exponent on (rho_slab / rho_ice)
 
-@register_xsnowDataset_method
+
 def compute_rho_slab(density, thickness, xp):
     """
     Compute the average slab density above each physical layer.
