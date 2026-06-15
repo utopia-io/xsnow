@@ -126,11 +126,11 @@ def _encode_mapping_attrs_for_netcdf(ds: xr.Dataset) -> xr.Dataset:
 
 @register_xsnowDataset_method
 def to_netcdf(
-    ds: xsnowDataset, 
+    ds: xsnowDataset,
     path: Union[str, Path],
-    logger: Optional[logging.Logger] = None, 
+    logger: Optional[logging.Logger] = None,
     **kwargs
-):
+) -> None:
     """
     Saves the dataset to a NetCDF file.
     

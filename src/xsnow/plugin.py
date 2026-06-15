@@ -6,13 +6,20 @@ register class methods from other modules. It can also be used to register compl
 functions that do not ship with this package.
 """
 
-from typing import Dict, Callable, Optional
+from typing import Any, Dict, Callable, Optional, TypeVar, overload
 import warnings
 
 # The global registry for custom analysis functions.
 # This dictionary maps a function name (str) to the function object (Callable).
 _posthoc_registered_methods: Dict[str, Callable] = {}
 
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+@overload
+def register_xsnowDataset_method(func: F) -> F: ...
+@overload
+def register_xsnowDataset_method(func: None = None, *, name: Optional[str] = None) -> Callable[[F], F]: ...
 def register_xsnowDataset_method(func: Optional[Callable] = None, *, name: Optional[str] = None):
     """
     Decorator to attach a free function as a method on xsnowDataset.

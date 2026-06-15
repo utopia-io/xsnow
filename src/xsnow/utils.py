@@ -12,7 +12,7 @@ import os
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Union, Any, Optional, List, Sequence
+from typing import Union, Any, Optional, List, Sequence, overload
 
 import numpy as np
 import xarray as xr
@@ -535,6 +535,18 @@ def detect_slope_coord_issues(ds: xr.Dataset) -> dict:
     return diagnostics
 
 
+@overload
+def reorder_dims(
+    ds: xsnowDataset,
+    preferred_order: Sequence[str] = ("location", "time", "slope", "realization", "layer"),
+    last_dims: Optional[Sequence[str]] = None,
+) -> xsnowDataset: ...
+@overload
+def reorder_dims(
+    ds: xr.Dataset,
+    preferred_order: Sequence[str] = ("location", "time", "slope", "realization", "layer"),
+    last_dims: Optional[Sequence[str]] = None,
+) -> xr.Dataset: ...
 @register_xsnowDataset_method
 def reorder_dims(
     ds: Union[xsnowDataset, xr.Dataset],

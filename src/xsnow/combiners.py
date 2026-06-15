@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Optional, Literal, Union, Sequence, Dict, Any, Mapping
+from typing import Iterable, NoReturn, Optional, Literal, Union, Sequence, Dict, Any, Mapping
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -909,7 +909,7 @@ def update(
     self: xsnowDataset,
     *args: Any,
     **kwargs: Any,
-) -> xsnowDataset:
+) -> NoReturn:
     """
     Placeholder to prevent accidental use of xarray's Dataset.update on xsnowDataset.
 
@@ -932,7 +932,7 @@ def combine_first(
     self: xsnowDataset,
     *args: Any,
     **kwargs: Any,
-) -> xsnowDataset:
+) -> NoReturn:
     """
     Placeholder to prevent accidental use of xarray's Dataset.combine_first on xsnowDataset.
 
