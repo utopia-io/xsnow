@@ -27,23 +27,18 @@ def _class_node(name: str) -> ast.ClassDef:
     raise AssertionError(f"{name} not found in {STUB_PATH}")
 
 
-def _is_property(node: ast.FunctionDef) -> bool:
-    return any(
-        isinstance(decorator, ast.Name) and decorator.id == "property"
-        for decorator in node.decorator_list
-    )
-
-
 def _stub_method_nodes() -> dict[str, ast.FunctionDef]:
+    """Names of methods explicitly defined in the stub (i.e. not aliases or properties.)"""
     methods: dict[str, ast.FunctionDef] = {}
     for node in _class_node("xsnowDataset").body:
-        if isinstance(node, ast.FunctionDef) and not _is_property(node):
+        if isinstance(node, ast.FunctionDef):
             methods.setdefault(node.name, node)
     return methods
 
 
 def _stub_alias_names() -> set[str]:
-    """Names of class-body aliases like ``to_pro = _to_pro``."""
+    """Names of class-body aliases like ``to_pro = _to_pro`` or 
+    ``sel = _rewraps(xr.Dataset.sel)``."""
     names: set[str] = set()
     for node in _class_node("xsnowDataset").body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
@@ -53,13 +48,17 @@ def _stub_alias_names() -> set[str]:
     return names
 
 
-def _property_names() -> set[str]:
+def _stub_property_names() -> set[str]:
+    """Names of forwarded-property aliases like ``attrs: Final = _ds.attrs``."""
     props: set[str] = set()
     for node in _class_node("xsnowDataset").body:
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        if _is_property(node):
-            props.add(node.name)
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.annotation, ast.Name)
+            and node.annotation.id == "Final"
+        ):
+            props.add(node.target.id)
     return props
 
 
@@ -148,15 +147,10 @@ def _runtime_public_method_names() -> set[str]:
     return names
 
 
-# All forwarded methods except `chunk`, which stays *args/**kwargs in
-# core.pyi because its real params reference xarray-internal types.
-XARRAY_SIGNATURE_CHECK_NAMES = sorted(set(XARRAY_RETURN_CASES) - {"chunk"})
-
-
 class TestStubMatchesRuntime:
     """Stub -> runtime: anything advertised in core.pyi must exist and be callable at runtime."""
 
-    @pytest.mark.parametrize("name", sorted(_property_names()))
+    @pytest.mark.parametrize("name", sorted(_stub_property_names()))
     def test_stubbed_properties_are_available_at_runtime(self, xsnow_dataset: xsnow.xsnowDataset, name: str) -> None:
         """Properties advertised in the stub must be forwarded by xsnowDataset."""
         assert hasattr(xsnow_dataset, name)
@@ -187,11 +181,6 @@ class TestStubMatchesRuntime:
         This deliberately does not require exact signature equality: it only
         checks that stub-named parameters appear somewhere in the runtime
         signature, not their types, defaults, or ordering.
-
-        For forwarded xarray methods, this check is vacuous: ``__getattr__`` returns
-        a ``(*args, **kwargs)`` wrapper, so every parameter trivially "exists". Real
-        drift detection for those methods comes from
-        ``test_forwarded_xarray_signatures_match_xarray``.
         """
         target = xsnow.xsnowDataset if name == "__init__" else getattr(xsnow_dataset, name)
         runtime_params = inspect.signature(target).parameters
@@ -203,21 +192,6 @@ class TestStubMatchesRuntime:
             assert param_name in runtime_params or accepts_arbitrary_kwargs, (
                 f"{name} advertises parameter {param_name!r} in core.pyi, "
                 "but the runtime signature does not accept it"
-            )
-
-    @pytest.mark.parametrize("name", XARRAY_SIGNATURE_CHECK_NAMES)
-    def test_forwarded_xarray_signatures_match_xarray(self, name: str) -> None:
-        """Stub params for forwarded methods must exist on the real xarray method."""
-        node = _stub_method_nodes()[name]
-        xr_method = getattr(xr.Dataset, name)
-        runtime_params = inspect.signature(xr_method).parameters
-        accepts_kwargs = any(
-            param.kind == inspect.Parameter.VAR_KEYWORD for param in runtime_params.values()
-        )
-        for param_name in _explicit_stub_parameters(node):
-            assert param_name in runtime_params or accepts_kwargs, (
-                f"{name} advertises parameter {param_name!r} in core.pyi, "
-                f"but xr.Dataset.{name} does not accept it"
             )
 
 
@@ -237,24 +211,6 @@ class TestRuntimeMatchesStub:
     def test_registered_methods_are_in_stub(self, default_registered_methods: frozenset[str]) -> None:
         """Every method registered via @register_xsnowDataset_method must be stubbed in core.pyi."""
         assert default_registered_methods <= set(_stub_method_nodes()) | _stub_alias_names()
-
-    @pytest.mark.parametrize("name", sorted(XARRAY_RETURN_CASES))
-    def test_forwarded_xarray_required_params_are_in_stub(self, name: str) -> None:
-        """Required xarray parameters must be in the stub."""
-        node = _stub_method_nodes()[name]
-        stub_params = set(_explicit_stub_parameters(node))
-        stub_accepts_extra = node.args.vararg is not None or node.args.kwarg is not None
-
-        xr_method = getattr(xr.Dataset, name)
-        for param_name, param in inspect.signature(xr_method).parameters.items():
-            if param_name == "self" or param.default is not inspect.Parameter.empty:
-                continue
-            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                continue
-            assert param_name in stub_params or stub_accepts_extra, (
-                f"xr.Dataset.{name} requires {param_name!r}, "
-                f"but the stub signature for {name} in core.pyi cannot accept it"
-            )
 
     @pytest.mark.parametrize("name", sorted(XSNOW_RETURN_CASES))
     def test_xsnow_required_params_are_in_stub(self, xsnow_dataset: xsnow.xsnowDataset, name: str) -> None:
@@ -284,25 +240,14 @@ class TestStubReturnTypes:
         missing = public_methods - set(RETURN_CASES)
         assert not missing
 
-    @pytest.mark.parametrize("name", sorted(XSNOW_RETURN_CASES))
-    def test_xsnow_methods_return_advertised_broad_type(
+    @pytest.mark.parametrize("name", sorted(RETURN_CASES))
+    def test_methods_return_advertised_broad_type(
         self,
         xsnow_dataset: xsnow.xsnowDataset,
         name: str,
     ) -> None:
-        """Representative xsnow-native calls should match the broad stub return type."""
-        call, expected_type = XSNOW_RETURN_CASES[name]
-        result = call(xsnow_dataset)
-        assert isinstance(result, expected_type)
-
-    @pytest.mark.parametrize("name", sorted(XARRAY_RETURN_CASES))
-    def test_xarray_forwarded_methods_return_advertised_broad_type(
-        self,
-        xsnow_dataset: xsnow.xsnowDataset,
-        name: str,
-    ) -> None:
-        """Representative forwarded xarray calls should match the broad stub return type."""
-        call, expected_type = XARRAY_RETURN_CASES[name]
+        """Representative calls (xsnow-native and forwarded xarray) should match the broad stub return type."""
+        call, expected_type = RETURN_CASES[name]
         result = call(xsnow_dataset)
         assert isinstance(result, expected_type)
 

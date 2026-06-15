@@ -1,8 +1,7 @@
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Concatenate, Final, overload
 
-import pandas as pd
 import xarray as xr
 
 from xsnow.combiners import (
@@ -18,9 +17,30 @@ from xsnow.io.zarr import to_zarr as _to_zarr
 from xsnow.utils import print as _print, reorder_dims as _reorder_dims
 from xsnow.xsnow_io import append_latest as _append_latest, trim_padding as _trim_padding
 
-# Mirrors xarray.core.types.ErrorOptions / ErrorOptionsWithWarn (private module).
-ErrorOptions = Literal["raise", "ignore"]
-ErrorOptionsWithWarn = Literal["raise", "warn", "ignore"]
+# Alias an xr.Dataset method as one returning xsnowDataset, with self
+# rewrapped from xr.Dataset to xsnowDataset and the same parameter list.
+def _rewraps[**_XArrayParams](
+    m: Callable[Concatenate[xr.Dataset, _XArrayParams], Any],
+) -> Callable[Concatenate[xsnowDataset, _XArrayParams], xsnowDataset]: ...
+
+
+# Alias an xr.Dataset method as-is, with self rewrapped from xr.Dataset to
+# xsnowDataset, the same parameter list, and the same return type.
+def _forwards[**_XArrayParams, _R](
+    m: Callable[Concatenate[xr.Dataset, _XArrayParams], _R],
+) -> Callable[Concatenate[xsnowDataset, _XArrayParams], _R]: ...
+
+
+# Alias one of xr.Dataset's equals/identical/broadcast_equals, with self
+# rewrapped from xr.Dataset to xsnowDataset and `other` widened to accept
+# either xsnowDataset or xr.Dataset.
+def _forward_equals(
+    m: Callable[[xr.Dataset, xr.Dataset], bool],
+) -> Callable[[xsnowDataset, xsnowDataset | xr.Dataset], bool]: ...
+
+
+# Dummy xr.Dataset for getting property type signatures
+_ds: xr.Dataset
 
 
 class xsnowDataset:
@@ -83,7 +103,8 @@ class xsnowDataset:
 
     # Methods registered from I/O and helper modules. These are registered by
     # default on xsnow import. Each is bound directly to its implementing free 
-    # function, so the stub signature is identical to the runtime signature.
+    # function, so the stub signature and docstring are identical to the runtime
+    # signature and docstring.
     append_latest = _append_latest
     trim_padding = _trim_padding
     reorder_dims = _reorder_dims
@@ -97,238 +118,72 @@ class xsnowDataset:
     update = _update
     combine_first = _combine_first
 
-    # Basic dataset-state properties from xarray 
-    @property
-    def attrs(self) -> dict[Any, Any]:
-        """Forwarded to ``xarray.Dataset.attrs``; see the xarray documentation for details."""
-        ...
-    @property
-    def coords(self) -> Any:
-        """Forwarded to ``xarray.Dataset.coords``; see the xarray documentation for details."""
-        ...
-    @property
-    def data_vars(self) -> Any:
-        """Forwarded to ``xarray.Dataset.data_vars``; see the xarray documentation for details."""
-        ...
-    @property
-    def dims(self) -> Mapping[Hashable, int]:
-        """Forwarded to ``xarray.Dataset.dims``; see the xarray documentation for details."""
-        ...
-    @property
-    def encoding(self) -> dict[Any, Any]:
-        """Forwarded to ``xarray.Dataset.encoding``; see the xarray documentation for details."""
-        ...
-    @property
-    def indexes(self) -> Any:
-        """Forwarded to ``xarray.Dataset.indexes``; see the xarray documentation for details."""
-        ...
-    @property
-    def sizes(self) -> Mapping[Hashable, int]:
-        """Forwarded to ``xarray.Dataset.sizes``; see the xarray documentation for details."""
-        ...
-    @property
-    def variables(self) -> Mapping[Hashable, Any]:
-        """Forwarded to ``xarray.Dataset.variables``; see the xarray documentation for details."""
-        ...
+    # Basic dataset-state properties forwarded from xarray. Each derives its type
+    # from instance access on _ds, which yields a plain value type with no link to
+    # xarray's property docstring, so the boilerplate docstrings below are added explicitly.
+    attrs: Final = _ds.attrs
+    """Forwarded to ``xarray.Dataset.attrs``; see the xarray documentation for details."""
+    coords: Final = _ds.coords
+    """Forwarded to ``xarray.Dataset.coords``; see the xarray documentation for details."""
+    data_vars: Final = _ds.data_vars
+    """Forwarded to ``xarray.Dataset.data_vars``; see the xarray documentation for details."""
+    dims: Final = _ds.dims
+    """Forwarded to ``xarray.Dataset.dims``; see the xarray documentation for details."""
+    encoding: Final = _ds.encoding
+    """Forwarded to ``xarray.Dataset.encoding``; see the xarray documentation for details."""
+    indexes: Final = _ds.indexes
+    """Forwarded to ``xarray.Dataset.indexes``; see the xarray documentation for details."""
+    sizes: Final = _ds.sizes
+    """Forwarded to ``xarray.Dataset.sizes``; see the xarray documentation for details."""
+    variables: Final = _ds.variables
+    """Forwarded to ``xarray.Dataset.variables``; see the xarray documentation for details."""
 
-    # Curated methods that return a Dataset at runtime and are rewrapped
-    # by xsnowDataset.__getattr__.
-    def sel(
-        self,
-        indexers: Mapping[Any, Any] | None = None,
-        method: str | None = None,
-        tolerance: int | float | Iterable[int | float] | None = None,
-        drop: bool = False,
-        **indexers_kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.sel``; see the xarray documentation for details."""
-        ...
-    def isel(
-        self,
-        indexers: Mapping[Any, Any] | None = None,
-        drop: bool = False,
-        missing_dims: ErrorOptionsWithWarn = "raise",
-        **indexers_kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.isel``; see the xarray documentation for details."""
-        ...
-    def where(self, cond: Any, other: Any = ..., drop: bool = False) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.where``; see the xarray documentation for details."""
-        ...
-    def squeeze(
-        self,
-        dim: Hashable | Iterable[Hashable] | None = None,
-        drop: bool = False,
-        axis: int | Iterable[int] | None = None,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.squeeze``; see the xarray documentation for details."""
-        ...
-    def assign(self, variables: Mapping[Any, Any] | None = None, **variables_kwargs: Any) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.assign``; see the xarray documentation for details."""
-        ...
-    def assign_coords(self, coords: Mapping[Any, Any] | None = None, **coords_kwargs: Any) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.assign_coords``; see the xarray documentation for details."""
-        ...
-    def rename(self, name_dict: Mapping[Any, Hashable] | None = None, **names: Hashable) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.rename``; see the xarray documentation for details."""
-        ...
-    def swap_dims(self, dims_dict: Mapping[Any, Hashable] | None = None, **dims_kwargs: Hashable) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.swap_dims``; see the xarray documentation for details."""
-        ...
-    def expand_dims(
-        self,
-        dim: Hashable | Sequence[Hashable] | Mapping[Any, Any] | None = None,
-        axis: int | Sequence[int] | None = None,
-        create_index_for_new_dim: bool = True,
-        **dim_kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.expand_dims``; see the xarray documentation for details."""
-        ...
-    def drop_vars(
-        self,
-        names: str | Iterable[Hashable] | Callable[..., str | Iterable[Hashable]],
-        *,
-        errors: ErrorOptions = "raise",
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.drop_vars``; see the xarray documentation for details."""
-        ...
-    def drop_sel(
-        self,
-        labels: Mapping[Any, Any] | None = None,
-        *,
-        errors: ErrorOptions = "raise",
-        **labels_kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.drop_sel``; see the xarray documentation for details."""
-        ...
-    def drop_dims(self, drop_dims: str | Iterable[Hashable], *, errors: ErrorOptions = "raise") -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.drop_dims``; see the xarray documentation for details."""
-        ...
-    def transpose(self, *dim: Hashable, missing_dims: ErrorOptionsWithWarn = "raise") -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.transpose``; see the xarray documentation for details."""
-        ...
-    def sortby(
-        self,
-        variables: Hashable | xr.DataArray | Sequence[Hashable | xr.DataArray] | Callable[..., Any],
-        ascending: bool = True,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.sortby``; see the xarray documentation for details."""
-        ...
-    def fillna(self, value: Any) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.fillna``; see the xarray documentation for details."""
-        ...
-    def dropna(
-        self,
-        dim: Hashable,
-        *,
-        how: Literal["any", "all"] = "any",
-        thresh: int | None = None,
-        subset: Iterable[Hashable] | None = None,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.dropna``; see the xarray documentation for details."""
-        ...
-    def mean(
-        self,
-        dim: str | Iterable[Hashable] | None = None,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        **kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.mean``; see the xarray documentation for details."""
-        ...
-    def sum(
-        self,
-        dim: str | Iterable[Hashable] | None = None,
-        *,
-        skipna: bool | None = None,
-        min_count: int | None = None,
-        keep_attrs: bool | None = None,
-        **kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.sum``; see the xarray documentation for details."""
-        ...
-    def min(
-        self,
-        dim: str | Iterable[Hashable] | None = None,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        **kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.min``; see the xarray documentation for details."""
-        ...
-    def max(
-        self,
-        dim: str | Iterable[Hashable] | None = None,
-        *,
-        skipna: bool | None = None,
-        keep_attrs: bool | None = None,
-        **kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.max``; see the xarray documentation for details."""
-        ...
-    def count(
-        self,
-        dim: str | Iterable[Hashable] | None = None,
-        *,
-        keep_attrs: bool | None = None,
-        **kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.count``; see the xarray documentation for details."""
-        ...
-    def any(
-        self,
-        dim: str | Iterable[Hashable] | None = None,
-        *,
-        keep_attrs: bool | None = None,
-        **kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.any``; see the xarray documentation for details."""
-        ...
-    def all(
-        self,
-        dim: str | Iterable[Hashable] | None = None,
-        *,
-        keep_attrs: bool | None = None,
-        **kwargs: Any,
-    ) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.all``; see the xarray documentation for details."""
-        ...
-    def compute(self, **kwargs: Any) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.compute``; see the xarray documentation for details."""
-        ...
-    def load(self, **kwargs: Any) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.load``; see the xarray documentation for details."""
-        ...
-    def persist(self, **kwargs: Any) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.persist``; see the xarray documentation for details."""
-        ...
-    # chunked_array_type and **chunks_kwargs reference xarray-internal types
-    # (xarray.namedarray.parallelcompat / xarray.core.types); left untyped.
-    def chunk(self, *args: Any, **kwargs: Any) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.chunk``; see the xarray documentation for details."""
-        ...
-    def unify_chunks(self) -> xsnowDataset:
-        """Forwarded to ``xarray.Dataset.unify_chunks``; see the xarray documentation for details."""
-        ...
+    # Forwarded xarray methods that rewrap the return value as xsnowDataset. The
+    # ParamSpec captures xarray's signature from the source method, which also
+    # carries xarray's docstring through to hover.
+    sel = _rewraps(xr.Dataset.sel)
+    isel = _rewraps(xr.Dataset.isel)
+    where = _rewraps(xr.Dataset.where)
+    squeeze = _rewraps(xr.Dataset.squeeze)
+    assign = _rewraps(xr.Dataset.assign)
+    assign_coords = _rewraps(xr.Dataset.assign_coords)
+    rename = _rewraps(xr.Dataset.rename)
+    swap_dims = _rewraps(xr.Dataset.swap_dims)
+    expand_dims = _rewraps(xr.Dataset.expand_dims)
+    drop_vars = _rewraps(xr.Dataset.drop_vars)
+    drop_sel = _rewraps(xr.Dataset.drop_sel)
+    drop_dims = _rewraps(xr.Dataset.drop_dims)
+    transpose = _rewraps(xr.Dataset.transpose)
+    sortby = _rewraps(xr.Dataset.sortby)
+    fillna = _rewraps(xr.Dataset.fillna)
+    dropna = _rewraps(xr.Dataset.dropna)
+    mean = _rewraps(xr.Dataset.mean)
+    sum = _rewraps(xr.Dataset.sum)
+    min = _rewraps(xr.Dataset.min)
+    max = _rewraps(xr.Dataset.max)
+    count = _rewraps(xr.Dataset.count)
+    any = _rewraps(xr.Dataset.any)
+    all = _rewraps(xr.Dataset.all)
+    compute = _rewraps(xr.Dataset.compute)
+    load = _rewraps(xr.Dataset.load)
+    persist = _rewraps(xr.Dataset.persist)
+    chunk = _rewraps(xr.Dataset.chunk)
+    unify_chunks = _rewraps(xr.Dataset.unify_chunks)
 
-    # Common conversions and comparisons from xarray that do not return xsnowDataset.
-    def to_array(self, dim: Hashable = "variable", name: Hashable | None = None) -> xr.DataArray:
-        """Forwarded to ``xarray.Dataset.to_array``; see the xarray documentation for details."""
-        ...
-    def to_dataframe(self, dim_order: Sequence[Hashable] | None = None) -> pd.DataFrame:
-        """Forwarded to ``xarray.Dataset.to_dataframe``; see the xarray documentation for details."""
-        ...
-    def equals(self, other: xsnowDataset | xr.Dataset) -> bool:
-        """Forwarded to ``xarray.Dataset.equals``; see the xarray documentation for details."""
-        ...
-    def identical(self, other: xsnowDataset | xr.Dataset) -> bool:
-        """Forwarded to ``xarray.Dataset.identical``; see the xarray documentation for details."""
-        ...
-    def broadcast_equals(self, other: xsnowDataset | xr.Dataset) -> bool:
-        """Forwarded to ``xarray.Dataset.broadcast_equals``; see the xarray documentation for details."""
-        ...
+    # Forwarded xarray methods that do not return xsnowDataset. As with _rewraps,
+    # the ParamSpec capture forwards xarray's signature and docstring.
+    to_array = _forwards(xr.Dataset.to_array)
+    to_dataframe = _forwards(xr.Dataset.to_dataframe)
+
+    # Forwarded xarray comparison methods, widened to accept xsnowDataset inputs.
+    # Unlike _rewraps/_forwards this uses a concrete signature (no ParamSpec), so
+    # xarray's docstring is not forwarded, so we include boilerplate docstrings.
+    equals = _forward_equals(xr.Dataset.equals)
+    """Forwarded to ``xarray.Dataset.equals``; see the xarray documentation for details."""
+    identical = _forward_equals(xr.Dataset.identical)
+    """Forwarded to ``xarray.Dataset.identical``; see the xarray documentation for details."""
+    broadcast_equals = _forward_equals(xr.Dataset.broadcast_equals)
+    """Forwarded to ``xarray.Dataset.broadcast_equals``; see the xarray documentation for details."""
 
 
 class DatasetDecorator(xsnowDataset):
