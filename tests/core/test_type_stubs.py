@@ -1,0 +1,263 @@
+"""Runtime contract checks for the curated xsnowDataset type stub."""
+
+from __future__ import annotations
+
+import ast
+import inspect
+import tempfile
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pytest
+import xarray as xr
+
+import xsnow
+
+
+STUB_PATH = Path(xsnow.__file__).parent / "core.pyi"
+
+
+def _class_node(name: str) -> ast.ClassDef:
+    tree = ast.parse(STUB_PATH.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found in {STUB_PATH}")
+
+
+def _stub_method_nodes() -> dict[str, ast.FunctionDef]:
+    """Names of methods explicitly defined in the stub (i.e. not aliases or properties.)"""
+    methods: dict[str, ast.FunctionDef] = {}
+    for node in _class_node("xsnowDataset").body:
+        if isinstance(node, ast.FunctionDef):
+            methods.setdefault(node.name, node)
+    return methods
+
+
+def _stub_alias_names() -> set[str]:
+    """Names of class-body aliases like ``to_pro = _to_pro`` or 
+    ``sel = _rewraps(xr.Dataset.sel)``."""
+    names: set[str] = set()
+    for node in _class_node("xsnowDataset").body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                names.add(target.id)
+    return names
+
+
+def _stub_property_names() -> set[str]:
+    """Names of forwarded-property aliases like ``attrs: Final = _ds.attrs``."""
+    props: set[str] = set()
+    for node in _class_node("xsnowDataset").body:
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.annotation, ast.Name)
+            and node.annotation.id == "Final"
+        ):
+            props.add(node.target.id)
+    return props
+
+
+def _explicit_stub_parameters(node: ast.FunctionDef) -> list[str]:
+    # Drop the receiver (`self`): it has no counterpart in the runtime
+    # bound method signature.
+    args = node.args
+    positional = [*args.posonlyargs, *args.args][1:]
+    return [arg.arg for arg in positional] + [arg.arg for arg in args.kwonlyargs]
+
+
+def _swap_dims(xs: xsnow.xsnowDataset) -> xsnow.xsnowDataset:
+    labels = ["lower", "middle", "upper"]
+    return xs.assign_coords(layer_label=("layer", labels)).swap_dims({"layer": "layer_label"})
+
+
+def _merge_smet_with_empty_dir(xs: xsnow.xsnowDataset) -> xsnow.xsnowDataset:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        empty = Path(tmp_dir) / "empty"
+        empty.mkdir()
+        return xs.merge_smet(empty)
+
+
+XSNOW_RETURN_CASES: dict[str, tuple[Callable[[xsnow.xsnowDataset], Any], type[Any]]] = {
+    "compute_hs": (lambda xs: xs.compute_hs(), xsnow.xsnowDataset),
+    "compute_z_depth": (lambda xs: xs.compute_z_depth(), xsnow.xsnowDataset),
+    "copy": (lambda xs: xs.copy(), xsnow.xsnowDataset),
+    "merge_smet": (_merge_smet_with_empty_dir, xsnow.xsnowDataset),
+    "profile_status_summary": (lambda xs: xs.profile_status_summary(), type(None)),
+    "to_cpu": (lambda xs: xs.to_cpu(), xsnow.xsnowDataset),
+    "to_gpu": (lambda xs: xs.to_gpu(), xsnow.xsnowDataset),
+    "to_xarray": (lambda xs: xs.to_xarray(), xr.Dataset),
+    "update_profile_status": (lambda xs: xs.update_profile_status(), xsnow.xsnowDataset),
+}
+
+XARRAY_RETURN_CASES: dict[str, tuple[Callable[[xsnow.xsnowDataset], Any], type[Any]]] = {
+    "all": (lambda xs: xs.all(dim="time"), xsnow.xsnowDataset),
+    "any": (lambda xs: xs.any(dim="time"), xsnow.xsnowDataset),
+    "assign": (lambda xs: xs.assign(extra_scalar=1), xsnow.xsnowDataset),
+    "assign_coords": (lambda xs: xs.assign_coords(extra_coord=1), xsnow.xsnowDataset),
+    "broadcast_equals": (lambda xs: xs.broadcast_equals(xs.to_xarray()), bool),
+    "chunk": (lambda xs: xs.chunk({"time": 1}), xsnow.xsnowDataset),
+    "compute": (lambda xs: xs.compute(), xsnow.xsnowDataset),
+    "count": (lambda xs: xs.count(dim="time"), xsnow.xsnowDataset),
+    "drop_dims": (lambda xs: xs.drop_dims("slope"), xsnow.xsnowDataset),
+    "drop_sel": (lambda xs: xs.drop_sel(layer=[2]), xsnow.xsnowDataset),
+    "drop_vars": (lambda xs: xs.drop_vars("density"), xsnow.xsnowDataset),
+    "dropna": (lambda xs: xs.dropna(dim="layer", how="all"), xsnow.xsnowDataset),
+    "equals": (lambda xs: xs.equals(xs.to_xarray()), bool),
+    "expand_dims": (lambda xs: xs.expand_dims(member=[0]), xsnow.xsnowDataset),
+    "fillna": (lambda xs: xs.fillna(0), xsnow.xsnowDataset),
+    "identical": (lambda xs: xs.identical(xs.to_xarray()), bool),
+    "isel": (lambda xs: xs.isel(layer=0), xsnow.xsnowDataset),
+    "load": (lambda xs: xs.load(), xsnow.xsnowDataset),
+    "max": (lambda xs: xs.max(dim="layer"), xsnow.xsnowDataset),
+    "mean": (lambda xs: xs.mean(dim="layer"), xsnow.xsnowDataset),
+    "min": (lambda xs: xs.min(dim="layer"), xsnow.xsnowDataset),
+    "persist": (lambda xs: xs.persist(), xsnow.xsnowDataset),
+    "rename": (lambda xs: xs.rename({"density": "density_renamed"}), xsnow.xsnowDataset),
+    "sel": (lambda xs: xs.sel(location="TestStation"), xsnow.xsnowDataset),
+    "sortby": (lambda xs: xs.sortby("time"), xsnow.xsnowDataset),
+    "squeeze": (lambda xs: xs.squeeze(), xsnow.xsnowDataset),
+    "sum": (lambda xs: xs.sum(dim="layer"), xsnow.xsnowDataset),
+    "swap_dims": (_swap_dims, xsnow.xsnowDataset),
+    "to_array": (lambda xs: xs.to_array(), xr.DataArray),
+    "to_dataframe": (lambda xs: xs.to_dataframe(), pd.DataFrame),
+    "transpose": (lambda xs: xs.transpose("slope", "location", "time", "layer"), xsnow.xsnowDataset),
+    "unify_chunks": (lambda xs: xs.unify_chunks(), xsnow.xsnowDataset),
+    "where": (lambda xs: xs.where(xs["density"] > 0), xsnow.xsnowDataset),
+}
+
+RETURN_CASES = XSNOW_RETURN_CASES | XARRAY_RETURN_CASES
+
+
+def _runtime_public_method_names() -> set[str]:
+    names = {
+        name
+        for name, value in vars(xsnow.xsnowDataset).items()
+        if not name.startswith("_") and callable(value)
+    }
+    names.update(
+        name
+        for name in dir(xsnow.xsnowDataset)
+        if not name.startswith("_") and callable(getattr(xsnow.xsnowDataset, name, None))
+    )
+    return names
+
+
+class TestStubMatchesRuntime:
+    """Stub -> runtime: anything advertised in core.pyi must exist and be callable at runtime."""
+
+    @pytest.mark.parametrize("name", sorted(_stub_property_names()))
+    def test_stubbed_properties_are_available_at_runtime(self, xsnow_dataset: xsnow.xsnowDataset, name: str) -> None:
+        """Properties advertised in the stub must be forwarded by xsnowDataset."""
+        assert hasattr(xsnow_dataset, name)
+
+    @pytest.mark.parametrize("name", sorted(_stub_method_nodes()))
+    def test_stubbed_methods_are_available_at_runtime(self, xsnow_dataset: xsnow.xsnowDataset, name: str) -> None:
+        """Every method advertised in core.pyi must be reachable at runtime."""
+        target = xsnow.xsnowDataset if name == "__init__" else xsnow_dataset
+        assert hasattr(target, name)
+        assert callable(getattr(target, name))
+
+    @pytest.mark.parametrize("name", sorted(_stub_alias_names()))
+    def test_stubbed_aliases_are_available_at_runtime(self, xsnow_dataset: xsnow.xsnowDataset, name: str) -> None:
+        """Methods stubbed via function-attribute aliasing (e.g. `to_pro = _to_pro`) must exist at runtime."""
+        assert hasattr(xsnow_dataset, name)
+        assert callable(getattr(xsnow_dataset, name))
+
+    @pytest.mark.parametrize("name,node", sorted(_stub_method_nodes().items()))
+    def test_explicit_stub_parameters_exist_at_runtime(
+        self,
+        xsnow_dataset: xsnow.xsnowDataset,
+        name: str,
+        node: ast.FunctionDef,
+    ) -> None:
+        """
+        Any parameter named explicitly in the curated stub must exist at runtime.
+
+        This deliberately does not require exact signature equality: it only
+        checks that stub-named parameters appear somewhere in the runtime
+        signature, not their types, defaults, or ordering.
+        """
+        target = xsnow.xsnowDataset if name == "__init__" else getattr(xsnow_dataset, name)
+        runtime_params = inspect.signature(target).parameters
+        accepts_arbitrary_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in runtime_params.values()
+        )
+        for param_name in _explicit_stub_parameters(node):
+            assert param_name in runtime_params or accepts_arbitrary_kwargs, (
+                f"{name} advertises parameter {param_name!r} in core.pyi, "
+                "but the runtime signature does not accept it"
+            )
+
+
+class TestRuntimeMatchesStub:
+    """Runtime -> stub: anything present at runtime must be advertised in core.pyi."""
+
+    def test_runtime_public_methods_are_in_stub(self, default_xsnowdataset_attrs: frozenset[str]) -> None:
+        """Every public xsnowDataset runtime method must be listed in core.pyi."""
+        stubbed_methods = {name for name in _stub_method_nodes() if not name.startswith("__")} | _stub_alias_names()
+        core_runtime_methods = _runtime_public_method_names() & default_xsnowdataset_attrs
+        runtime_only = sorted(core_runtime_methods - stubbed_methods)
+        assert not runtime_only, (
+            "Public xsnowDataset runtime methods are not listed in core.pyi: "
+            + ", ".join(runtime_only)
+        )
+
+    def test_registered_methods_are_in_stub(self, default_registered_methods: frozenset[str]) -> None:
+        """Every method registered via @register_xsnowDataset_method must be stubbed in core.pyi."""
+        assert default_registered_methods <= set(_stub_method_nodes()) | _stub_alias_names()
+
+    @pytest.mark.parametrize("name", sorted(XSNOW_RETURN_CASES))
+    def test_xsnow_required_params_are_in_stub(self, xsnow_dataset: xsnow.xsnowDataset, name: str) -> None:
+        """Required runtime parameters for xsnow-native methods must be in the stub."""
+        node = _stub_method_nodes()[name]
+        stub_params = set(_explicit_stub_parameters(node))
+        stub_accepts_extra = node.args.vararg is not None or node.args.kwarg is not None
+
+        target = getattr(xsnow_dataset, name)
+        for param_name, param in inspect.signature(target).parameters.items():
+            if param.default is not inspect.Parameter.empty:
+                continue
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            assert param_name in stub_params or stub_accepts_extra, (
+                f"{name} requires {param_name!r} at runtime, "
+                f"but the stub signature for {name} in core.pyi cannot accept it"
+            )
+
+
+class TestStubReturnTypes:
+    """Stub's advertised return types must match runtime behavior."""
+
+    def test_public_stub_methods_have_runtime_return_checks(self) -> None:
+        """RETURN_CASES must contain all methods in core.pyi"""
+        public_methods = {name for name in _stub_method_nodes() if not name.startswith("__")}
+        missing = public_methods - set(RETURN_CASES)
+        assert not missing
+
+    @pytest.mark.parametrize("name", sorted(RETURN_CASES))
+    def test_methods_return_advertised_broad_type(
+        self,
+        xsnow_dataset: xsnow.xsnowDataset,
+        name: str,
+    ) -> None:
+        """Representative calls (xsnow-native and forwarded xarray) should match the broad stub return type."""
+        call, expected_type = RETURN_CASES[name]
+        result = call(xsnow_dataset)
+        assert isinstance(result, expected_type)
+
+    def test_dunder_stubbed_methods_return_advertised_broad_type(self, xsnow_dataset: xsnow.xsnowDataset) -> None:
+        """Basic dunder behavior in the stub should match the runtime wrapper."""
+        assert "density" in xsnow_dataset
+        assert isinstance(dir(xsnow_dataset), list)
+        assert isinstance(xsnow_dataset["density"], xr.DataArray)
+        assert isinstance(xsnow_dataset[["density"]], xr.Dataset)
+        assert isinstance(repr(xsnow_dataset), str)
+
+        xsnow_dataset["new_var"] = xr.DataArray([1, 2, 3], dims=["layer"])
+        assert "new_var" in xsnow_dataset

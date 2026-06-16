@@ -25,6 +25,13 @@ from pathlib import Path
 import shutil
 
 from xsnow import xsnowDataset, read
+import xsnow.plugin
+
+# Snapshot the "core" xsnowDataset surface at conftest import time, i.e.
+# before any test module has a chance to `import xsnow.extensions.*` and
+# permanently monkeypatch `xsnowDataset` via `register_xsnowDataset_method`.
+DEFAULT_XSNOWDATASET_ATTRS = frozenset(dir(xsnowDataset))
+DEFAULT_REGISTERED_METHODS = frozenset(xsnow.plugin.list_registered_methods())
 
 # ============================================================================
 # TEST DATA REPOSITORY MANAGEMENT
@@ -617,20 +624,27 @@ def minimal_xr_dataset():
 @pytest.fixture
 def snow_profile_xr_dataset():
     """xarray.Dataset with realistic snow profile structure."""
+    height = np.array([[[0.1, 0.2, 0.3], [0.15, 0.25, 0.35]]])
+    density = np.array([[[100, 200, 300], [110, 210, 310]]])
+    hs = height.max(axis=2)
     ds = xr.Dataset(
         {
-            'height': (['location', 'time', 'layer'],
-                      np.array([[[0.1, 0.2, 0.3], [0.15, 0.25, 0.35]]])),
-            'density': (['location', 'time', 'layer'],
-                       np.array([[[100, 200, 300], [110, 210, 310]]]))
+            'height': (['location', 'time', 'layer'], height),
+            'density': (['location', 'time', 'layer'], density),
+            'profile_status': (['location', 'time', 'slope'], np.ones((1, 2, 1), dtype='i1')),
+            'HS': (['location', 'time', 'slope'], hs[..., None]),
+            'is_valid': (['location', 'time', 'slope'], hs[..., None] > 0),
         },
         coords={
             'location': ['TestStation'],  # ✨ CHANGED: String instead of [0]
             'time': pd.date_range('2025-01-01', periods=2, freq='D'),
             'layer': [0, 1, 2],
+            'slope': [0],
             'latitude': ('location', [46.5]),
             'longitude': ('location', [10.5]),
-            'altitude': ('location', [2500.0])
+            'altitude': ('location', [2500.0]),
+            'azimuth': ('slope', [180.0]),
+            'inclination': ('slope', [30.0]),
         }
     )
     return ds
@@ -640,6 +654,16 @@ def snow_profile_xr_dataset():
 def xsnow_dataset(snow_profile_xr_dataset):
     """xsnowDataset wrapper around snow profile data."""
     return xsnowDataset(snow_profile_xr_dataset)
+
+
+@pytest.fixture(scope="session")
+def default_xsnowdataset_attrs() -> frozenset[str]:
+    return DEFAULT_XSNOWDATASET_ATTRS
+
+
+@pytest.fixture(scope="session")
+def default_registered_methods() -> frozenset[str]:
+    return DEFAULT_REGISTERED_METHODS
 
 
 # ============================================================================
@@ -904,4 +928,4 @@ if __name__ == "__main__":
         path = TESTDATA_DIR / subdir
         if path.exists():
             count = len(list(path.glob("*")))
-            print(f"  {subdir:20s}: {count} files") 
+            print(f"  {subdir:20s}: {count} files")
