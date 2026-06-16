@@ -12,7 +12,7 @@ file-format units.
 Unit fields:
     xsnow_units: Canonical in-memory unit used by xsnow.
     pro_units: Expected storage unit in SNOWPACK .pro files, when applicable.
-    smet_units: Expected storage unit in SNOWPACK .smet files, when applicable.
+    smet_units: Expected storage unit(s) in SNOWPACK .smet files, when applicable.
     plot_units: Preferred display unit, taken from SNOWPACK .smet plot_unit
         metadata where applicable, otherwise from pro_units.
     si_units: Legacy key currently used by readers to populate attrs["units"].
@@ -369,7 +369,7 @@ registry = {
         "aliases": ['TSG', 'ground_temperature'],
         'standard_name': 'ground_temperature',
         'xsnow_units': 'degC',
-        'smet_units': 'degC',
+        'smet_units': ['K', 'degC'],
         'plot_units': 'K',
         'si_units': 'degC',
     },
@@ -522,7 +522,7 @@ registry = {
         "aliases": ['TA', 'air_temperature'],
         'standard_name': 'air_temperature',
         'xsnow_units': 'degC',
-        'smet_units': 'degC',
+        'smet_units': ['K', 'degC'],
         'plot_units': 'K',
         'si_units': 'degC',
     },
@@ -544,6 +544,15 @@ registry = {
         'plot_units': 'K',
         'si_units': 'degC',
     },
+    'TSS': {
+        "param_code": None,
+        "aliases": ['TSS', 'surface_temperature'],
+        'standard_name': 'surface_temperature',
+        'xsnow_units': 'degC',
+        'smet_units': 'K',
+        'plot_units': 'K',
+        'si_units': 'K',
+    },
     'T_bottom': {
         "param_code": None,
         "aliases": ['T_bottom', 'bottom_temperature'],
@@ -558,7 +567,7 @@ registry = {
         "aliases": ['RH', 'relative_humidity'],
         'standard_name': 'relative_humidity',
         'xsnow_units': '1',
-        'smet_units': '%',
+        'smet_units': ['1', '%'],
         'plot_units': '-',
         'si_units': '%',
     },
@@ -566,6 +575,15 @@ registry = {
         "param_code": None,
         "aliases": ['VW', 'wind_velocity'],
         'standard_name': 'wind_speed',
+        'xsnow_units': 'm s-1',
+        'smet_units': 'm s-1',
+        'plot_units': 'm/s',
+        'si_units': 'm s-1',
+    },
+    'VW_MAX': {
+        "param_code": None,
+        "aliases": ['VW_MAX', 'gust_wind_velocity'],
+        'standard_name': 'wind_gust_speed',
         'xsnow_units': 'm s-1',
         'smet_units': 'm s-1',
         'plot_units': 'm/s',
@@ -584,6 +602,15 @@ registry = {
         "param_code": None,
         "aliases": ['DW', 'wind_direction'],
         'standard_name': 'wind_from_direction',
+        'xsnow_units': 'degree',
+        'smet_units': 'degree',
+        'plot_units': '°',
+        'si_units': 'degree',
+    },
+    'DW_MAX': {
+        "param_code": None,
+        "aliases": ['DW_MAX', 'gust_wind_direction'],
+        'standard_name': 'gust_wind_from_direction',
         'xsnow_units': 'degree',
         'smet_units': 'degree',
         'plot_units': '°',

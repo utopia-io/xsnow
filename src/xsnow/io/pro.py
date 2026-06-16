@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import concurrent.futures
+import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -24,6 +25,7 @@ from dask.delayed import delayed
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..registry import registry
+from ..units import UnitLike, normalize_unit
 from ..utils import get_logger
 
 from .base import (
@@ -38,6 +40,50 @@ from .base import (
 # --------------------------------------------------------------------------- #
 #                          METADATA EXTRACTION                                 #
 # --------------------------------------------------------------------------- #
+
+_PRO_UNIT_RE = re.compile(r"\(([^()]*)\)")
+
+
+def parse_pro_header_units(
+    filepath: Union[str, Path],
+    code_map: Optional[Mapping[str, str]] = None,
+) -> Dict[str, UnitLike]:
+    """Parse declared variable units from a SNOWPACK .pro [HEADER] section."""
+    file_path = Path(filepath)
+    code_map_to_use = code_map if code_map is not None else CODE_TO_NAME_MAP
+
+    units: Dict[str, UnitLike] = {}
+    in_header = False
+
+    with _open_any_as_text(file_path, "rt", encoding="utf-8", errors="ignore") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if line == "[HEADER]":
+                in_header = True
+                continue
+            if line == "[DATA]":
+                break
+            if not in_header or not line or line.startswith("#"):
+                continue
+
+            param_code = line.split(",", 1)[0].strip()
+            var_name = code_map_to_use.get(param_code)
+            if not var_name:
+                continue
+
+            declared_units = [normalize_unit(match) for match in _PRO_UNIT_RE.findall(line)]
+            declared_units = [unit for unit in declared_units if unit is not None]
+
+            if param_code == "0514" and len(declared_units) == 2:
+                declared_units = ["Swiss Code F1F2F3", *declared_units]
+
+            if len(declared_units) == 1:
+                units[var_name] = declared_units[0]
+            elif declared_units:
+                units[var_name] = declared_units
+
+    return units
+
 
 def _extract_metadata_fast(
     filepath: Union[str, Path],

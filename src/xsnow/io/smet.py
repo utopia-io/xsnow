@@ -8,8 +8,9 @@ time series data. This module handles reading and writing SMET files.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -18,9 +19,205 @@ import xarray as xr
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..registry import registry
+from ..units import normalize_unit
 from ..utils import get_logger
 
 from .base import _open_any_as_text, _round_coord, _sanitize_station_name
+
+
+@dataclass(frozen=True)
+class SmetUnitSpec:
+    """Describe unit metadata inferred for one SMET field."""
+
+    field: str
+    plot_unit: Optional[str]
+    units_multiplier: float
+    units_offset: float
+    storage_unit: Optional[str]
+    ambiguous: bool = False
+
+
+_SMET_MULTIPLIER_UNIT_MAP = {
+    ("m", 1.0): "m",
+    ("m", 0.01): "cm",
+    ("m", 0.001): "mm",
+    ("K", 1.0): "K",
+    ("W m-2", 1.0): "W m-2",
+    ("MJ m-2", 1.0): "MJ m-2",
+    ("kg m-2", 1.0): "kg m-2",
+    ("kg m-2 h-1", 1.0): "kg m-2 h-1",
+    ("m s-1", 1.0): "m s-1",
+    ("degree", 1.0): "degree",
+}
+
+
+def _parse_smet_header(filepath: Union[str, Path]) -> Dict[str, str]:
+    """Parse key/value lines from a SMET [HEADER] section."""
+    header: Dict[str, str] = {}
+    file_path = Path(filepath)
+    in_header = False
+
+    with _open_any_as_text(file_path, "rt", encoding="utf-8", errors="ignore") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if line == "[HEADER]":
+                in_header = True
+                continue
+            if line == "[DATA]":
+                break
+            if in_header and "=" in line:
+                key, value = line.split("=", 1)
+                header[key.strip()] = value.strip()
+
+    return header
+
+
+def _split_header_values(value: Optional[str]) -> list[str]:
+    """Split a SMET header list value into tokens."""
+    return [] if value is None else value.split()
+
+
+def _split_numeric_header_values(value: Optional[str], default: float, n: int) -> list[float]:
+    """Split a SMET numeric list, padding missing metadata with defaults."""
+    if value is None:
+        return [default] * n
+    values = [float(part) for part in value.split()]
+    if len(values) == n:
+        return values
+    if len(values) < n:
+        return values + [default] * (n - len(values))
+    raise ValueError(f"Expected at most {n} unit values, got {len(values)}.")
+
+
+def _get_smet_units_declaration(header: Mapping[str, str]) -> list[str]:
+    """Return units declared by a SMET units header or commented #units line."""
+    return _split_header_values(header.get("units") or header.get("#units"))
+
+
+def infer_smet_storage_unit(
+    field: str,
+    plot_unit: Optional[str],
+    units_multiplier: float = 1.0,
+    units_offset: float = 0.0,
+    registry_entry: Optional[Mapping[str, Any]] = None,
+    use_registry_for_ambiguous: bool = False,
+) -> tuple[Optional[str], bool]:
+    """
+    Infer a SMET data-storage unit from plot metadata.
+
+    SMET plot metadata describes how a value should be displayed. In common
+    SNOWPACK files, displayed value = stored value * units_multiplier +
+    units_offset. Dimensionless fields with ``plot_unit = -`` are treated as
+    fractions when the multiplier is 1 and as percentages when the multiplier
+    is 0.01.
+    """
+    normalized_plot_unit = normalize_unit(plot_unit)
+    if field == "timestamp" or normalized_plot_unit == "ISO":
+        return "ISO", False
+    if normalized_plot_unit is None:
+        return None, True
+
+    if normalized_plot_unit == "1":
+        if np.isclose(units_offset, 0.0):
+            if np.isclose(units_multiplier, 0.01):
+                return "%", False
+            if np.isclose(units_multiplier, 1.0):
+                return "1", False
+        if use_registry_for_ambiguous and registry_entry is not None:
+            expected = registry_entry.get("smet_units")
+            if expected is not None:
+                return normalize_unit(expected), True
+        return None, True
+
+    if np.isclose(units_offset, 273.15) and normalized_plot_unit == "K":
+        return "degC", False
+
+    key = (normalized_plot_unit, float(units_multiplier))
+    if key in _SMET_MULTIPLIER_UNIT_MAP:
+        return _SMET_MULTIPLIER_UNIT_MAP[key], False
+
+    if np.isclose(units_multiplier, 1.0) and np.isclose(units_offset, 0.0):
+        return normalized_plot_unit, False
+
+    return None, True
+
+
+def parse_smet_unit_specs(
+    filepath: Union[str, Path],
+    registry_map: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    use_registry_for_ambiguous: bool = False,
+) -> Dict[str, SmetUnitSpec]:
+    """Parse SMET unit metadata and infer storage units per field."""
+    header = _parse_smet_header(filepath)
+    fields = _split_header_values(header.get("fields"))
+    if not fields:
+        raise ValueError(f"SMET file {filepath} is missing a fields header.")
+
+    plot_units = _split_header_values(header.get("plot_unit"))
+    declared_units = _get_smet_units_declaration(header)
+
+    if not plot_units and declared_units:
+        if len(declared_units) != len(fields):
+            raise ValueError(
+                f"SMET field/unit metadata length mismatch in {filepath}: "
+                f"{len(fields)} fields, {len(declared_units)} declared units."
+            )
+        multipliers = _split_numeric_header_values(
+            header.get("units_multiplier"), default=1.0, n=len(fields)
+        )
+        offsets = _split_numeric_header_values(
+            header.get("units_offset"), default=0.0, n=len(fields)
+        )
+        return {
+            field: SmetUnitSpec(
+                field=field,
+                plot_unit=None,
+                units_multiplier=multiplier,
+                units_offset=offset,
+                storage_unit=normalize_unit(unit),
+                ambiguous=False,
+            )
+            for field, unit, multiplier, offset in zip(
+                fields, declared_units, multipliers, offsets
+            )
+        }
+
+    if not plot_units:
+        plot_units = [None] * len(fields)
+    if len(plot_units) != len(fields):
+        raise ValueError(
+            f"SMET field/unit metadata length mismatch in {filepath}: "
+            f"{len(fields)} fields, {len(plot_units)} plot units."
+        )
+
+    multipliers = _split_numeric_header_values(
+        header.get("units_multiplier"), default=1.0, n=len(fields)
+    )
+    offsets = _split_numeric_header_values(
+        header.get("units_offset"), default=0.0, n=len(fields)
+    )
+    registry_to_use = registry if registry_map is None else registry_map
+
+    specs: Dict[str, SmetUnitSpec] = {}
+    for field, plot_unit, multiplier, offset in zip(fields, plot_units, multipliers, offsets):
+        storage_unit, ambiguous = infer_smet_storage_unit(
+            field=field,
+            plot_unit=plot_unit,
+            units_multiplier=multiplier,
+            units_offset=offset,
+            registry_entry=registry_to_use.get(field),
+            use_registry_for_ambiguous=use_registry_for_ambiguous,
+        )
+        specs[field] = SmetUnitSpec(
+            field=field,
+            plot_unit=normalize_unit(plot_unit),
+            units_multiplier=multiplier,
+            units_offset=offset,
+            storage_unit=storage_unit,
+            ambiguous=ambiguous,
+        )
+
+    return specs
 
 
 def _read_smet_files(
