@@ -223,11 +223,11 @@ def read_smet(
 
 @register_xsnowDataset_method
 def to_smet(
-    ds: xsnowDataset, 
-    path: Union[str, Path], 
-    max_files: Optional[int] = None, 
+    ds: xsnowDataset,
+    path: Union[str, Path],
+    max_files: Optional[int] = None,
     **kwargs
-):
+) -> None:
     """
     Saves time-series data from the dataset to a SMET file.
 
