@@ -1339,11 +1339,11 @@ def _read_pro_files_lazy(
 
 @register_xsnowDataset_method
 def to_pro(
-    ds: xsnowDataset, 
-    path: Union[str, Path], 
-    max_files: Optional[int] = None, 
+    ds: xsnowDataset,
+    path: Union[str, Path],
+    max_files: Optional[int] = None,
     **kwargs
-):
+) -> None:
     """
     Saves a single snow profile to a SNOWPACK .pro file.
 
