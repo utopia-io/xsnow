@@ -1,9 +1,13 @@
 # tests/io/test_smet_units.py
 """Tests for SMET-specific unit inference helpers."""
 
+import logging
+
+import numpy as np
 import pytest
 
-from xsnow.io.smet import infer_smet_storage_unit, parse_smet_unit_specs
+from xsnow import read
+from xsnow.io.smet import infer_smet_storage_unit, parse_smet_unit_specs, read_smet
 from xsnow.registry import registry
 
 
@@ -86,6 +90,27 @@ def test_parse_smet_unit_specs_from_commented_units_declaration_with_snow_vars(g
     assert not any(spec.ambiguous for spec in specs.values())
 
 
+@pytest.mark.synthetic
+def test_parse_smet_unit_specs_prefers_units_declaration_over_plot_metadata(tmp_path):
+    """Explicit SMET units declarations override plot metadata inference."""
+    smet_file = tmp_path / "declared_units.smet"
+    smet_file.write_text(
+        """SMET 1.1 ASCII
+[HEADER]
+fields = timestamp HS_mod
+units = ISO cm
+plot_unit = - kg/m2
+[DATA]
+2024-01-01T00:00:00 25
+"""
+    )
+
+    specs = parse_smet_unit_specs(smet_file)
+
+    assert specs["HS_mod"].storage_unit == "cm"
+    assert not specs["HS_mod"].ambiguous
+
+
 def test_registry_allows_observed_smet_storage_units():
     """Registry whitelists SMET variables with observed input/output unit variants."""
     assert registry["TA"]["smet_units"] == ["K", "degC"]
@@ -94,6 +119,141 @@ def test_registry_allows_observed_smet_storage_units():
     assert registry["TSS"]["smet_units"] == "K"
     assert registry["VW_MAX"]["smet_units"] == "m s-1"
     assert registry["DW_MAX"]["smet_units"] == "degree"
+    assert registry["zSn"]["smet_units"] == "m"
+
+
+@pytest.mark.synthetic
+def test_read_smet_converts_target_snow_fields_to_xsnow_units(tmp_path):
+    """SMET reads convert snow-height fields to xsnow units and attrs."""
+    smet_file = tmp_path / "snow_units.smet"
+    smet_file.write_text(
+        """SMET 1.1 ASCII
+[HEADER]
+station_name = UNIT_TEST
+latitude = 46.5
+longitude = 10.5
+altitude = 2500
+nodata = -999
+fields = timestamp HS_mod HN24 ski_pen zSn
+plot_unit = - m m m m
+units_multiplier = 1 0.01 0.01 1 1
+units_offset = 0 0 0 0 0
+[DATA]
+2024-01-01T00:00:00 25 5 0.4 12
+"""
+    )
+
+    ds = read_smet(smet_file)
+
+    np.testing.assert_allclose(ds["HS_mod"].values, [[[[0.25]]]])
+    np.testing.assert_allclose(ds["HN24"].values, [[[[0.05]]]])
+    np.testing.assert_allclose(ds["ski_pen"].values, [[[[0.4]]]])
+    np.testing.assert_allclose(ds["zSn"].values, [[[[12.0]]]])
+
+    assert ds["HS_mod"].attrs["units"] == "m"
+    assert ds["HN24"].attrs["units"] == "m"
+    assert ds["ski_pen"].attrs["units"] == "m"
+    assert ds["zSn"].attrs["units"] == "m"
+
+
+@pytest.mark.synthetic
+def test_read_smet_raises_for_registered_field_with_unexpected_units(tmp_path):
+    """SMET reads fail when a registered field declares incompatible units."""
+    smet_file = tmp_path / "bad_units.smet"
+    smet_file.write_text(
+        """SMET 1.1 ASCII
+[HEADER]
+station_name = UNIT_TEST
+fields = timestamp HS_mod
+plot_unit = - kg/m2
+[DATA]
+2024-01-01T00:00:00 25
+"""
+    )
+
+    with pytest.raises(ValueError, match="HS_mod.*expects"):
+        read_smet(smet_file)
+
+
+@pytest.mark.synthetic
+def test_read_raises_for_smet_file_with_unexpected_units(tmp_path):
+    """Top-level read() does not hide SMET unit validation failures."""
+    smet_file = tmp_path / "bad_units.smet"
+    smet_file.write_text(
+        """SMET 1.1 ASCII
+[HEADER]
+station_name = UNIT_TEST
+fields = timestamp HS_mod
+plot_unit = - kg/m2
+[DATA]
+2024-01-01T00:00:00 25
+"""
+    )
+
+    with pytest.raises(ValueError, match="HS_mod.*expects"):
+        read(smet_file)
+
+
+@pytest.mark.synthetic
+def test_read_smet_warns_on_missing_usable_unit_metadata(tmp_path, caplog):
+    """Strict SMET validation warns when a registered variable has unknown units."""
+    logger = logging.getLogger("tests.io.test_smet_units.strict")
+    smet_file = tmp_path / "missing_units.smet"
+    smet_file.write_text(
+        """SMET 1.1 ASCII
+[HEADER]
+station_name = UNIT_TEST
+fields = timestamp TA
+[DATA]
+2024-01-01T00:00:00 273.15
+"""
+    )
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        ds = read_smet(smet_file, logger=logger)
+
+    assert ds["TA"].attrs["units"] == "unknown"
+    assert "no usable unit metadata" in caplog.text
+
+
+@pytest.mark.synthetic
+def test_read_smet_light_validation_warns_on_missing_units(tmp_path, caplog):
+    """Light SMET validation still warns when registered variable units are unknown."""
+    logger = logging.getLogger("tests.io.test_smet_units.light")
+    smet_file = tmp_path / "missing_units.smet"
+    smet_file.write_text(
+        """SMET 1.1 ASCII
+[HEADER]
+station_name = UNIT_TEST
+fields = timestamp TA
+[DATA]
+2024-01-01T00:00:00 273.15
+"""
+    )
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        ds = read_smet(smet_file, logger=logger, unit_validation="light")
+
+    assert ds["TA"].attrs["units"] == "unknown"
+    assert "no usable unit metadata" in caplog.text
+
+
+@pytest.mark.synthetic
+def test_read_passes_unit_validation_to_smet_stream(tmp_path):
+    """Top-level read() validates unit_validation for SMET-only sources."""
+    smet_file = tmp_path / "units.smet"
+    smet_file.write_text(
+        """SMET 1.1 ASCII
+[HEADER]
+station_name = UNIT_TEST
+fields = timestamp TA
+[DATA]
+2024-01-01T00:00:00 273.15
+"""
+    )
+
+    with pytest.raises(ValueError, match="unit_validation"):
+        read(smet_file, unit_validation="off")
 
 
 @pytest.mark.synthetic

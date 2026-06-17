@@ -141,12 +141,14 @@ def read(
             - `remove_soil`: If True (default), drops soil layers during parsing.
             - `add_surface_sh_as_layer`: If True (default), inserts a surface hoar
               layer explicitly as layer when indicated by the PRO file.
-            - `unit_validation`: PRO unit handling mode. `'strict'` (default)
-              parses every PRO file's declared units and raises when a declared
-              unit cannot be converted to xsnow units. `'light'` parses one
-              representative PRO file per parent directory and applies those
-              units to all PRO files in that directory; this is faster for
-              homogeneous file collections.
+            - `unit_validation`: PRO/SMET unit handling mode. `'strict'`
+              (default) parses every PRO file's declared units and raises when
+              a declared unit cannot be converted to xsnow units. `'light'`
+              parses one representative PRO file per parent directory and
+              applies those units to all PRO files in that directory; this is
+              faster for homogeneous PRO file collections. SMET files parse
+              each file's unit metadata in both modes, warn for missing unit
+              metadata, and raise for incompatible units.
             - `norm_slopes`: Controls slope coordinate normalization during
               final merging:
                 * `'auto'` (default): normalize when slopes are consistent
@@ -251,7 +253,13 @@ def read(
             n_cpus_use, logger, parser_kwargs
         )
     
-    smet_datasets = _read_smet_files(smet_files, datetime_start, datetime_end, logger)
+    smet_datasets = _read_smet_files(
+        smet_files,
+        datetime_start,
+        datetime_end,
+        logger,
+        unit_validation=parser_kwargs.get('unit_validation', 'strict'),
+    )
 
     # --- Step 6: Merge and finalize datasets ---
     all_datasets = pro_datasets + smet_datasets

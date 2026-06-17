@@ -823,5 +823,14 @@ registry = {
         'plot_units': 'kg/m2',
         'si_units': 'kg m-2',
     },
+    'zSn': {
+        "param_code": None,
+        "aliases": ['zSn', 'natural_stability_index_sn38_depth'],
+        'standard_name': 'natural_stability_index_sn38_depth',
+        'xsnow_units': 'm',
+        'smet_units': 'm',
+        'plot_units': 'm',
+        'si_units': 'm',
+    },
 
 }
