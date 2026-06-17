@@ -115,6 +115,16 @@ def test_compute_hs(sample_xsnow_dataset):
     assert 'HS' in ds_with_hs.data
     assert np.isclose(ds_with_hs.data['HS'].item(), 0.3)
 
+
+def test_compute_z_depth_uses_xsnow_units(sample_xsnow_dataset):
+    """Tests z-depth metadata after deriving depth from xsnow-unit heights."""
+    ds_with_z = sample_xsnow_dataset.compute_z_depth()
+
+    assert 'z' in ds_with_z.data.coords
+    np.testing.assert_allclose(ds_with_z.data['z'].values, [[[-0.2, -0.1, 0.0]]])
+    assert ds_with_z.data['z'].attrs['units'] == 'm'
+    assert ds_with_z.data['z'].attrs['positive'] == 'up'
+
 def test_compare_processed_hs_against_smet():
     """Compare whether the SMET file variable `HS_mod` agrees with the 
     HS calculated from the cumulative layer `height`
@@ -205,3 +215,4 @@ def test_compute_hs(sample_xsnow_dataset):
     ds_with_hs = sample_xsnow_dataset.compute_hs()
     assert 'HS' in ds_with_hs.data
     assert np.isclose(ds_with_hs.data['HS'].item(), 0.3)
+    assert ds_with_hs.data['HS'].attrs['units'] == 'm'

@@ -19,8 +19,8 @@ def analysis_ds():
     data = {
         'height': (('location', 'time', 'layer'), np.array([[[0.1, 0.2, 0.3, 0.4]]])),
         'density': (('location', 'time', 'layer'), np.array([[[150, 250, 350, 450]]])),
-        'grain_size': (('location', 'time', 'layer'), np.array([[[0.2, 0.2, 0.5, 1.0]]])),
-        'shear_strength': (('location', 'time', 'layer'), np.array([[[0.1, 0.2, 0.8, 1.5]]]))
+        'grain_size': (('location', 'time', 'layer'), np.array([[[0.0002, 0.0002, 0.0005, 0.0010]]])),
+        'shear_strength': (('location', 'time', 'layer'), np.array([[[100.0, 200.0, 800.0, 1500.0]]]))
     }
     coords = {
         'location': [0],
@@ -44,3 +44,5 @@ def test_compute_critical_crack_length(analysis_ds):
 
     other_vals = ds_with_rc_cpu['rc_flat'].isel(layer=slice(None, -1)).values
     assert np.all(other_vals > 0)
+    assert np.nanmax(other_vals) < 100
+    assert ds_with_rc_cpu['rc_flat'].attrs['units'] == 'm'
