@@ -307,6 +307,41 @@ SlopeAzi= 180
         filepath = tmp_path / f"{station_name}.pro"
         filepath.write_text(content)
         return filepath
+
+    @staticmethod
+    def with_declared_units(
+        path: Path,
+        station_name: str = "UNITTEST",
+        height_unit: str = "cm",
+        height_values: tuple[float, float] = (10.0, 20.0),
+    ) -> Path:
+        """Generate a minimal PRO file with explicit header units."""
+        path.write_text(
+            f"""[STATION_PARAMETERS]
+StationName= {station_name}
+Latitude= 46.5
+Longitude= 10.5
+Altitude= 2500
+SlopeAngle= 35
+SlopeAzi= 180
+
+[HEADER]
+0501,nElems,height [> 0: top, < 0: bottom of elem.] ({height_unit})
+0502,nElems,element density (kg m-3)
+0506,nElems,liquid water content by volume (%)
+0512,nElems,grain size (mm)
+0517,nElems,stress (kPa)
+
+[DATA]
+0500,01.01.2025 12:00:00
+0501,2,{height_values[0]},{height_values[1]}
+0502,2,100,200
+0506,2,5,10
+0512,2,0.5,1.0
+0517,2,1.2,2.4
+"""
+        )
+        return path
     
     @staticmethod
     def with_soil_layers(tmp_path: Path, n_snow: int = 3, n_soil: int = 2) -> Path:

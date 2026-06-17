@@ -25,7 +25,7 @@ from dask.delayed import delayed
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..registry import registry
-from ..units import UnitLike, normalize_unit
+from ..units import UnitConversionError, UnitLike, convert_units, normalize_unit
 from ..utils import get_logger
 
 from .base import (
@@ -42,6 +42,8 @@ from .base import (
 # --------------------------------------------------------------------------- #
 
 _PRO_UNIT_RE = re.compile(r"\(([^()]*)\)")
+_PRO_UNIT_VALIDATION_MODES = {"light", "strict"}
+_PRO_UNIT_MAPS_KEY = "_pro_unit_maps_by_file"
 
 
 def parse_pro_header_units(
@@ -83,6 +85,216 @@ def parse_pro_header_units(
                 units[var_name] = declared_units
 
     return units
+
+
+def _normalize_unitlike(unit: UnitLike) -> UnitLike:
+    """Normalize one unit string or a list of unit strings."""
+    if isinstance(unit, list):
+        return [normalize_unit(item) or "1" for item in unit]
+    return normalize_unit(unit) or "1"
+
+
+def _unitlike_equal(left: UnitLike, right: UnitLike) -> bool:
+    """Compare scalar or vector unit declarations after normalization."""
+    return _normalize_unitlike(left) == _normalize_unitlike(right)
+
+
+def _ensure_unit_conversion_supported(
+    var_name: str,
+    source_unit: UnitLike,
+    target_unit: UnitLike,
+    filepath: Optional[Path] = None,
+) -> None:
+    """Raise if a parsed PRO unit cannot be converted to xsnow units."""
+    source = _normalize_unitlike(source_unit)
+    target = _normalize_unitlike(target_unit)
+
+    if isinstance(source, list) or isinstance(target, list):
+        if not isinstance(source, list) or not isinstance(target, list):
+            raise UnitConversionError(
+                f"Cannot convert PRO variable {var_name!r} between incompatible "
+                f"unit declarations {source!r} and {target!r}."
+            )
+        if len(source) != len(target):
+            raise UnitConversionError(
+                f"Cannot convert PRO variable {var_name!r}: parsed unit vector "
+                f"{source!r} has different length than xsnow unit vector {target!r}."
+            )
+        pairs = zip(source, target)
+    else:
+        pairs = [(source, target)]
+
+    for source_item, target_item in pairs:
+        if source_item == target_item:
+            continue
+        try:
+            convert_units(1.0, source_item, target_item)
+        except UnitConversionError as exc:
+            location = f" in {filepath.name}" if filepath is not None else ""
+            raise UnitConversionError(
+                f"Cannot convert PRO variable {var_name!r}{location} from "
+                f"{source_item!r} to xsnow unit {target_item!r}."
+            ) from exc
+
+
+def _validate_pro_unit_map(
+    units: Mapping[str, UnitLike],
+    filepath: Optional[Path],
+    logger: Optional[logging.Logger],
+) -> None:
+    """Verify parsed PRO units can be converted to xsnow units."""
+    logger = get_logger(__name__, logger=logger)
+
+    for var_name, declared_unit in units.items():
+        reg_entry = registry.get(var_name)
+        if not reg_entry:
+            continue
+
+        xsnow_unit = reg_entry.get("xsnow_units")
+        if xsnow_unit is None:
+            continue
+
+        expected_pro_unit = reg_entry.get("pro_units")
+        if expected_pro_unit is not None and not _unitlike_equal(declared_unit, expected_pro_unit):
+            location = f" in {filepath.name}" if filepath is not None else ""
+            logger.debug(
+                "PRO variable %s%s declares units %r, but xsnow expects "
+                "SNOWPACK PRO units %r. Values will be converted to xsnow "
+                "units %r.",
+                var_name,
+                location,
+                declared_unit,
+                expected_pro_unit,
+                xsnow_unit,
+            )
+
+        _ensure_unit_conversion_supported(var_name, declared_unit, xsnow_unit, filepath)
+
+
+def _file_unit_key(filepath: Union[str, Path]) -> str:
+    """Return the stable key used for per-file unit lookup."""
+    return str(Path(filepath).resolve())
+
+
+def _representative_files_by_directory(pro_files: List[Path]) -> Dict[Path, Path]:
+    """Choose the first PRO file from each parent directory."""
+    representatives: Dict[Path, Path] = {}
+    for filepath in pro_files:
+        parent = Path(filepath).resolve().parent
+        representatives.setdefault(parent, filepath)
+    return representatives
+
+
+def _resolve_pro_unit_maps(
+    pro_files: List[Path],
+    unit_validation: str,
+    logger: Optional[logging.Logger],
+) -> Dict[str, Dict[str, UnitLike]]:
+    """Resolve per-file PRO unit maps for validation and conversion."""
+    if unit_validation not in _PRO_UNIT_VALIDATION_MODES:
+        raise ValueError(
+            "unit_validation must be 'light' or 'strict' for PRO files, "
+            f"got {unit_validation!r}."
+        )
+
+    if not pro_files:
+        return {}
+
+    logger = get_logger(__name__, logger=logger)
+    resolved_maps: Dict[str, Dict[str, UnitLike]] = {}
+
+    if unit_validation == "strict":
+        for filepath in pro_files:
+            parsed_units = parse_pro_header_units(filepath)
+            _validate_pro_unit_map(parsed_units, filepath, logger)
+            resolved_maps[_file_unit_key(filepath)] = parsed_units
+        return resolved_maps
+
+    representatives = _representative_files_by_directory(pro_files)
+    units_by_parent: Dict[Path, Dict[str, UnitLike]] = {}
+    for parent, representative in representatives.items():
+        parsed_units = parse_pro_header_units(representative)
+        _validate_pro_unit_map(parsed_units, representative, logger)
+        units_by_parent[parent] = parsed_units
+
+    for filepath in pro_files:
+        resolved_maps[_file_unit_key(filepath)] = units_by_parent[Path(filepath).resolve().parent]
+
+    return resolved_maps
+
+
+def _pro_units_for_file(
+    filepath: Union[str, Path],
+    parser_kwargs: Mapping[str, Any],
+) -> Optional[Mapping[str, UnitLike]]:
+    """Return the resolved source units for one PRO file."""
+    unit_maps = parser_kwargs.get(_PRO_UNIT_MAPS_KEY)
+    if not unit_maps:
+        return None
+    return unit_maps.get(_file_unit_key(filepath))
+
+
+def _source_pro_unit(var_name: str, pro_units: Optional[Mapping[str, UnitLike]]) -> Optional[UnitLike]:
+    """Return the parsed source unit for a PRO variable, falling back to registry."""
+    if pro_units and var_name in pro_units:
+        return pro_units[var_name]
+    reg_entry = registry.get(var_name)
+    if not reg_entry:
+        return None
+    return reg_entry.get("pro_units")
+
+
+def _xsnow_unit(var_name: str) -> Optional[UnitLike]:
+    """Return the canonical xsnow unit for a variable, if registered."""
+    reg_entry = registry.get(var_name)
+    if not reg_entry:
+        return None
+    return reg_entry.get("xsnow_units")
+
+
+def _convert_pro_values_to_xsnow_units(
+    var_name: str,
+    values: Any,
+    pro_units: Optional[Mapping[str, UnitLike]],
+) -> Any:
+    """Convert parsed PRO values for one variable into xsnow units."""
+    source_unit = _source_pro_unit(var_name, pro_units)
+    target_unit = _xsnow_unit(var_name)
+
+    if source_unit is None or target_unit is None:
+        return values
+
+    source = _normalize_unitlike(source_unit)
+    target = _normalize_unitlike(target_unit)
+
+    if isinstance(source, list) or isinstance(target, list):
+        return values
+
+    return convert_units(values, source, target)
+
+
+def _convert_surface_hoar_value(
+    value: float,
+    from_index: int,
+    to_var_name: str,
+    pro_units: Optional[Mapping[str, UnitLike]],
+) -> float:
+    """Convert one SH_at_surface vector component to another PRO variable unit."""
+    sh_units = _source_pro_unit("SH_at_surface", pro_units)
+    target_unit = _source_pro_unit(to_var_name, pro_units)
+
+    if not isinstance(sh_units, list) or target_unit is None:
+        return value
+
+    return float(convert_units(value, sh_units[from_index], target_unit))
+
+
+def _surface_hoar_height_increment(pro_units: Optional[Mapping[str, UnitLike]]) -> float:
+    """Return a 1 mm surface-hoar layer increment in the parsed PRO height unit."""
+    height_unit = _source_pro_unit("height", pro_units) or "m"
+    if isinstance(height_unit, list):
+        return 0.001
+    return float(convert_units(0.001, "m", height_unit))
 
 
 def _extract_metadata_fast(
@@ -792,6 +1004,7 @@ def _create_pro_dataset(
     use_dask: bool = False,
     chunks: Optional[Dict[str, int]] = None,
     empty_profile_status_default: int = 0,
+    pro_units: Optional[Mapping[str, UnitLike]] = None,
 ) -> Optional[xr.Dataset]:
     """
     Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
@@ -825,6 +1038,9 @@ def _create_pro_dataset(
         empty_profile_status_default: Status value for the minimal no-profile
             dataset. The loading code uses `-1` for parse failures and `0` for
             ordinary no-layer-data cases.
+        pro_units: Parsed or inferred source units for variables in the PRO
+            file. Values are converted from these units to registry
+            `xsnow_units` before the dataset is returned.
 
     Returns:
         An xarray.Dataset containing structured snow profile data. The return
@@ -898,8 +1114,12 @@ def _create_pro_dataset(
                 sh_data = profile['SH_at_surface']
                 if sh_data.size >= 3 and sh_data[0] > 0:
                     has_sh = True
-                    sh_gsize = sh_data[1]
-                    sh_density = sh_data[2]
+                    sh_gsize = _convert_surface_hoar_value(
+                        sh_data[1], 1, "grain_size", pro_units
+                    )
+                    sh_density = _convert_surface_hoar_value(
+                        sh_data[2], 2, "density", pro_units
+                    )
 
             num_snow_layers = len(profile.get('height', []))
 
@@ -923,7 +1143,7 @@ def _create_pro_dataset(
                         if final_values and not np.isnan(final_values[-1])
                         else 0.0
                     )
-                    final_values.append(last_height + 0.001)
+                    final_values.append(last_height + _surface_hoar_height_increment(pro_units))
                 else:
                     final_values.append(np.nan)
 
@@ -932,6 +1152,7 @@ def _create_pro_dataset(
                 final_values.append(np.nan)
 
             final_values = final_values[:max_layers]
+            final_values = _convert_pro_values_to_xsnow_units(param, final_values, pro_units)
             profile_data.append(final_values)
 
         np_array = np.full(
@@ -1022,7 +1243,7 @@ def _create_pro_dataset(
     for var_name in ds.data_vars:
         if reg_entry := registry.get(str(var_name)):
             ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', str(var_name))
-            ds[var_name].attrs['units'] = reg_entry.get('si_units', '1')
+            ds[var_name].attrs['units'] = reg_entry.get('xsnow_units', reg_entry.get('si_units', '1'))
             ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', str(var_name)).replace('_', ' ')
         else:
             if 'units' not in ds[var_name].attrs:
@@ -1071,6 +1292,7 @@ def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
     try:
         remove_soil = parser_kwargs.get('remove_soil', True)
         add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
+        pro_units = _pro_units_for_file(filepath, parser_kwargs)
         
         raw_data = _read_pro_raw(
             filepath,
@@ -1084,7 +1306,11 @@ def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
         
         if raw_data and raw_data[0]:
             metadata, profiles = raw_data
-            return _create_pro_dataset(metadata, profiles, max_layers, add_sh)
+            return _create_pro_dataset(
+                metadata, profiles, max_layers, add_sh, pro_units=pro_units
+            )
+    except UnitConversionError:
+        raise
     except Exception as e:
         logging.error(f"Failed to process {filepath.name}: {e}")
         try:
@@ -1132,6 +1358,10 @@ def _read_pro_files_eager(
     """
     if not pro_files:
         return []
+
+    parser_kwargs = dict(parser_kwargs)
+    unit_validation = parser_kwargs.get('unit_validation', 'strict')
+    parser_kwargs[_PRO_UNIT_MAPS_KEY] = _resolve_pro_unit_maps(pro_files, unit_validation, logger)
 
     max_layers_arg = parser_kwargs.get('max_layers', 'auto')
     add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
@@ -1197,6 +1427,7 @@ def _create_dataset_from_pro_file(
     try:
         remove_soil = parser_kwargs.get('remove_soil', True)
         add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
+        pro_units = _pro_units_for_file(filepath, parser_kwargs)
         
         raw_data = _read_pro_raw(
             filepath,
@@ -1214,9 +1445,10 @@ def _create_dataset_from_pro_file(
             chunks = parser_kwargs.get('chunks', None)
             return _create_pro_dataset(
                 metadata, profiles, max_layers, add_sh, 
-                use_dask=use_dask, chunks=chunks
+                use_dask=use_dask, chunks=chunks, pro_units=pro_units
             )
-            
+    except UnitConversionError:
+        raise
     except Exception as e:
         try:
             metadata = _read_pro_metadata(filepath, logger=logger, throw=False)
@@ -1271,6 +1503,10 @@ def _read_pro_files_lazy(
     if not pro_files:
         return []
 
+    parser_kwargs = dict(parser_kwargs)
+    unit_validation = parser_kwargs.get('unit_validation', 'strict')
+    parser_kwargs[_PRO_UNIT_MAPS_KEY] = _resolve_pro_unit_maps(pro_files, unit_validation, logger)
+
     use_dask = parser_kwargs.get('use_dask', True)
     add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
     remove_soil = parser_kwargs.get('remove_soil', True)
@@ -1321,7 +1557,8 @@ def _read_pro_files_lazy(
                 if metadata:
                     ds = _create_pro_dataset(
                         metadata, profiles, max_layers=default_max_layers,
-                        add_surface_sh_as_layer=add_sh, use_dask=True, chunks=chunks
+                        add_surface_sh_as_layer=add_sh, use_dask=True,
+                        chunks=chunks, pro_units=_pro_units_for_file(fp, parser_kwargs)
                     )
                     return ds
                 else:
