@@ -26,6 +26,7 @@ from ..selectors import (
     TimeLike, LocationLike, SlopeLike, RealizationLike
 )
 from ..utils import get_logger
+from ..units import UnitValidationError
 
 from .base import (
     CODE_TO_NAME_MAP,
@@ -141,14 +142,17 @@ def read(
             - `remove_soil`: If True (default), drops soil layers during parsing.
             - `add_surface_sh_as_layer`: If True (default), inserts a surface hoar
               layer explicitly as layer when indicated by the PRO file.
-            - `unit_validation`: PRO/SMET unit handling mode. `'strict'`
+            - `unit_validation`: Unit handling/validation mode. `'strict'`
               (default) parses every PRO file's declared units and raises when
               a declared unit cannot be converted to xsnow units. `'light'`
               parses one representative PRO file per parent directory and
               applies those units to all PRO files in that directory; this is
               faster for homogeneous PRO file collections. SMET files parse
               each file's unit metadata in both modes, warn for missing unit
-              metadata, and raise for incompatible units.
+              metadata, and raise for incompatible units. NetCDF and Zarr
+              datasets preserve stored attrs and validate present
+              `attrs["units"]` against xsnow units: `'strict'` raises on
+              mismatches, while `'light'` warns and leaves attrs unchanged.
             - `norm_slopes`: Controls slope coordinate normalization during
               final merging:
                 * `'auto'` (default): normalize when slopes are consistent
@@ -197,7 +201,13 @@ def read(
     # NetCDF files
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
-            return _read_xsnow_netcdf(source)
+            return _read_xsnow_netcdf(
+                source,
+                unit_validation=parser_kwargs.get('unit_validation', 'strict'),
+                logger=logger,
+            )
+        except UnitValidationError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to read NetCDF file {source}: {e}")
             return None
@@ -208,7 +218,17 @@ def read(
         (Path(source).is_dir() and (Path(source) / 'zarr.json').exists())
     ):
         try:
-            return _read_zarr(source, time_sel, location_sel, slope_sel, realization_sel, logger)
+            return _read_zarr(
+                source,
+                time_sel,
+                location_sel,
+                slope_sel,
+                realization_sel,
+                logger,
+                unit_validation=parser_kwargs.get('unit_validation', 'strict'),
+            )
+        except UnitValidationError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to read Zarr archive {source}: {e}")
             return None

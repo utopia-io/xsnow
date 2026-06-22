@@ -20,6 +20,7 @@ import xarray as xr
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
+from ..units import UnitValidationError, validate_xsnow_unit_attrs
 from ..utils import get_logger, _promote_slope_metadata_coords
 
 # Define the allowed modes matching xarray/zarr requirements
@@ -33,6 +34,7 @@ def _read_zarr(
     slope_sel: Optional[SlopeSelector] = None,
     realization_sel: Optional[RealizationSelector] = None,
     logger: Optional[logging.Logger] = None,
+    unit_validation: str = "strict",
 ) -> Optional[xsnowDataset]:
     """
     Internal function to read a Zarr archive.
@@ -47,6 +49,8 @@ def _read_zarr(
         slope_sel: SlopeSelector for filtering by slope (already coerced)
         realization_sel: RealizationSelector for filtering by realization (already coerced)
         logger: Logger instance
+        unit_validation: Stored-unit validation mode. `'strict'` raises when
+            present unit attrs differ from xsnow units; `'light'` warns.
         
     Returns:
         xsnowDataset with the loaded data, or None if loading fails
@@ -75,6 +79,12 @@ def _read_zarr(
         # Open with xarray
         ds_raw = xr.open_zarr(path)
         ds_raw = _promote_slope_metadata_coords(ds_raw)
+        ds_raw = validate_xsnow_unit_attrs(
+            ds_raw,
+            unit_validation=unit_validation,
+            logger=logger,
+            source=f"Zarr archive {path}",
+        )
         
         logger.debug(
             f"  Loaded: {len(ds_raw.location):,} locations, "
@@ -95,6 +105,8 @@ def _read_zarr(
         # Wrap in xsnowDataset
         return xsnowDataset(ds_raw)
         
+    except UnitValidationError:
+        raise
     except (FileNotFoundError, ValueError, OSError) as e:
         # Expected failures: missing path, not a Zarr archive, or an I/O error
         # while reading. Per this function's contract, report and return None.

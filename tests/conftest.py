@@ -684,6 +684,32 @@ def smet_units_xsnow_dataset():
 
 
 @pytest.fixture
+def stored_units_xr_dataset():
+    """Factory for minimal stored datasets with registered unit metadata."""
+    def make(unit: str = "m") -> xr.Dataset:
+        ds = xr.Dataset(
+            data_vars={
+                "height": (
+                    ("location", "time", "slope", "realization", "layer"),
+                    np.array([[[[[0.1, 0.2]]]]]),
+                ),
+            },
+            coords={
+                "location": ["TEST"],
+                "time": [pd.Timestamp("2025-01-01")],
+                "slope": [0],
+                "realization": [0],
+                "layer": [0, 1],
+            },
+        )
+        ds["height"].attrs["units"] = unit
+        ds["height"].attrs["custom_attr"] = "preserve-me"
+        return ds
+
+    return make
+
+
+@pytest.fixture
 def snow_profile_xr_dataset():
     """xarray.Dataset with realistic snow profile structure."""
     height = np.array([[[0.1, 0.2, 0.3], [0.15, 0.25, 0.35]]])

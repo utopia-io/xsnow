@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import re
+import logging
 from typing import Any, Optional, Union
 
 import numpy as np
+import xarray as xr
 
 UnitLike = Union[str, list[str]]
 
 
 class UnitConversionError(ValueError):
     """Raised when xsnow does not know how to convert between two units."""
+
+
+class UnitValidationError(ValueError):
+    """Raised when stored unit metadata is incompatible with xsnow units."""
+
+
+_UNIT_VALIDATION_MODES = {"light", "strict"}
 
 
 UNIT_ALIASES = {
@@ -121,3 +130,54 @@ def convert_units(values: Any, from_unit: str, to_unit: str) -> Any:
         converted = arr * factor
 
     return converted.item() if scalar_input else converted
+
+
+def validate_xsnow_unit_attrs(
+    ds: xr.Dataset,
+    *,
+    unit_validation: str = "strict",
+    logger: Optional[logging.Logger] = None,
+    source: str = "dataset",
+) -> xr.Dataset:
+    """Validate stored variable unit attrs against xsnow's unit convention."""
+    if unit_validation not in _UNIT_VALIDATION_MODES:
+        raise UnitValidationError(
+            "unit_validation must be 'light' or 'strict' for stored datasets, "
+            f"got {unit_validation!r}."
+        )
+
+    from .registry import registry
+
+    for var_name, data_array in ds.data_vars.items():
+        reg_entry = registry.get(var_name)
+        if not reg_entry:
+            continue
+        expected_unit = reg_entry.get("xsnow_units")
+        if expected_unit is None or isinstance(expected_unit, list):
+            continue
+
+        stored_unit = data_array.attrs.get("units")
+        if stored_unit is None:
+            message = (
+                f"{source} variable {var_name!r} has no units attribute; "
+                f"expected xsnow unit {expected_unit!r}."
+            )
+            if logger is not None:
+                logger.warning(message)
+            continue
+
+        normalized_stored = normalize_unit(stored_unit)
+        normalized_expected = normalize_unit(expected_unit)
+        if normalized_stored == normalized_expected:
+            continue
+
+        message = (
+            f"{source} variable {var_name!r} declares units {stored_unit!r}, "
+            f"but xsnow expects {normalized_expected!r}."
+        )
+        if unit_validation == "strict":
+            raise UnitValidationError(message)
+        if logger is not None:
+            logger.warning(message)
+
+    return ds
