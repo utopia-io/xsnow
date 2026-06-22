@@ -272,6 +272,51 @@ def test_to_pro_roundtrip_structure(sample_pro_file, tmp_path):
 
 
 @pytest.mark.synthetic
+def test_to_pro_converts_xsnow_units_to_pro_units(tmp_path, synthetic_pro):
+    """PRO writer converts xsnow-unit data back to SNOWPACK PRO units."""
+    source_file = synthetic_pro.with_declared_units(tmp_path / "source.pro")
+    ds = read(source_file, lazy=False, max_layers=2)
+
+    output_file = tmp_path / "written.pro"
+    ds.to_pro(output_file)
+
+    content = output_file.read_text()
+    assert "0501,2,10,20" in content
+    assert "0506,2,5,10" in content
+    assert "0512,2,0.5,1" in content
+    assert "0513,3,550,440,0" in content
+    assert "0517,2,1.2,2.4" in content
+
+
+@pytest.mark.synthetic
+def test_to_pro_writes_parameter_header_definitions(tmp_path, synthetic_pro):
+    """PRO writer emits parameter definitions required by external readers."""
+    source_file = synthetic_pro.with_declared_units(tmp_path / "source.pro")
+    ds = read(source_file, lazy=False, max_layers=2)
+
+    output_file = tmp_path / "with_header.pro"
+    ds.to_pro(output_file)
+
+    content = output_file.read_text()
+    assert "[STATION_PARAMETERS]" in content
+    assert "[HEADER]" in content
+    assert "[DATA]" in content
+    assert content.index("[HEADER]") < content.index("[DATA]")
+    assert "0500,Date" in content
+    assert "0501,nElems,height [> 0: top, < 0: bottom of elem.] (cm)" in content
+    assert "0502,nElems,density (kg m-3)" in content
+    assert "0512,nElems,grain size (mm)" in content
+    assert "0513,nElems,grain type (Swiss Code F1F2F3)" in content
+    assert "0517,nElems,stress (kPa)" in content
+
+    loaded = read(output_file, lazy=False, max_layers=2)
+    assert loaded is not None
+    np.testing.assert_allclose(loaded["height"].values[0, 0, 0, 0, :], [0.1, 0.2])
+    np.testing.assert_allclose(loaded["grain_type"].values[0, 0, 0, 0, :], [550, 440])
+    np.testing.assert_allclose(loaded["stress"].values[0, 0, 0, 0, :], [1200, 2400])
+
+
+@pytest.mark.synthetic
 @pytest.mark.edge_case
 def test_to_pro_max_files_limit(tmp_path, synthetic_pro):
     """
@@ -362,6 +407,67 @@ def smet_writer_dataset():
 
 
 @pytest.mark.synthetic
+def test_to_smet_output_units_convert_from_xsnow_units(smet_units_xsnow_dataset, tmp_path):
+    """Output-style SMET writing converts xsnow units to output storage units."""
+    from xsnow.io.smet import read_smet
+
+    output_file = tmp_path / "output_units.smet"
+    smet_units_xsnow_dataset.to_smet(output_file)
+
+    content = output_file.read_text()
+    assert "station_id = TEST" in content
+    assert "station_name = TEST" in content
+    assert "units = ISO8601 degC % cm" in content
+    assert "0.000\t50.000\t25.000" in content
+
+    loaded = read_smet(output_file)
+    np.testing.assert_allclose(loaded["TA"].isel(time=0).values, [[[0.0]]])
+    np.testing.assert_allclose(loaded["RH"].isel(time=0).values, [[[0.5]]])
+    np.testing.assert_allclose(loaded["HS_mod"].isel(time=0).values, [[[0.25]]])
+
+
+@pytest.mark.synthetic
+def test_to_smet_input_units_convert_from_xsnow_units(smet_units_xsnow_dataset, tmp_path):
+    """Input-style SMET writing uses forcing units where registry declares them."""
+    from xsnow.io.smet import read_smet
+
+    output_file = tmp_path / "input_units.smet"
+    xsnowDataset(smet_units_xsnow_dataset.data[["TA", "RH"]]).to_smet(
+        output_file,
+        unit_type="input",
+    )
+
+    content = output_file.read_text()
+    assert "units = ISO8601 K 1" in content
+    assert "273.150\t0.500" in content
+
+    loaded = read_smet(output_file)
+    np.testing.assert_allclose(loaded["TA"].isel(time=0).values, [[[0.0]]])
+    np.testing.assert_allclose(loaded["RH"].isel(time=0).values, [[[0.5]]])
+
+
+@pytest.mark.synthetic
+def test_to_smet_forcing_unit_type_aliases_input(smet_units_xsnow_dataset, tmp_path):
+    """Forcing is accepted as an alias for input-style SMET units."""
+    output_file = tmp_path / "forcing_units.smet"
+    xsnowDataset(smet_units_xsnow_dataset.data[["TA", "RH"]]).to_smet(
+        output_file,
+        unit_type="forcing",
+    )
+
+    content = output_file.read_text()
+    assert "units = ISO8601 K 1" in content
+    assert "273.150\t0.500" in content
+
+
+@pytest.mark.synthetic
+def test_to_smet_rejects_unknown_unit_type(smet_units_xsnow_dataset, tmp_path):
+    """SMET writer validates the selected unit convention."""
+    with pytest.raises(ValueError, match="unit_type"):
+        smet_units_xsnow_dataset.to_smet(tmp_path / "bad.smet", unit_type="archive")
+
+
+@pytest.mark.synthetic
 def test_to_smet_writes_nodata_precision_and_unquoted_strings(smet_writer_dataset, tmp_path):
     """SMET writer should emit rectangular rows even when values are missing."""
     output_file = tmp_path / "nodata.smet"
@@ -371,7 +477,7 @@ def test_to_smet_writes_nodata_precision_and_unquoted_strings(smet_writer_datase
     assert "nodata = -999.0" in content
     assert "fields = timestamp TA weather" in content
     assert '"' not in content
-    assert "270.12346" in content
+    assert "270.123" in content
     assert "-999.0" in content
 
     data_lines = content.split("[DATA]\n", maxsplit=1)[1].splitlines()
@@ -391,7 +497,7 @@ def test_to_smet_roundtrip_preserves_missing_values(smet_writer_dataset, tmp_pat
     loaded = read_smet(output_file)
     assert loaded is not None
     assert "TA" in loaded
-    assert np.isclose(loaded["TA"].isel(time=0).values, 270.12346).all()
+    assert np.isclose(loaded["TA"].isel(time=0).values, 270.123).all()
     assert np.isnan(loaded["TA"].isel(time=1).values).all()
     assert "layer" not in loaded["TA"].dims
 

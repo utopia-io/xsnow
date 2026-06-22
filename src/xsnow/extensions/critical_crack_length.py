@@ -105,8 +105,8 @@ def compute_rho_slab(density, thickness, xp):
 
 def compute_rc_flat_richter2019(
     rho_layer,
-    grain_size_mm,
-    shear_strength_kpa,
+    grain_size_m,
+    shear_strength_pa,
     rho_slab,
     xp,
 ):
@@ -122,11 +122,10 @@ def compute_rc_flat_richter2019(
     rho_layer : xp.ndarray
         Layer density [kg m^-3], shape (..., L).
         This is the candidate failure layer density.
-    grain_size_mm : xp.ndarray
-        Grain size [mm] for each layer, shape (..., L).
-    shear_strength_kpa : xp.ndarray
-        Shear strength [kPa] for each layer, shape (..., L).
-        (kPa = kN/m^2; will be converted to Pa.)
+    grain_size_m : xp.ndarray
+        Grain size [m] for each layer, shape (..., L).
+    shear_strength_pa : xp.ndarray
+        Shear strength [Pa] for each layer, shape (..., L).
     rho_slab : xp.ndarray
         Mean density [kg m^-3] of the slab ABOVE each layer
         (output of compute_rho_slab), shape (..., L).
@@ -149,17 +148,12 @@ def compute_rc_flat_richter2019(
         term2 ~ sqrt( 2 * tau_p * E' * D_sl/sigma_n )
         rc_flat = term1 * term2
 
-    where tau_p is shear strength converted from kPa to Pa,
-    and grain size is converted from mm to m.
+    where tau_p is shear strength in Pa and grain size is in m, matching
+    xsnow's internal unit convention.
 
     No slope angle correction is applied here; this is for flat terrain
     (normal loading only), like the original xsnow rc_flat calculation.
     """
-
-    # Unit conversions
-    grain_size_m = grain_size_mm * 0.001     # mm -> m
-    tau_p_pa = shear_strength_kpa * 1000.0  # kPa -> Pa
-
     # E' (effective modulus)
     eprime = (
         E0
@@ -175,7 +169,7 @@ def compute_rc_flat_richter2019(
         (rho_layer / RHO_ICE) * (grain_size_m / GS_0)
     ) ** B_RICHTER
 
-    term2_under = 2.0 * tau_p_pa * eprime * dsl_over_sigman
+    term2_under = 2.0 * shear_strength_pa * eprime * dsl_over_sigman
 
     with xp.errstate(invalid='ignore'):
         term1 = xp.sqrt(xp.where(term1_under > 0, term1_under, xp.nan))
@@ -206,8 +200,8 @@ def compute_critical_crack_length(ds: 'xsnowDataset') -> 'xsnowDataset':
     ------------
     The dataset must contain:
       - `density`            [kg m^-3]
-      - `grain_size`         [mm]
-      - `shear_strength`     [kPa]
+      - `grain_size`         [m]
+      - `shear_strength`     [Pa]
       - `height`             [m], cumulative height from ground upward
 
     We assume:
@@ -264,8 +258,8 @@ def compute_critical_crack_length(ds: 'xsnowDataset') -> 'xsnowDataset':
     # Physics core: Richter et al. (2019) flat-terrain rc
     rc_flat_arr = compute_rc_flat_richter2019(
         rho_layer=rho_layer_arr,
-        grain_size_mm=gsize_arr,
-        shear_strength_kpa=shear_arr,
+        grain_size_m=gsize_arr,
+        shear_strength_pa=shear_arr,
         rho_slab=rho_slab_arr,
         xp=xp,
     )
@@ -282,7 +276,7 @@ def compute_critical_crack_length(ds: 'xsnowDataset') -> 'xsnowDataset':
         reg_entry = registry['rc_flat']
         rc_flat_da.attrs = {
             'long_name': reg_entry.get('long_name', 'critical crack length (flat terrain)'),
-            'units': reg_entry.get('si_units', 'm'),
+            'units': reg_entry.get('xsnow_units', 'm'),
             'standard_name': reg_entry.get('standard_name', 'rc_flat'),
         }
     else:

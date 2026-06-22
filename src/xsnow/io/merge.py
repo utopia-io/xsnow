@@ -632,9 +632,18 @@ def _merge_and_finalize(
     for var_name_hashable in list(final_xr_dataset.variables):
         var_name = str(var_name_hashable)
         if reg_entry := registry.get(var_name):
-            final_xr_dataset[var_name].attrs['standard_name'] = reg_entry.get('standard_name', 'unknown')
-            final_xr_dataset[var_name].attrs['units'] = reg_entry.get('si_units', 'unknown')
-            final_xr_dataset[var_name].attrs['long_name'] = reg_entry.get('standard_name', var_name).replace('_', ' ')
+            final_xr_dataset[var_name].attrs.setdefault(
+                'standard_name',
+                reg_entry.get('standard_name', 'unknown'),
+            )
+            final_xr_dataset[var_name].attrs.setdefault(
+                'units',
+                reg_entry.get('xsnow_units', reg_entry.get('si_units', 'unknown')),
+            )
+            final_xr_dataset[var_name].attrs.setdefault(
+                'long_name',
+                reg_entry.get('standard_name', var_name).replace('_', ' '),
+            )
         else:
             # Set defaults for variables not in registry if not already set
             if var_name in final_xr_dataset.data_vars:

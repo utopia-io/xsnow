@@ -634,7 +634,7 @@ class xsnowDataset:
         hs.attrs = {
             'standard_name': reg_entry.get('standard_name', 'height_of_snow'),
             'long_name': reg_entry.get('long_name', 'Total snow height'),
-            'units': reg_entry.get('si_units', 'm'),
+            'units': reg_entry.get('xsnow_units', 'm'),
             'description': 'Total depth of snowpack (maximum height above ground)',
         }
         
@@ -664,7 +664,7 @@ class xsnowDataset:
             reg_entry = registry['z']
             z_depth.attrs = {
                 'long_name': reg_entry.get('long_name', 'Depth Below Snow Surface'),
-                'units': reg_entry.get('si_units', 'm'),
+                'units': reg_entry.get('xsnow_units', 'm'),
                 'standard_name': reg_entry.get('standard_name', 'depth'),
                 'positive': 'up'
            }
