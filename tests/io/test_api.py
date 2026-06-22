@@ -657,7 +657,8 @@ def test_read_real_pro_with_mixed_sh(snp_gridded_sample_dir):
             # This is an SH profile, verify its properties
             assert np.isclose(top_layer['grain_type'].item(), 660)
             assert np.isclose(top_layer['density'].item(), 100)
-            assert np.isclose(top_layer['grain_size'].item(), 0.5)
+            assert top_layer['grain_size'].attrs["units"] == "m"
+            assert np.isclose(top_layer['grain_size'].item(), 0.0005)
             found_sh_profile = True
         
         # FIX: A valid, non-SH profile is one where the temperature is NOT NaN.

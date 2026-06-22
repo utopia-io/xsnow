@@ -156,19 +156,20 @@ class HazardChart(DatasetDecorator):
         # depth at weakest layer (NaN-safe)
         weakest_depth = _isel_with_nan_index(depth_da, layer_dim, hc_instabilityDrivenBy)
 
+        # compare depths using a metric that increases with depth (sign-agnostic)
+        z_metric = _depth_metric(depth_da, layer_dim)
+
         # --- deepest depth among "poor or worse" layers ---
         class_bins = _classify_layers(si, thresholds)           # per-layer string labels
         poor_mask = _is_any_of(class_bins, poor_or_worse)       # bool like si
-        depth_masked = xr.where(poor_mask, depth_da, -np.inf)   # invalid -> -inf
-        deepest_poor = depth_masked.max(dim=layer_dim, skipna=True)
-        arg_poor = depth_masked.argmax(dim=layer_dim, skipna=True)
-        valid_poor = np.isfinite(deepest_poor)
+        depth_metric_masked = xr.where(poor_mask, z_metric, -np.inf)  # invalid -> -inf
+        deepest_poor_metric = depth_metric_masked.max(dim=layer_dim, skipna=True)
+        arg_poor = depth_metric_masked.argmax(dim=layer_dim, skipna=True)
+        valid_poor = np.isfinite(deepest_poor_metric)
         arg_poor = arg_poor.where(valid_poor)
+        deepest_poor = _isel_with_nan_index(depth_da, layer_dim, arg_poor)
 
-        # compare depths using a metric that increases with depth (sign-agnostic)
-        z_metric = _depth_metric(depth_da, layer_dim)
         weakest_depth_metric = _isel_with_nan_index(z_metric, layer_dim, hc_instabilityDrivenBy)
-        deepest_poor_metric = deepest_poor.where(valid_poor, -np.inf)
 
         use_poor = valid_poor & (deepest_poor_metric > weakest_depth_metric)
         hc_depth = xr.where(use_poor, deepest_poor, weakest_depth)
@@ -200,7 +201,12 @@ class HazardChart(DatasetDecorator):
                 dict(description="Weakest stability index value", index=stability_index)
             ),
             "hc_depth": _with_variant(hc_depth).assign_attrs(
-                dict(description="Relevant depth (deeper of weakest vs deepest-poor)", units="m")
+                dict(
+                    description="Relevant depth (deeper of weakest vs deepest-poor)",
+                    units=depth_da.attrs.get("units", "m"),
+                    positive=depth_da.attrs.get("positive", ""),
+                    depth_var=depth_var,
+                )
             ),
             "hc_instabilityDrivenBy": _with_variant(hc_instabilityDrivenBy).assign_attrs(
                 dict(description="Layer index that drove hc_instability", layer_dim=layer_dim)

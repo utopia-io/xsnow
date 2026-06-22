@@ -15,6 +15,7 @@ parts:
       - file: tutorials/combining_data
       - file: tutorials/tabular_inspection
       - file: tutorials/simple_plots
+      - file: tutorials/units
       - file: tutorials/timezones
       - file: tutorials/gtypes_labels
       - file: tutorials/lazy_analysis
@@ -47,6 +48,7 @@ parts:
           - file: api/_generated/xsnow.plugin
           - file: api/_generated/xsnow.utils
           - file: api/_generated/xsnow.graincode_converter
+          - file: api/_generated/xsnow.units
       
       - file: api/extensions/index
         sections:

@@ -18,12 +18,17 @@ import xarray as xr
 
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
+from ..units import validate_xsnow_unit_attrs
 from ..utils import get_logger, _promote_slope_metadata_coords, reorder_dims
 
 from .base import _round_coord
 
 
-def _read_xsnow_netcdf(source: Union[str, Path]) -> Optional[xsnowDataset]:
+def _read_xsnow_netcdf(
+    source: Union[str, Path],
+    unit_validation: str = "strict",
+    logger: Optional[logging.Logger] = None,
+) -> Optional[xsnowDataset]:
     """
     Read xsnow's custom netcdf format.
 
@@ -32,10 +37,15 @@ def _read_xsnow_netcdf(source: Union[str, Path]) -> Optional[xsnowDataset]:
     
     Args:
         source: Path to the NetCDF file.
+        unit_validation: Stored-unit validation mode. `'strict'` raises when
+            present unit attrs differ from xsnow units; `'light'` warns.
+        logger: Optional logger for validation warnings.
         
     Returns:
         An xsnowDataset instance, or None if reading fails.
     """
+    logger = get_logger(__name__, logger=logger)
+
     # open lazily, then materialize metadata/coords eagerly
     with xr.open_dataset(source) as _ds:
         ds = _ds.load()
@@ -54,6 +64,12 @@ def _read_xsnow_netcdf(source: Union[str, Path]) -> Optional[xsnowDataset]:
     # Restore mapping attrs from JSON
     ds = _decode_mapping_attrs_from_netcdf(ds)
     ds = _promote_slope_metadata_coords(ds)
+    validate_xsnow_unit_attrs(
+        ds,
+        unit_validation=unit_validation,
+        logger=logger,
+        source=f"NetCDF file {source}",
+    )
 
     return xsnowDataset(ds)
 

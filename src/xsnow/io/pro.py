@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import concurrent.futures
+import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -24,6 +25,7 @@ from dask.delayed import delayed
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..registry import registry
+from ..units import UnitConversionError, UnitLike, convert_units, normalize_unit
 from ..utils import get_logger
 
 from .base import (
@@ -38,6 +40,390 @@ from .base import (
 # --------------------------------------------------------------------------- #
 #                          METADATA EXTRACTION                                 #
 # --------------------------------------------------------------------------- #
+
+_PRO_UNIT_RE = re.compile(r"\(([^()]*)\)")
+_PRO_UNIT_VALIDATION_MODES = {"light", "strict"}
+_PRO_UNIT_MAPS_KEY = "_pro_unit_maps_by_file"
+_PRO_INTEGER_VARS = {"element_ID", "grain_type"}
+_PRO_INTEGER_VECTOR_ITEMS = {"SH_at_surface": {0}}
+_PRO_SCIENTIFIC_VARS = {"stress", "viscosity", "temperature_gradient"}
+
+
+def parse_pro_header_units(
+    filepath: Union[str, Path],
+    code_map: Optional[Mapping[str, str]] = None,
+) -> Dict[str, UnitLike]:
+    """Parse declared variable units from a SNOWPACK .pro [HEADER] section."""
+    file_path = Path(filepath)
+    code_map_to_use = code_map if code_map is not None else CODE_TO_NAME_MAP
+
+    units: Dict[str, UnitLike] = {}
+    in_header = False
+
+    with _open_any_as_text(file_path, "rt", encoding="utf-8", errors="ignore") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if line == "[HEADER]":
+                in_header = True
+                continue
+            if line == "[DATA]":
+                break
+            if not in_header or not line or line.startswith("#"):
+                continue
+
+            param_code = line.split(",", 1)[0].strip()
+            var_name = code_map_to_use.get(param_code)
+            if not var_name:
+                continue
+
+            declared_units = [normalize_unit(match) for match in _PRO_UNIT_RE.findall(line)]
+            declared_units = [unit for unit in declared_units if unit is not None]
+
+            if param_code == "0514" and len(declared_units) == 2:
+                declared_units = ["Swiss Code F1F2F3", *declared_units]
+
+            if len(declared_units) == 1:
+                units[var_name] = declared_units[0]
+            elif declared_units:
+                units[var_name] = declared_units
+
+    return units
+
+
+def _normalize_unitlike(unit: UnitLike) -> UnitLike:
+    """Normalize one unit string or a list of unit strings."""
+    if isinstance(unit, list):
+        return [normalize_unit(item) or "1" for item in unit]
+    return normalize_unit(unit) or "1"
+
+
+def _unitlike_equal(left: UnitLike, right: UnitLike) -> bool:
+    """Compare scalar or vector unit declarations after normalization."""
+    return _normalize_unitlike(left) == _normalize_unitlike(right)
+
+
+def _ensure_unit_conversion_supported(
+    var_name: str,
+    source_unit: UnitLike,
+    target_unit: UnitLike,
+    filepath: Optional[Path] = None,
+) -> None:
+    """Raise if a parsed PRO unit cannot be converted to xsnow units."""
+    source = _normalize_unitlike(source_unit)
+    target = _normalize_unitlike(target_unit)
+
+    if isinstance(source, list) or isinstance(target, list):
+        if not isinstance(source, list) or not isinstance(target, list):
+            raise UnitConversionError(
+                f"Cannot convert PRO variable {var_name!r} between incompatible "
+                f"unit declarations {source!r} and {target!r}."
+            )
+        if len(source) != len(target):
+            raise UnitConversionError(
+                f"Cannot convert PRO variable {var_name!r}: parsed unit vector "
+                f"{source!r} has different length than xsnow unit vector {target!r}."
+            )
+        pairs = zip(source, target)
+    else:
+        pairs = [(source, target)]
+
+    for source_item, target_item in pairs:
+        if source_item == target_item:
+            continue
+        try:
+            convert_units(1.0, source_item, target_item)
+        except UnitConversionError as exc:
+            location = f" in {filepath.name}" if filepath is not None else ""
+            raise UnitConversionError(
+                f"Cannot convert PRO variable {var_name!r}{location} from "
+                f"{source_item!r} to xsnow unit {target_item!r}."
+            ) from exc
+
+
+def _validate_pro_unit_map(
+    units: Mapping[str, UnitLike],
+    filepath: Optional[Path],
+    logger: Optional[logging.Logger],
+) -> None:
+    """Verify parsed PRO units can be converted to xsnow units."""
+    logger = get_logger(__name__, logger=logger)
+
+    for var_name, declared_unit in units.items():
+        reg_entry = registry.get(var_name)
+        if not reg_entry:
+            continue
+
+        xsnow_unit = reg_entry.get("xsnow_units")
+        if xsnow_unit is None:
+            continue
+
+        expected_pro_unit = reg_entry.get("pro_units")
+        if expected_pro_unit is not None and not _unitlike_equal(declared_unit, expected_pro_unit):
+            location = f" in {filepath.name}" if filepath is not None else ""
+            logger.debug(
+                "PRO variable %s%s declares units %r, but xsnow expects "
+                "SNOWPACK PRO units %r. Values will be converted to xsnow "
+                "units %r.",
+                var_name,
+                location,
+                declared_unit,
+                expected_pro_unit,
+                xsnow_unit,
+            )
+
+        _ensure_unit_conversion_supported(var_name, declared_unit, xsnow_unit, filepath)
+
+
+def _file_unit_key(filepath: Union[str, Path]) -> str:
+    """Return the stable key used for per-file unit lookup."""
+    return str(Path(filepath).resolve())
+
+
+def _representative_files_by_directory(pro_files: List[Path]) -> Dict[Path, Path]:
+    """Choose the first PRO file from each parent directory."""
+    representatives: Dict[Path, Path] = {}
+    for filepath in pro_files:
+        parent = Path(filepath).resolve().parent
+        representatives.setdefault(parent, filepath)
+    return representatives
+
+
+def _resolve_pro_unit_maps(
+    pro_files: List[Path],
+    unit_validation: str,
+    logger: Optional[logging.Logger],
+) -> Dict[str, Dict[str, UnitLike]]:
+    """Resolve per-file PRO unit maps for validation and conversion."""
+    if unit_validation not in _PRO_UNIT_VALIDATION_MODES:
+        raise ValueError(
+            "unit_validation must be 'light' or 'strict' for PRO files, "
+            f"got {unit_validation!r}."
+        )
+
+    if not pro_files:
+        return {}
+
+    logger = get_logger(__name__, logger=logger)
+    resolved_maps: Dict[str, Dict[str, UnitLike]] = {}
+
+    if unit_validation == "strict":
+        for filepath in pro_files:
+            parsed_units = parse_pro_header_units(filepath)
+            _validate_pro_unit_map(parsed_units, filepath, logger)
+            resolved_maps[_file_unit_key(filepath)] = parsed_units
+        return resolved_maps
+
+    representatives = _representative_files_by_directory(pro_files)
+    units_by_parent: Dict[Path, Dict[str, UnitLike]] = {}
+    for parent, representative in representatives.items():
+        parsed_units = parse_pro_header_units(representative)
+        _validate_pro_unit_map(parsed_units, representative, logger)
+        units_by_parent[parent] = parsed_units
+
+    for filepath in pro_files:
+        resolved_maps[_file_unit_key(filepath)] = units_by_parent[Path(filepath).resolve().parent]
+
+    return resolved_maps
+
+
+def _pro_units_for_file(
+    filepath: Union[str, Path],
+    parser_kwargs: Mapping[str, Any],
+) -> Optional[Mapping[str, UnitLike]]:
+    """Return the resolved source units for one PRO file."""
+    unit_maps = parser_kwargs.get(_PRO_UNIT_MAPS_KEY)
+    if not unit_maps:
+        return None
+    return unit_maps.get(_file_unit_key(filepath))
+
+
+def _source_pro_unit(var_name: str, pro_units: Optional[Mapping[str, UnitLike]]) -> Optional[UnitLike]:
+    """Return the parsed source unit for a PRO variable, falling back to registry."""
+    if pro_units and var_name in pro_units:
+        return pro_units[var_name]
+    reg_entry = registry.get(var_name)
+    if not reg_entry:
+        return None
+    return reg_entry.get("pro_units")
+
+
+def _xsnow_unit(var_name: str) -> Optional[UnitLike]:
+    """Return the canonical xsnow unit for a variable, if registered."""
+    reg_entry = registry.get(var_name)
+    if not reg_entry:
+        return None
+    return reg_entry.get("xsnow_units")
+
+
+def _convert_pro_values_to_xsnow_units(
+    var_name: str,
+    values: Any,
+    pro_units: Optional[Mapping[str, UnitLike]],
+) -> Any:
+    """Convert parsed PRO values for one variable into xsnow units."""
+    source_unit = _source_pro_unit(var_name, pro_units)
+    target_unit = _xsnow_unit(var_name)
+
+    if source_unit is None or target_unit is None:
+        return values
+
+    source = _normalize_unitlike(source_unit)
+    target = _normalize_unitlike(target_unit)
+
+    if isinstance(source, list) or isinstance(target, list):
+        return values
+
+    return convert_units(values, source, target)
+
+
+def _convert_surface_hoar_value(
+    value: float,
+    from_index: int,
+    to_var_name: str,
+    pro_units: Optional[Mapping[str, UnitLike]],
+) -> float:
+    """Convert one SH_at_surface vector component to another PRO variable unit."""
+    sh_units = _source_pro_unit("SH_at_surface", pro_units)
+    target_unit = _source_pro_unit(to_var_name, pro_units)
+
+    if not isinstance(sh_units, list) or target_unit is None:
+        return value
+
+    return float(convert_units(value, sh_units[from_index], target_unit))
+
+
+def _surface_hoar_height_increment(pro_units: Optional[Mapping[str, UnitLike]]) -> float:
+    """Return a 1 mm surface-hoar layer increment in the parsed PRO height unit."""
+    height_unit = _source_pro_unit("height", pro_units) or "m"
+    if isinstance(height_unit, list):
+        return 0.001
+    return float(convert_units(0.001, "m", height_unit))
+
+
+def _target_pro_unit(var_name: str) -> Optional[str]:
+    """Return the scalar PRO storage unit used when writing one variable."""
+    reg_entry = registry.get(var_name, {})
+    pro_unit = reg_entry.get("pro_units")
+    if isinstance(pro_unit, list):
+        return None
+    return normalize_unit(pro_unit)
+
+
+def _source_data_unit(var_name: str, data_array: xr.DataArray) -> Optional[str]:
+    """Return the current data unit from attrs, falling back to xsnow_units."""
+    attr_unit = data_array.attrs.get("units")
+    if attr_unit is not None:
+        return normalize_unit(attr_unit)
+    reg_entry = registry.get(var_name, {})
+    xsnow_unit = reg_entry.get("xsnow_units")
+    if isinstance(xsnow_unit, list):
+        return None
+    return normalize_unit(xsnow_unit)
+
+
+def _convert_values_for_pro_write(var_name: str, data_array: xr.DataArray) -> np.ndarray:
+    """Convert one variable from current xsnow units to PRO storage units."""
+    values = data_array.values
+    source_unit = _source_data_unit(var_name, data_array)
+    target_unit = _target_pro_unit(var_name)
+    if source_unit is None or target_unit is None:
+        return values
+    try:
+        return convert_units(values, source_unit, target_unit)
+    except UnitConversionError as exc:
+        raise UnitConversionError(
+            f"Cannot convert PRO variable {var_name!r} from {source_unit!r} "
+            f"to PRO unit {target_unit!r} for writing."
+        ) from exc
+
+
+def _pro_unit_label(unit: UnitLike) -> str:
+    """Format one scalar or vector PRO unit declaration."""
+    if isinstance(unit, list):
+        return ", ".join(str(item) for item in unit)
+    return str(unit)
+
+
+def _pro_header_description(var_name: str, reg_entry: Mapping[str, Any]) -> str:
+    """Return a compact PRO header description for one variable."""
+    if var_name == "height":
+        return "height [> 0: top, < 0: bottom of elem.]"
+    if var_name == "SH_at_surface":
+        return "grain type, grain size, and density of SH at surface"
+    aliases = reg_entry.get("aliases") or []
+    if aliases:
+        return str(aliases[0])
+    return str(reg_entry.get("standard_name", var_name)).replace("_", " ")
+
+
+def _pro_header_line(var_name: str, reg_entry: Mapping[str, Any]) -> Optional[str]:
+    """Build one SNOWPACK PRO [HEADER] definition line."""
+    param_code = reg_entry.get("param_code")
+    if not param_code:
+        return None
+
+    pro_unit = reg_entry.get("pro_units")
+    description = _pro_header_description(var_name, reg_entry)
+    if isinstance(pro_unit, list):
+        return f"{param_code},{len(pro_unit)},{description} ({_pro_unit_label(pro_unit)})"
+    if pro_unit is None:
+        return f"{param_code},nElems,{description}"
+    return f"{param_code},nElems,{description} ({pro_unit})"
+
+
+def _write_pro_header(f, profile_vars: Mapping[str, xr.DataArray]) -> None:
+    """Write PRO parameter definitions for variables present in the output."""
+    f.write("[HEADER]\n")
+    f.write("0500,Date\n")
+    for var_name, reg_entry in registry.items():
+        if var_name not in profile_vars:
+            continue
+        line = _pro_header_line(var_name, reg_entry)
+        if line is not None:
+            f.write(f"{line}\n")
+    f.write("\n")
+
+
+def _format_compact_pro_float(value: float, scientific: bool = False) -> str:
+    """Format one continuous PRO value without unnecessary trailing zeros."""
+    if scientific:
+        return f"{value:.3e}"
+    abs_value = abs(value)
+    if abs_value and (abs_value < 1e-2 or abs_value >= 1e4):
+        return f"{value:.3e}"
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _format_pro_value(var_name: str, value: Any, index: int = 0) -> str:
+    """Format one value using SNOWPACK-like PRO precision conventions."""
+    if pd.isna(value):
+        return "-999"
+    numeric = float(value)
+    if var_name in _PRO_INTEGER_VARS or index in _PRO_INTEGER_VECTOR_ITEMS.get(var_name, set()):
+        return str(int(round(numeric)))
+    scientific = (
+        var_name in _PRO_SCIENTIFIC_VARS
+        and (var_name == "temperature_gradient" or abs(numeric) < 1)
+    )
+    return _format_compact_pro_float(numeric, scientific=scientific)
+
+
+def _format_pro_values(var_name: str, values: np.ndarray) -> List[str]:
+    """Format all values for one PRO data line."""
+    flat_values = values.flatten()
+    return [
+        _format_pro_value(var_name, value, index)
+        for index, value in enumerate(flat_values)
+    ]
+
+
+def _prepare_pro_values_for_write(var_name: str, values: np.ndarray) -> np.ndarray:
+    """Apply variable-specific PRO structure before formatting."""
+    if var_name == "grain_type":
+        return np.append(values.flatten(), 0)
+    return values
+
 
 def _extract_metadata_fast(
     filepath: Union[str, Path],
@@ -746,6 +1132,7 @@ def _create_pro_dataset(
     use_dask: bool = False,
     chunks: Optional[Dict[str, int]] = None,
     empty_profile_status_default: int = 0,
+    pro_units: Optional[Mapping[str, UnitLike]] = None,
 ) -> Optional[xr.Dataset]:
     """
     Creates a padded, CF-compliant xarray.Dataset from raw parsed .pro data.
@@ -779,6 +1166,9 @@ def _create_pro_dataset(
         empty_profile_status_default: Status value for the minimal no-profile
             dataset. The loading code uses `-1` for parse failures and `0` for
             ordinary no-layer-data cases.
+        pro_units: Parsed or inferred source units for variables in the PRO
+            file. Values are converted from these units to registry
+            `xsnow_units` before the dataset is returned.
 
     Returns:
         An xarray.Dataset containing structured snow profile data. The return
@@ -852,8 +1242,12 @@ def _create_pro_dataset(
                 sh_data = profile['SH_at_surface']
                 if sh_data.size >= 3 and sh_data[0] > 0:
                     has_sh = True
-                    sh_gsize = sh_data[1]
-                    sh_density = sh_data[2]
+                    sh_gsize = _convert_surface_hoar_value(
+                        sh_data[1], 1, "grain_size", pro_units
+                    )
+                    sh_density = _convert_surface_hoar_value(
+                        sh_data[2], 2, "density", pro_units
+                    )
 
             num_snow_layers = len(profile.get('height', []))
 
@@ -877,7 +1271,7 @@ def _create_pro_dataset(
                         if final_values and not np.isnan(final_values[-1])
                         else 0.0
                     )
-                    final_values.append(last_height + 0.001)
+                    final_values.append(last_height + _surface_hoar_height_increment(pro_units))
                 else:
                     final_values.append(np.nan)
 
@@ -886,6 +1280,7 @@ def _create_pro_dataset(
                 final_values.append(np.nan)
 
             final_values = final_values[:max_layers]
+            final_values = _convert_pro_values_to_xsnow_units(param, final_values, pro_units)
             profile_data.append(final_values)
 
         np_array = np.full(
@@ -976,7 +1371,7 @@ def _create_pro_dataset(
     for var_name in ds.data_vars:
         if reg_entry := registry.get(str(var_name)):
             ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', str(var_name))
-            ds[var_name].attrs['units'] = reg_entry.get('si_units', '1')
+            ds[var_name].attrs['units'] = reg_entry.get('xsnow_units', reg_entry.get('si_units', '1'))
             ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', str(var_name)).replace('_', ' ')
         else:
             if 'units' not in ds[var_name].attrs:
@@ -1025,6 +1420,7 @@ def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
     try:
         remove_soil = parser_kwargs.get('remove_soil', True)
         add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
+        pro_units = _pro_units_for_file(filepath, parser_kwargs)
         
         raw_data = _read_pro_raw(
             filepath,
@@ -1038,7 +1434,11 @@ def _process_pro_file_eager(task_args: Tuple) -> Optional[xr.Dataset]:
         
         if raw_data and raw_data[0]:
             metadata, profiles = raw_data
-            return _create_pro_dataset(metadata, profiles, max_layers, add_sh)
+            return _create_pro_dataset(
+                metadata, profiles, max_layers, add_sh, pro_units=pro_units
+            )
+    except UnitConversionError:
+        raise
     except Exception as e:
         logging.error(f"Failed to process {filepath.name}: {e}")
         try:
@@ -1086,6 +1486,10 @@ def _read_pro_files_eager(
     """
     if not pro_files:
         return []
+
+    parser_kwargs = dict(parser_kwargs)
+    unit_validation = parser_kwargs.get('unit_validation', 'strict')
+    parser_kwargs[_PRO_UNIT_MAPS_KEY] = _resolve_pro_unit_maps(pro_files, unit_validation, logger)
 
     max_layers_arg = parser_kwargs.get('max_layers', 'auto')
     add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
@@ -1151,6 +1555,7 @@ def _create_dataset_from_pro_file(
     try:
         remove_soil = parser_kwargs.get('remove_soil', True)
         add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
+        pro_units = _pro_units_for_file(filepath, parser_kwargs)
         
         raw_data = _read_pro_raw(
             filepath,
@@ -1168,9 +1573,10 @@ def _create_dataset_from_pro_file(
             chunks = parser_kwargs.get('chunks', None)
             return _create_pro_dataset(
                 metadata, profiles, max_layers, add_sh, 
-                use_dask=use_dask, chunks=chunks
+                use_dask=use_dask, chunks=chunks, pro_units=pro_units
             )
-            
+    except UnitConversionError:
+        raise
     except Exception as e:
         try:
             metadata = _read_pro_metadata(filepath, logger=logger, throw=False)
@@ -1225,6 +1631,10 @@ def _read_pro_files_lazy(
     if not pro_files:
         return []
 
+    parser_kwargs = dict(parser_kwargs)
+    unit_validation = parser_kwargs.get('unit_validation', 'strict')
+    parser_kwargs[_PRO_UNIT_MAPS_KEY] = _resolve_pro_unit_maps(pro_files, unit_validation, logger)
+
     use_dask = parser_kwargs.get('use_dask', True)
     add_sh = parser_kwargs.get('add_surface_sh_as_layer', True)
     remove_soil = parser_kwargs.get('remove_soil', True)
@@ -1275,7 +1685,8 @@ def _read_pro_files_lazy(
                 if metadata:
                     ds = _create_pro_dataset(
                         metadata, profiles, max_layers=default_max_layers,
-                        add_surface_sh_as_layer=add_sh, use_dask=True, chunks=chunks
+                        add_surface_sh_as_layer=add_sh, use_dask=True,
+                        chunks=chunks, pro_units=_pro_units_for_file(fp, parser_kwargs)
                     )
                     return ds
                 else:
@@ -1421,7 +1832,9 @@ def to_pro(
         except (AttributeError, ValueError):
             azimuth = -999
         f.write(f"SlopeAzi= {azimuth:.0f}\n")
-        
+        f.write("\n")
+
+        _write_pro_header(f, profile_vars)
         f.write("[DATA]\n")
 
         for t in single_loc_ds.time.values:
@@ -1432,9 +1845,11 @@ def to_pro(
             for var_name, code in registry.items():
                 param_code = code.get('param_code') if isinstance(code, dict) else None
                 if param_code and var_name in profile_vars:
-                    data_array = profile[var_name].dropna(dim='layer').values
+                    data_array = profile[var_name].dropna(dim='layer')
+                    data_array = _convert_values_for_pro_write(var_name, data_array)
                     if data_array.size > 0:
+                        data_array = _prepare_pro_values_for_write(var_name, data_array)
                         num_layers = data_array.size
-                        formatted_values = [f"{val:.4f}" for val in data_array.flatten()]
+                        formatted_values = _format_pro_values(var_name, data_array)
                         data_str = ",".join(formatted_values)
                         f.write(f"{param_code},{num_layers},{data_str}\n")
