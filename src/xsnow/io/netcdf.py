@@ -64,7 +64,7 @@ def _read_xsnow_netcdf(
     # Restore mapping attrs from JSON
     ds = _decode_mapping_attrs_from_netcdf(ds)
     ds = _promote_slope_metadata_coords(ds)
-    ds = validate_xsnow_unit_attrs(
+    validate_xsnow_unit_attrs(
         ds,
         unit_validation=unit_validation,
         logger=logger,

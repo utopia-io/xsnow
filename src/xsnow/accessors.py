@@ -1,7 +1,7 @@
 """
-Custom xarray accessors for human-readable labels.
+Custom xarray accessors for human-readable labels, units, and timezones.
 
-This module provides two complementary accessors:
+This module provides custom accessors including:
 
 1. ``.labels`` accessor
    - Generic mechanism to attach and retrieve human-readable labels for any
@@ -22,7 +22,15 @@ This module provides two complementary accessors:
      ("Swiss Code F1F2F3") in their ``.attrs["units"]`` metadata.
    - Provides convenience methods:
        * ``.icssg.primary()`` → returns primary ICSSG label
-       * ``.icssg.secondary()`` → returns secondary ICSSG label
+     * ``.icssg.secondary()`` → returns secondary ICSSG label
+
+3. ``.units`` accessor
+   - Converts DataArray values while preserving coordinates and metadata.
+   - Exposes current and preferred plotting units through ``.current`` and
+     ``.plot``.
+
+4. ``.tz`` accessor
+   - Provides timezone-aware operations for timezone-naive time coordinates.
 
 Together, these accessors allow xsnow datasets to remain efficient by storing
 compact integer codes internally, while exposing user-friendly string labels
@@ -39,10 +47,85 @@ from datetime import timezone, timedelta, tzinfo
 from typing import Optional, Union, Literal
 from zoneinfo import ZoneInfo
 from xsnow.graincode_converter import slf_graincode_to_ICSSG_primary, slf_graincode_to_ICSSG_secondary
+from xsnow.units import UnitConversionError, UnitLike, convert_units, normalize_unit
 
 
 TZLike = Union[str, int, float, tzinfo]
 _UTC_OFFSET_RE = re.compile(r"^UTC([+-])(\d{1,2})(?::?(\d{2}))?$")  # UTC+01:00 or UTC+1 or UTC+0100
+
+
+@xr.register_dataarray_accessor("units")
+class UnitsAccessor:
+    """Inspect and convert units attached to an xarray DataArray."""
+
+    def __init__(self, xarray_obj: xr.DataArray):
+        self._obj = xarray_obj
+
+    @property
+    def current(self) -> Optional[str]:
+        """Return the unit stored in ``attrs["units"]``, if present."""
+        unit = self._obj.attrs.get("units")
+        return str(unit) if unit is not None else None
+
+    @property
+    def plot(self) -> Optional[UnitLike]:
+        """Return the variable's preferred plotting unit from the registry."""
+        if self._obj.name is None:
+            return None
+
+        from xsnow.registry import registry
+
+        return registry.get(str(self._obj.name), {}).get("plot_units")
+
+    def to(self, unit: str) -> xr.DataArray:
+        """
+        Return a copy converted to an explicit target unit.
+
+        The source unit is read from ``attrs["units"]``. Coordinates, name,
+        and other attributes are preserved, while ``attrs["units"]`` is
+        updated to the normalized target unit.
+
+        Parameters
+        ----------
+        unit : str
+            Target unit expression supported by
+            :func:`xsnow.units.convert_units`.
+
+        Returns
+        -------
+        xarray.DataArray
+            A converted copy of the DataArray.
+
+        Raises
+        ------
+        UnitConversionError
+            If source-unit metadata is missing or the conversion is unknown.
+        """
+        source_unit = self.current
+        if source_unit is None:
+            raise UnitConversionError(
+                f"Cannot convert DataArray {self._obj.name!r}: "
+                "attrs['units'] is missing."
+            )
+
+        converted_data = convert_units(self._obj.data, source_unit, unit)
+        out = self._obj.copy(data=converted_data)
+        out.attrs = dict(self._obj.attrs)
+        out.attrs["units"] = normalize_unit(unit)
+        return out
+
+    def to_plot_unit(self) -> xr.DataArray:
+        """
+        Return a copy converted to the registered preferred plotting unit.
+
+        If the variable has no single plotting unit in the registry, a shallow
+        copy is returned unchanged. This includes variables with compound
+        values whose registry entry contains multiple plotting units.
+        """
+        plot_unit = self.plot
+        if not isinstance(plot_unit, str):
+            return self._obj.copy(deep=False)
+        return self.to(plot_unit)
 
 
 @xr.register_dataarray_accessor("labels")

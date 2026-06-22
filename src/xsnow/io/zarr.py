@@ -79,7 +79,7 @@ def _read_zarr(
         # Open with xarray
         ds_raw = xr.open_zarr(path)
         ds_raw = _promote_slope_metadata_coords(ds_raw)
-        ds_raw = validate_xsnow_unit_attrs(
+        validate_xsnow_unit_attrs(
             ds_raw,
             unit_validation=unit_validation,
             logger=logger,

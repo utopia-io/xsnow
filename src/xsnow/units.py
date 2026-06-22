@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import re
 import logging
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import xarray as xr
+
+if TYPE_CHECKING:
+    from .core import xsnowDataset
 
 UnitLike = Union[str, list[str]]
 
@@ -106,15 +109,62 @@ def normalize_unit(unit: Optional[str]) -> Optional[str]:
 
 
 def convert_units(values: Any, from_unit: str, to_unit: str) -> Any:
-    """Convert numeric values between supported xsnow units."""
+    """
+    Convert numeric values between units supported by xsnow.
+
+    Unit spellings are normalized through :func:`normalize_unit` before the
+    conversion is selected. Conversions may be multiplicative, such as metres
+    to millimetres, or include an offset, such as degrees Celsius to kelvin.
+    Supported multiplicative conversions are listed in
+    :data:`CONVERSION_FACTORS`.
+
+    Parameters
+    ----------
+    values : scalar or array-like
+        Numeric values to convert. NumPy, xarray, and lazy array-like objects
+        are preserved where their arithmetic operations support the requested
+        conversion. Python lists and tuples are returned as NumPy arrays.
+    from_unit : str
+        Unit currently represented by ``values``.
+    to_unit : str
+        Unit into which ``values`` should be converted.
+
+    Returns
+    -------
+    scalar or array-like
+        Converted values. The input object is not modified. Scalar inputs
+        produce scalar outputs.
+
+    Raises
+    ------
+    UnitConversionError
+        If xsnow has no conversion from ``from_unit`` to ``to_unit``.
+
+    Notes
+    -----
+    This function converts values only; it does not update unit metadata. For
+    an xarray DataArray, use the xsnow `UnitsAccessor` ``da.units.to(...)`` to preserve coordinates and
+    attributes while also updating ``attrs["units"]``.
+
+    Examples
+    --------
+    >>> from xsnow.units import convert_units
+    >>> convert_units(25.0, "cm", "m")
+    0.25
+    >>> convert_units([0.0, 1.0], "1", "%")
+    array([  0., 100.])
+    """
     source = normalize_unit(from_unit)
     target = normalize_unit(to_unit)
 
     if source == target:
         return values
 
-    arr = np.asarray(values)
     scalar_input = np.isscalar(values)
+    if scalar_input or isinstance(values, (list, tuple)):
+        arr = np.asarray(values)
+    else:
+        arr = values
 
     if source == "degC" and target == "K":
         converted = arr + 273.15
@@ -133,22 +183,90 @@ def convert_units(values: Any, from_unit: str, to_unit: str) -> Any:
 
 
 def validate_xsnow_unit_attrs(
-    ds: xr.Dataset,
+    ds: Union[xr.Dataset, "xsnowDataset"],
     *,
     unit_validation: str = "strict",
     logger: Optional[logging.Logger] = None,
     source: str = "dataset",
-) -> xr.Dataset:
-    """Validate stored variable unit attrs against xsnow's unit convention."""
+) -> bool:
+    """
+    Validate dataset unit attributes against xsnow's unit convention.
+
+    Each registered data variable with a scalar ``xsnow_units`` entry is
+    compared with its stored ``attrs["units"]`` value after normalizing common
+    unit spellings. This function validates metadata only: it neither converts
+    values nor changes attributes.
+
+    Variables absent from the registry, registry entries without
+    ``xsnow_units``, and compound variables whose ``xsnow_units`` entry is a
+    list are skipped. Missing ``attrs["units"]`` metadata does not raise, but
+    is reported through ``logger`` when one is provided.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset or xsnow.xsnowDataset
+        Dataset whose data-variable unit attributes should be validated. An
+        ``xsnowDataset`` is validated through its underlying xarray Dataset.
+    unit_validation : {"strict", "light"}, default "strict"
+        In ``"strict"`` mode, a stored unit that differs from the registered
+        xsnow unit raises :class:`UnitValidationError`. In ``"light"`` mode,
+        the mismatch is reported through ``logger`` and validation continues.
+        Missing unit metadata never raises in either mode.
+    logger : logging.Logger, optional
+        Logger used for missing-unit and light-mode mismatch warnings. If no
+        logger is supplied, these non-fatal conditions remain silent.
+    source : str, default "dataset"
+        Description of the dataset source included in warnings and exceptions,
+        for example a NetCDF or Zarr path.
+
+    Returns
+    -------
+    bool
+        ``True`` when no incompatible stored units are found. In light mode,
+        ``False`` is returned when a mismatch is logged. The same mismatch
+        raises :class:`UnitValidationError` in strict mode instead of returning.
+
+    Raises
+    ------
+    UnitValidationError
+        If ``unit_validation`` is invalid, or if strict validation finds a
+        stored unit that differs from the registered xsnow unit.
+
+    Examples
+    --------
+    ``import xsnow`` makes the units module available as ``xsnow.units``:
+
+    >>> import xarray as xr
+    >>> import xsnow
+    >>> ds = xr.Dataset({
+    ...     "height": xr.DataArray([0.1, 0.2], dims="layer", attrs={"units": "m"})
+    ... })
+    >>> xsnow.units.validate_xsnow_unit_attrs(ds)
+    True
+    >>> xs = xsnow.xsnowDataset(ds)
+    >>> xsnow.units.validate_xsnow_unit_attrs(xs)
+    True
+
+    Use ``DataArray.units.to(...)`` when values should be converted rather than
+    merely validated:
+
+    >>> height_cm = ds["height"].units.to("cm")
+    >>> height_cm.attrs["units"]
+    'cm'
+    """
     if unit_validation not in _UNIT_VALIDATION_MODES:
         raise UnitValidationError(
             "unit_validation must be 'light' or 'strict' for stored datasets, "
             f"got {unit_validation!r}."
         )
 
+    from .core import xsnowDataset
     from .registry import registry
 
-    for var_name, data_array in ds.data_vars.items():
+    dataset = ds.to_xarray() if isinstance(ds, xsnowDataset) else ds
+    is_valid = True
+
+    for var_name, data_array in dataset.data_vars.items():
         reg_entry = registry.get(var_name)
         if not reg_entry:
             continue
@@ -175,9 +293,10 @@ def validate_xsnow_unit_attrs(
             f"{source} variable {var_name!r} declares units {stored_unit!r}, "
             f"but xsnow expects {normalized_expected!r}."
         )
+        is_valid = False
         if unit_validation == "strict":
             raise UnitValidationError(message)
         if logger is not None:
             logger.warning(message)
 
-    return ds
+    return is_valid

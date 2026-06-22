@@ -735,6 +735,9 @@ def snow_profile_xr_dataset():
             'inclination': ('slope', [30.0]),
         }
     )
+    ds['height'].attrs['units'] = 'm'
+    ds['density'].attrs['units'] = 'kg m-3'
+    ds['HS'].attrs['units'] = 'm'
     return ds
 
 
