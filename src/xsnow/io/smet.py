@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -50,6 +50,32 @@ _SMET_MULTIPLIER_UNIT_MAP = {
     ("degree", 1.0): "degree",
 }
 _SMET_UNIT_VALIDATION_MODES = {"light", "strict"}
+SmetUnitType = Literal["input", "forcing", "output"]
+
+
+_SMET_UNIT_TOKENS = {
+    "ISO": "ISO8601",
+    "1": "1",
+    "%": "%",
+    "degree": "deg",
+    "degC": "degC",
+    "K": "K",
+    "m": "m",
+    "cm": "cm",
+    "mm": "mm",
+    "Pa": "Pa",
+    "kPa": "kPa",
+    "W m-2": "W/m2",
+    "J m-2": "J/m2",
+    "MJ m-2": "MJ/m2",
+    "kg m-2": "kg/m2",
+    "kg m-2 h-1": "kg/m2/h",
+    "kg m-2 s-1": "kg/m2/s",
+    "m s-1": "m/s",
+}
+_SMET_INTEGER_VARS = {
+    "profile_status",
+}
 
 
 def _normalize_unitlike(unit: UnitLike) -> UnitLike:
@@ -74,6 +100,135 @@ def _fallback_smet_unit(reg_entry: Mapping[str, Any]) -> Optional[str]:
     if isinstance(smet_units, list):
         return smet_units[0] if len(smet_units) == 1 else None
     return normalize_unit(smet_units)
+
+
+def _validate_smet_unit_type(unit_type: str) -> None:
+    """Raise for unsupported SMET writer unit types."""
+    if unit_type not in ("input", "forcing", "output"):
+        raise ValueError(
+            "unit_type must be 'input', 'forcing', or 'output' for SMET writing, "
+            f"got {unit_type!r}."
+        )
+
+
+def _normalize_smet_unit_type(unit_type: SmetUnitType) -> Literal["input", "output"]:
+    """Normalize SMET writer unit-type aliases."""
+    return "input" if unit_type == "forcing" else unit_type
+
+
+def _smet_unit_token(unit: Optional[str]) -> str:
+    """Return a whitespace-free SMET unit token for a canonical unit."""
+    normalized = normalize_unit(unit) or "1"
+    return _SMET_UNIT_TOKENS.get(normalized, str(normalized).replace(" ", "_"))
+
+
+def _source_data_unit(var_name: str, data_array: xr.DataArray) -> Optional[str]:
+    """Return the current data unit from attrs, falling back to xsnow_units."""
+    attr_unit = data_array.attrs.get("units")
+    if attr_unit is not None:
+        return normalize_unit(attr_unit)
+    reg_entry = registry.get(var_name, {})
+    xsnow_unit = reg_entry.get("xsnow_units")
+    if isinstance(xsnow_unit, list):
+        return None
+    return normalize_unit(xsnow_unit)
+
+
+def _target_smet_unit(var_name: str, data_array: xr.DataArray, unit_type: SmetUnitType) -> str:
+    """Return the storage unit to write for one SMET variable."""
+    reg_entry = registry.get(var_name)
+    if not reg_entry:
+        return _source_data_unit(var_name, data_array) or "1"
+
+    typed_unit = reg_entry.get(f"smet_units_{_normalize_smet_unit_type(unit_type)}")
+    if typed_unit is not None:
+        return normalize_unit(typed_unit) or "1"
+
+    smet_units = reg_entry.get("smet_units")
+    if isinstance(smet_units, list):
+        current_unit = _source_data_unit(var_name, data_array)
+        normalized_allowed = _normalize_unitlike(smet_units)
+        if current_unit is not None and isinstance(normalized_allowed, list):
+            if normalize_unit(current_unit) in normalized_allowed:
+                return normalize_unit(current_unit) or "1"
+        xsnow_unit = reg_entry.get("xsnow_units")
+        if isinstance(normalized_allowed, list) and not isinstance(xsnow_unit, list):
+            normalized_xsnow = normalize_unit(xsnow_unit)
+            if normalized_xsnow in normalized_allowed:
+                return normalized_xsnow or "1"
+        return normalize_unit(smet_units[0]) or "1"
+
+    fallback_unit = smet_units or reg_entry.get("xsnow_units")
+    if isinstance(fallback_unit, list):
+        return "1"
+    return normalize_unit(fallback_unit) or "1"
+
+
+def _convert_series_for_smet_write(
+    var_name: str,
+    data_array: xr.DataArray,
+    values: np.ndarray,
+    target_unit: str,
+) -> np.ndarray:
+    """Convert one SMET column from current units to selected storage units."""
+    source_unit = _source_data_unit(var_name, data_array)
+    if source_unit is None:
+        return values
+    try:
+        return convert_units(values, source_unit, target_unit)
+    except UnitConversionError as exc:
+        raise UnitConversionError(
+            f"Cannot convert SMET variable {var_name!r} from {source_unit!r} "
+            f"to SMET unit {target_unit!r} for writing."
+        ) from exc
+
+
+def _format_compact_smet_float(value: float) -> str:
+    """Format one continuous SMET value with compact, Snowpack-like precision."""
+    abs_value = abs(value)
+    if abs_value and (abs_value < 1e-3 or abs_value >= 1e5):
+        return f"{value:.6e}"
+    return f"{value:.3f}"
+
+
+def _format_smet_value(var_name: str, value: Any, nodata: float) -> str:
+    """Format one SMET data value with variable-aware precision."""
+    if pd.isna(value):
+        return f"{nodata:.1f}"
+    if isinstance(value, str):
+        return value
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    if var_name in _SMET_INTEGER_VARS:
+        return str(int(round(numeric)))
+    return _format_compact_smet_float(numeric)
+
+
+def _timestamp_from_smet_index(index_value: Any, index_names: List[Optional[str]]) -> Any:
+    """Extract the time-like value from a SMET DataFrame index entry."""
+    if isinstance(index_value, tuple):
+        for time_name in ("time", "timestamp"):
+            if time_name in index_names:
+                return index_value[index_names.index(time_name)]
+        return index_value[0]
+    return index_value
+
+
+def _write_smet_data_rows(path: Union[str, Path], df: pd.DataFrame, nodata: float) -> None:
+    """Append SMET data rows using column-aware value formatting."""
+    with _open_any_as_text(path, 'at') as f:
+        for timestamp, row in df.iterrows():
+            timestamp = _timestamp_from_smet_index(timestamp, list(df.index.names))
+            timestamp_str = pd.to_datetime(timestamp).strftime('%Y-%m-%dT%H:%M:%S')
+            values = [
+                _format_smet_value(name, row[name], nodata)
+                for name in df.columns
+            ]
+            f.write(f"{timestamp_str}\t" + "\t".join(values) + "\n")
 
 
 def _validate_smet_unit_validation_mode(unit_validation: str) -> None:
@@ -552,6 +707,7 @@ def to_smet(
     ds: xsnowDataset,
     path: Union[str, Path],
     max_files: Optional[int] = None,
+    unit_type: SmetUnitType = "output",
     **kwargs
 ) -> None:
     """
@@ -570,10 +726,15 @@ def to_smet(
         max_files: The maximum number of locations allowed.
             If the dataset contains more locations, a ValueError is raised.
             Defaults to None (no limit).
+        unit_type: SMET storage-unit convention to write. `'output'`
+            (default) writes SNOWPACK output-style units where known, while
+            `'input'` and its alias `'forcing'` write forcing/input-style units
+            where known.
         **kwargs: Reserved for future filtering options.
     """
     if ds.data is None:
         raise ValueError("Cannot save an empty dataset.")
+    _validate_smet_unit_type(unit_type)
     
     if max_files is not None:
         num_locations = ds.sizes.get('location')
@@ -601,12 +762,26 @@ def to_smet(
 
     # Squeeze and convert to dataframe, keeping only data variables
     df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()[smet_vars]
+    smet_units = {
+        name: _target_smet_unit(name, ds.data[name], unit_type)
+        for name in smet_vars
+    }
+    for name, target_unit in smet_units.items():
+        if name in registry:
+            df[name] = _convert_series_for_smet_write(
+                name,
+                ds.data[name],
+                df[name].to_numpy(),
+                target_unit,
+            )
     nodata = -999.0
 
     with _open_any_as_text(path, 'wt') as f:
         f.write("SMET 1.1 ASCII\n")
         f.write("[HEADER]\n")
-        f.write(f"station_name = {ds.location.item()}\n")
+        station_id = str(ds.location.item())
+        f.write(f"station_id = {station_id}\n")
+        f.write(f"station_name = {station_id}\n")
         # Handle coordinates that may have extra dimensions (e.g., slope)
         lat = float(ds.latitude.values.flat[0]) if ds.latitude.size > 1 else ds.latitude.item()
         lon = float(ds.longitude.values.flat[0]) if ds.longitude.size > 1 else ds.longitude.item()
@@ -617,18 +792,11 @@ def to_smet(
         f.write(f"nodata = {nodata:.1f}\n")
         fields = "timestamp " + " ".join(df.columns)
         f.write(f"fields = {fields}\n")
+        unit_tokens = " ".join(_smet_unit_token(smet_units[name]) for name in df.columns)
+        f.write(f"units = ISO8601 {unit_tokens}\n")
         f.write("[DATA]\n")
 
     df.index.name = 'timestamp'
-    df.to_csv(
-        path,
-        sep='\t',
-        mode='a',
-        na_rep=f"{nodata:.1f}",
-        header=False,
-        quoting=3,  # no quotes around strings
-        float_format='%.5f',
-        date_format='%Y-%m-%dT%H:%M:%S',
-    )
+    _write_smet_data_rows(path, df, nodata)
     logging.info(f"Dataset successfully saved to {path}")
     

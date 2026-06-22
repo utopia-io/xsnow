@@ -330,6 +330,7 @@ SlopeAzi= 180
 0502,nElems,element density (kg m-3)
 0506,nElems,liquid water content by volume (%)
 0512,nElems,grain size (mm)
+0513,nElems,grain type (Swiss Code F1F2F3)
 0517,nElems,stress (kPa)
 
 [DATA]
@@ -338,6 +339,7 @@ SlopeAzi= 180
 0502,2,100,200
 0506,2,5,10
 0512,2,0.5,1.0
+0513,3,550,440,0
 0517,2,1.2,2.4
 """
         )
@@ -654,6 +656,31 @@ def minimal_xr_dataset():
         {'temp': (['x'], [1, 2, 3])},
         coords={'x': [0, 1, 2]}
     )
+
+
+@pytest.fixture
+def smet_units_xsnow_dataset():
+    """Single-location xsnow dataset with variables in xsnow-internal units."""
+    times = pd.date_range("2025-01-01", periods=2, freq="D")
+    ds = xr.Dataset(
+        data_vars={
+            "TA": (("location", "time", "slope"), [[[0.0], [-10.0]]]),
+            "RH": (("location", "time", "slope"), [[[0.5], [0.75]]]),
+            "HS_mod": (("location", "time", "slope"), [[[0.25], [0.3]]]),
+        },
+        coords={
+            "location": ["TEST"],
+            "time": times,
+            "slope": [0],
+            "latitude": ("location", [46.5]),
+            "longitude": ("location", [10.5]),
+            "altitude": ("location", [2500.0]),
+        },
+    )
+    ds["TA"].attrs["units"] = "degC"
+    ds["RH"].attrs["units"] = "1"
+    ds["HS_mod"].attrs["units"] = "m"
+    return xsnowDataset(ds)
 
 
 @pytest.fixture

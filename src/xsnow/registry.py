@@ -13,6 +13,8 @@ Unit fields:
     xsnow_units: Canonical in-memory unit used by xsnow.
     pro_units: Expected storage unit in SNOWPACK .pro files, when applicable.
     smet_units: Expected storage unit(s) in SNOWPACK .smet files, when applicable.
+    smet_units_input: Optional SMET storage unit for forcing/input files.
+    smet_units_output: Optional SMET storage unit for model-output files.
     plot_units: Preferred display unit, taken from SNOWPACK .smet plot_unit
         metadata where applicable, otherwise from pro_units.
     si_units: Legacy key currently used by readers to populate attrs["units"].
@@ -370,6 +372,8 @@ registry = {
         'standard_name': 'ground_temperature',
         'xsnow_units': 'degC',
         'smet_units': ['K', 'degC'],
+        'smet_units_input': 'K',
+        'smet_units_output': 'degC',
         'plot_units': 'K',
         'si_units': 'degC',
     },
@@ -523,6 +527,8 @@ registry = {
         'standard_name': 'air_temperature',
         'xsnow_units': 'degC',
         'smet_units': ['K', 'degC'],
+        'smet_units_input': 'K',
+        'smet_units_output': 'degC',
         'plot_units': 'K',
         'si_units': 'degC',
     },
@@ -568,6 +574,8 @@ registry = {
         'standard_name': 'relative_humidity',
         'xsnow_units': '1',
         'smet_units': ['1', '%'],
+        'smet_units_input': '1',
+        'smet_units_output': '%',
         'plot_units': '-',
         'si_units': '%',
     },

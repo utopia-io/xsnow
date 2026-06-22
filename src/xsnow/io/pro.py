@@ -44,6 +44,9 @@ from .base import (
 _PRO_UNIT_RE = re.compile(r"\(([^()]*)\)")
 _PRO_UNIT_VALIDATION_MODES = {"light", "strict"}
 _PRO_UNIT_MAPS_KEY = "_pro_unit_maps_by_file"
+_PRO_INTEGER_VARS = {"element_ID", "grain_type"}
+_PRO_INTEGER_VECTOR_ITEMS = {"SH_at_surface": {0}}
+_PRO_SCIENTIFIC_VARS = {"stress", "viscosity", "temperature_gradient"}
 
 
 def parse_pro_header_units(
@@ -295,6 +298,131 @@ def _surface_hoar_height_increment(pro_units: Optional[Mapping[str, UnitLike]]) 
     if isinstance(height_unit, list):
         return 0.001
     return float(convert_units(0.001, "m", height_unit))
+
+
+def _target_pro_unit(var_name: str) -> Optional[str]:
+    """Return the scalar PRO storage unit used when writing one variable."""
+    reg_entry = registry.get(var_name, {})
+    pro_unit = reg_entry.get("pro_units")
+    if isinstance(pro_unit, list):
+        return None
+    return normalize_unit(pro_unit)
+
+
+def _source_data_unit(var_name: str, data_array: xr.DataArray) -> Optional[str]:
+    """Return the current data unit from attrs, falling back to xsnow_units."""
+    attr_unit = data_array.attrs.get("units")
+    if attr_unit is not None:
+        return normalize_unit(attr_unit)
+    reg_entry = registry.get(var_name, {})
+    xsnow_unit = reg_entry.get("xsnow_units")
+    if isinstance(xsnow_unit, list):
+        return None
+    return normalize_unit(xsnow_unit)
+
+
+def _convert_values_for_pro_write(var_name: str, data_array: xr.DataArray) -> np.ndarray:
+    """Convert one variable from current xsnow units to PRO storage units."""
+    values = data_array.values
+    source_unit = _source_data_unit(var_name, data_array)
+    target_unit = _target_pro_unit(var_name)
+    if source_unit is None or target_unit is None:
+        return values
+    try:
+        return convert_units(values, source_unit, target_unit)
+    except UnitConversionError as exc:
+        raise UnitConversionError(
+            f"Cannot convert PRO variable {var_name!r} from {source_unit!r} "
+            f"to PRO unit {target_unit!r} for writing."
+        ) from exc
+
+
+def _pro_unit_label(unit: UnitLike) -> str:
+    """Format one scalar or vector PRO unit declaration."""
+    if isinstance(unit, list):
+        return ", ".join(str(item) for item in unit)
+    return str(unit)
+
+
+def _pro_header_description(var_name: str, reg_entry: Mapping[str, Any]) -> str:
+    """Return a compact PRO header description for one variable."""
+    if var_name == "height":
+        return "height [> 0: top, < 0: bottom of elem.]"
+    if var_name == "SH_at_surface":
+        return "grain type, grain size, and density of SH at surface"
+    aliases = reg_entry.get("aliases") or []
+    if aliases:
+        return str(aliases[0])
+    return str(reg_entry.get("standard_name", var_name)).replace("_", " ")
+
+
+def _pro_header_line(var_name: str, reg_entry: Mapping[str, Any]) -> Optional[str]:
+    """Build one SNOWPACK PRO [HEADER] definition line."""
+    param_code = reg_entry.get("param_code")
+    if not param_code:
+        return None
+
+    pro_unit = reg_entry.get("pro_units")
+    description = _pro_header_description(var_name, reg_entry)
+    if isinstance(pro_unit, list):
+        return f"{param_code},{len(pro_unit)},{description} ({_pro_unit_label(pro_unit)})"
+    if pro_unit is None:
+        return f"{param_code},nElems,{description}"
+    return f"{param_code},nElems,{description} ({pro_unit})"
+
+
+def _write_pro_header(f, profile_vars: Mapping[str, xr.DataArray]) -> None:
+    """Write PRO parameter definitions for variables present in the output."""
+    f.write("[HEADER]\n")
+    f.write("0500,Date\n")
+    for var_name, reg_entry in registry.items():
+        if var_name not in profile_vars:
+            continue
+        line = _pro_header_line(var_name, reg_entry)
+        if line is not None:
+            f.write(f"{line}\n")
+    f.write("\n")
+
+
+def _format_compact_pro_float(value: float, scientific: bool = False) -> str:
+    """Format one continuous PRO value without unnecessary trailing zeros."""
+    if scientific:
+        return f"{value:.3e}"
+    abs_value = abs(value)
+    if abs_value and (abs_value < 1e-2 or abs_value >= 1e4):
+        return f"{value:.3e}"
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _format_pro_value(var_name: str, value: Any, index: int = 0) -> str:
+    """Format one value using SNOWPACK-like PRO precision conventions."""
+    if pd.isna(value):
+        return "-999"
+    numeric = float(value)
+    if var_name in _PRO_INTEGER_VARS or index in _PRO_INTEGER_VECTOR_ITEMS.get(var_name, set()):
+        return str(int(round(numeric)))
+    scientific = (
+        var_name in _PRO_SCIENTIFIC_VARS
+        and (var_name == "temperature_gradient" or abs(numeric) < 1)
+    )
+    return _format_compact_pro_float(numeric, scientific=scientific)
+
+
+def _format_pro_values(var_name: str, values: np.ndarray) -> List[str]:
+    """Format all values for one PRO data line."""
+    flat_values = values.flatten()
+    return [
+        _format_pro_value(var_name, value, index)
+        for index, value in enumerate(flat_values)
+    ]
+
+
+def _prepare_pro_values_for_write(var_name: str, values: np.ndarray) -> np.ndarray:
+    """Apply variable-specific PRO structure before formatting."""
+    if var_name == "grain_type":
+        return np.append(values.flatten(), 0)
+    return values
 
 
 def _extract_metadata_fast(
@@ -1704,7 +1832,9 @@ def to_pro(
         except (AttributeError, ValueError):
             azimuth = -999
         f.write(f"SlopeAzi= {azimuth:.0f}\n")
-        
+        f.write("\n")
+
+        _write_pro_header(f, profile_vars)
         f.write("[DATA]\n")
 
         for t in single_loc_ds.time.values:
@@ -1715,9 +1845,11 @@ def to_pro(
             for var_name, code in registry.items():
                 param_code = code.get('param_code') if isinstance(code, dict) else None
                 if param_code and var_name in profile_vars:
-                    data_array = profile[var_name].dropna(dim='layer').values
+                    data_array = profile[var_name].dropna(dim='layer')
+                    data_array = _convert_values_for_pro_write(var_name, data_array)
                     if data_array.size > 0:
+                        data_array = _prepare_pro_values_for_write(var_name, data_array)
                         num_layers = data_array.size
-                        formatted_values = [f"{val:.4f}" for val in data_array.flatten()]
+                        formatted_values = _format_pro_values(var_name, data_array)
                         data_str = ",".join(formatted_values)
                         f.write(f"{param_code},{num_layers},{data_str}\n")
