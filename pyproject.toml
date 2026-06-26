@@ -52,6 +52,7 @@ gpu = [
 ]
 viz = [
   "plotly>=5.0",  # interactive plots (e.g. extensions.season_plot)
+  "nivix @ git+https://gitlab.com/avalanche-warning/visualization/nivix.git",
 ]
 lint = [
   "mypy>=1.6",
