@@ -14,7 +14,7 @@ parts:
       - file: tutorials/subsetting_filtering
       - file: tutorials/combining_data
       - file: tutorials/tabular_inspection
-      - file: tutorials/simple_plots
+      - file: tutorials/plotting
       - file: tutorials/units
       - file: tutorials/timezones
       - file: tutorials/gtypes_labels
@@ -55,3 +55,4 @@ parts:
           - file: api/_generated/xsnow.extensions.classification
           - file: api/_generated/xsnow.extensions.hazard_chart
           - file: api/_generated/xsnow.extensions.critical_crack_length
+          - file: api/_generated/xsnow.extensions.season_plot
