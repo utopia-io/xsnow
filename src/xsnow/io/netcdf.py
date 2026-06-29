@@ -145,21 +145,25 @@ def to_netcdf(
     ds: xsnowDataset,
     path: Union[str, Path],
     logger: Optional[logging.Logger] = None,
+    compress: bool = True,
+    complevel: int = 4,
     **kwargs
 ) -> None:
     """
     Saves the dataset to a NetCDF file.
-    
+
     This method provides a convenient wrapper around the underlying
     `xarray.Dataset.to_netcdf()` method for easy caching and interoperability.
-    
+
     The location mapping dictionary is converted to NetCDF-compatible format
     by encoding it as JSON in a string attribute.
-    
+
     Args:
         ds: The dataset instance to save.
         path: The destination file path for the .nc file.
         logger: An optional preconfigured logger instance.
+        compress: zlib-compress the data variables.
+        complevel: zlib compression level (1-9) when compress is True.
         **kwargs: Additional keyword arguments passed to `xarray.Dataset.to_netcdf()`.
     """
     if ds.data is None:
@@ -189,7 +193,21 @@ def to_netcdf(
                     "complevel": 4,
                 }
                 logger.debug(f"Encoding coord '{coord_name}' as S{max_len}")
-                
+
+
+    # Data variables are zlib-compressed by default. Snow datasets are dense
+    # rectangular grids, but depending on the actual data they could be heavily
+    # NA-padded. If a single model run produces some output the others don't
+    # then this will be multiplied across all aspects, slopes, realizations, ...
+    # which will all be nodata. A caller-supplied encoding takes precedence.
+    if compress:
+        caller_encoding = kwargs.pop("encoding", None) or {}
+        encoding = {}
+        for var_name in ds_to_save.data_vars:
+            encoding[var_name] = {"zlib": True, "complevel": complevel}
+        encoding.update(caller_encoding)  # caller overrides per variable
+        kwargs["encoding"] = encoding
+
     path = Path(path)
     ds_to_save.to_netcdf(path, **kwargs)
     logger.info(f"Dataset successfully saved to {path}")
