@@ -450,6 +450,68 @@ def _resolve_filepaths(
     return pro_files, smet_files
 
 
+def _fold_aspect_locations(
+    grouped_by_location: Dict[str, List[xr.Dataset]],
+    logger: Optional[logging.Logger] = None,
+) -> Dict[str, List[xr.Dataset]]:
+    """
+    Fold SNOWPACK per-aspect station names into their base location.
+
+    SNOWPACK writes one output file per simulated slope: the flat field as
+    ``<station>`` and the virtual slopes as ``<station><n>`` (n = 1..9, the
+    NUMBER_SLOPES index). This regroups those datasets under the base station
+    name so downstream slope-signature merging concatenates them along the
+    slope dimension instead of treating each aspect as its own location.
+
+    Folding is conservative: a location is only folded when its name ends in a
+    single nonzero digit, the base name is present in the same batch, and every
+    dataset of the candidate carries a finite nonzero inclination. Snow- and
+    wind stations (also ending in 2 and 1) should be on the flat.
+
+    Args:
+        grouped_by_location: Datasets grouped by their location string.
+        logger: Logger instance.
+
+    Returns:
+        The regrouped mapping; iteration order keeps base locations before
+        their folded slopes so slope order stays deterministic.
+    """
+    logger = logger or get_logger(__name__)
+
+    def _all_inclined(dsets: List[xr.Dataset]) -> bool:
+        for ds in dsets:
+            if "inclination" not in ds.coords:
+                return False
+            inclination = np.asarray(ds["inclination"].values, dtype=float).reshape(-1)
+            if inclination.size == 0:
+                return False
+            if not (np.isfinite(inclination).all() and (inclination > 0).all()):
+                return False
+        return True
+
+    folded: Dict[str, List[xr.Dataset]] = {}
+    for loc in sorted(grouped_by_location):  # base sorts before <base><n>
+        dsets = grouped_by_location[loc]
+        base = loc[:-1]
+        is_aspect_slope = (
+            len(loc) >= 2
+            and loc[-1].isdigit()
+            and loc[-1] != "0"
+            and base in grouped_by_location
+            and _all_inclined(dsets)
+        )
+        if not is_aspect_slope:
+            folded.setdefault(loc, []).extend(dsets)
+            continue
+        logger.debug(
+            "Folding per-aspect location %r into %r as an additional slope", loc, base)
+        for ds in dsets:
+            renamed = ds.copy()
+            renamed["location"] = [base]
+            folded.setdefault(base, []).append(renamed)
+    return folded
+
+
 def _merge_and_finalize(
     all_datasets: List[xr.Dataset],
     time: Optional[TimeSelector],
@@ -506,7 +568,11 @@ def _merge_and_finalize(
     for ds in all_datasets:
         loc = str(ds.location.values[0])  # Get string location name
         grouped_by_location.setdefault(loc, []).append(ds)
-    
+
+    # Fold SNOWPACK per-aspect station names (<station><n>) into their base
+    # location, so their profiles concatenate along the slope dimension below.
+    grouped_by_location = _fold_aspect_locations(grouped_by_location, logger)
+
     # HANDLE DUPLICATE STATION NAMES
     station_names = list(grouped_by_location.keys())
     unique_names = _handle_duplicate_names(station_names, logger=logger)
