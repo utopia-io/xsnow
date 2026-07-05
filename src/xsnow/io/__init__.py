@@ -201,10 +201,16 @@ def read(
     # NetCDF files
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
+            # lazy=None (auto) stays eager for a single NetCDF file
             return _read_xsnow_netcdf(
                 source,
                 unit_validation=parser_kwargs.get('unit_validation', 'strict'),
                 logger=logger,
+                lazy=bool(lazy),
+                time_sel=time_sel,
+                location_sel=location_sel,
+                slope_sel=slope_sel,
+                realization_sel=realization_sel,
             )
         except UnitValidationError:
             raise

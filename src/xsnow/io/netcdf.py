@@ -28,29 +28,42 @@ def _read_xsnow_netcdf(
     source: Union[str, Path],
     unit_validation: str = "strict",
     logger: Optional[logging.Logger] = None,
+    lazy: bool = False,
+    time_sel=None,
+    location_sel=None,
+    slope_sel=None,
+    realization_sel=None,
 ) -> Optional[xsnowDataset]:
     """
     Read xsnow's custom netcdf format.
 
     This includes proper json decoding of any 'mapping' attribute and
     handling of fixed-length byte coordinate strings.
-    
+
     Args:
         source: Path to the NetCDF file.
         unit_validation: Stored-unit validation mode. `'strict'` raises when
             present unit attrs differ from xsnow units; `'light'` warns.
         logger: Optional logger for validation warnings.
-        
+        lazy: If True, keep the data variables on disk and return a dataset
+            backed by the open file; the caller reads variables on demand
+            (e.g. via .compute()) and closes the dataset. If False (default),
+            load everything into memory and close the file.
+        time_sel: TimeSelector for filtering by time (already coerced).
+        location_sel: LocationSelector for filtering by location (already coerced).
+        slope_sel: SlopeSelector for filtering by slope (already coerced).
+        realization_sel: RealizationSelector for filtering by realization
+            (already coerced).
+
     Returns:
         An xsnowDataset instance, or None if reading fails.
     """
     logger = get_logger(__name__, logger=logger)
 
-    # open lazily, then materialize metadata/coords eagerly
-    with xr.open_dataset(source) as _ds:
-        ds = _ds.load()
+    ds = xr.open_dataset(source)
 
-    # Decode fixed-length byte coords back to str
+    # Decode fixed-length byte coords back to str (before the selectors run,
+    # so string labels match)
     for coord_name in ("location", "realization"):
         if coord_name in ds.coords:
             coord_data = ds[coord_name]
@@ -70,6 +83,21 @@ def _read_xsnow_netcdf(
         logger=logger,
         source=f"NetCDF file {source}",
     )
+
+    # Apply selectors if provided (already coerced by read()), while the data
+    # is still on disk, so an eager load only reads the requested subset
+    if time_sel:
+        ds = time_sel.apply(ds)
+    if location_sel:
+        ds = location_sel.apply(ds)
+    if slope_sel:
+        ds = slope_sel.apply(ds)
+    if realization_sel:
+        ds = realization_sel.apply(ds)
+
+    if not lazy:
+        ds.load()
+        ds.close()
 
     return xsnowDataset(ds)
 
