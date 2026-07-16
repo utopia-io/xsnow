@@ -60,46 +60,51 @@ def _read_xsnow_netcdf(
     """
     logger = get_logger(__name__, logger=logger)
 
-    ds = xr.open_dataset(source)
+    opened = xr.open_dataset(source)
+    try:
+        ds = opened
 
-    # Decode fixed-length byte coords back to str (before the selectors run,
-    # so string labels match)
-    for coord_name in ("location", "realization"):
-        if coord_name in ds.coords:
-            coord_data = ds[coord_name]
-            if coord_data.dtype.kind == 'S':  # byte strings
-                decoded_values = [
-                    (val.decode("utf-8") if isinstance(val, (bytes, np.bytes_)) else str(val))
-                    for val in coord_data.values
-                ]
-                ds[coord_name] = (coord_data.dims, decoded_values)
+        # Decode fixed-length byte coords back to str (before the selectors run,
+        # so string labels match)
+        for coord_name in ("location", "realization"):
+            if coord_name in ds.coords:
+                coord_data = ds[coord_name]
+                if coord_data.dtype.kind == 'S':  # byte strings
+                    decoded_values = [
+                        (val.decode("utf-8") if isinstance(val, (bytes, np.bytes_)) else str(val))
+                        for val in coord_data.values
+                    ]
+                    ds[coord_name] = (coord_data.dims, decoded_values)
 
-    # Restore mapping attrs from JSON
-    ds = _decode_mapping_attrs_from_netcdf(ds)
-    ds = _promote_slope_metadata_coords(ds)
-    validate_xsnow_unit_attrs(
-        ds,
-        unit_validation=unit_validation,
-        logger=logger,
-        source=f"NetCDF file {source}",
-    )
+        # Restore mapping attrs from JSON
+        ds = _decode_mapping_attrs_from_netcdf(ds)
+        ds = _promote_slope_metadata_coords(ds)
+        validate_xsnow_unit_attrs(
+            ds,
+            unit_validation=unit_validation,
+            logger=logger,
+            source=f"NetCDF file {source}",
+        )
 
-    # Apply selectors if provided (already coerced by read()), while the data
-    # is still on disk, so an eager load only reads the requested subset
-    if time_sel:
-        ds = time_sel.apply(ds)
-    if location_sel:
-        ds = location_sel.apply(ds)
-    if slope_sel:
-        ds = slope_sel.apply(ds)
-    if realization_sel:
-        ds = realization_sel.apply(ds)
+        # Apply selectors if provided (already coerced by read()), while the data
+        # is still on disk, so an eager load only reads the requested subset
+        if time_sel:
+            ds = time_sel.apply(ds)
+        if location_sel:
+            ds = location_sel.apply(ds)
+        if slope_sel:
+            ds = slope_sel.apply(ds)
+        if realization_sel:
+            ds = realization_sel.apply(ds)
 
-    if not lazy:
-        ds.load()
-        ds.close()
+        if not lazy:
+            ds.load()
+            opened.close()
 
-    return xsnowDataset(ds)
+        return xsnowDataset(ds)
+    except Exception:
+        opened.close()
+        raise
 
 
 def _decode_mapping_attrs_from_netcdf(ds: xr.Dataset) -> xr.Dataset:
