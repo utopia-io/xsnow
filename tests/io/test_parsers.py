@@ -583,8 +583,10 @@ Latitude= 46.5
         metadata = _read_pro_metadata(filepath, throw=False)
         assert metadata['station_name'] == 'my_station'
 
-        with pytest.raises(ValueError):
-            metadata, profiles = _read_pro_raw(filepath)
+        metadata, profiles = _read_pro_raw(filepath)
+        assert metadata['station_name'] == "my_station"
+        assert metadata['station_name_source'] == "filename_stem"
+        assert len(profiles) == 1
 
         with pytest.raises(ValueError):
             metadata = _read_pro_metadata(filepath)

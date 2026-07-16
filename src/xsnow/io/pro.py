@@ -47,6 +47,9 @@ _PRO_UNIT_MAPS_KEY = "_pro_unit_maps_by_file"
 _PRO_INTEGER_VARS = {"element_ID", "grain_type"}
 _PRO_INTEGER_VECTOR_ITEMS = {"SH_at_surface": {0}}
 _PRO_SCIENTIFIC_VARS = {"stress", "viscosity", "temperature_gradient"}
+_LOCATION_SOURCE_ATTR = "_xsnow_location_source"
+_LOCATION_SOURCE_STATION_NAME = "StationName"
+_LOCATION_SOURCE_FILENAME_STEM = "filename_stem"
 
 
 def parse_pro_header_units(
@@ -455,6 +458,7 @@ def _extract_metadata_fast(
     
     metadata = {
         "station_name": file_path.stem,
+        "station_name_source": _LOCATION_SOURCE_FILENAME_STEM,
         "latitude": np.nan,
         "longitude": np.nan,
         "altitude": np.nan,
@@ -498,6 +502,10 @@ def _extract_metadata_fast(
                     for key, value in HEADER_MAP.items():
                         if stripped.startswith(key):
                             metadata[value] = stripped.split('=', 1)[1].strip()
+                            if value in {"station_name", "stationName"}:
+                                metadata["station_name_source"] = (
+                                    _LOCATION_SOURCE_STATION_NAME
+                                )
                             break
                 
                 # Parse ONLY timestamp lines in data section (0500 lines)
@@ -531,6 +539,7 @@ def _read_pro_metadata(
     filepath: Union[str, Path],
     logger: Optional[logging.Logger] = None,
     throw: bool = True,
+    require_station_name: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Read minimal metadata from a .pro file header.
@@ -547,11 +556,14 @@ def _read_pro_metadata(
     and NaNs for others.
     """
     logger = get_logger(__name__, logger=logger)
+    if require_station_name is None:
+        require_station_name = throw
 
     file_path = Path(filepath)
 
     metadata: Dict[str, Any] = {
         "station_name": np.nan,
+        "station_name_source": np.nan,
         "latitude": np.nan,
         "longitude": np.nan,
         "altitude": np.nan,
@@ -565,6 +577,7 @@ def _read_pro_metadata(
             raise FileNotFoundError(f"File not found while reading metadata: {filepath}")
         else:
             metadata["station_name"] = _sanitize_station_name(file_path.stem)
+            metadata["station_name_source"] = _LOCATION_SOURCE_FILENAME_STEM
             return metadata
 
     in_header = False
@@ -588,6 +601,10 @@ def _read_pro_metadata(
                     for key, value in HEADER_MAP.items():
                         if line.startswith(key):
                             metadata[value] = line.split('=', 1)[1].strip()
+                            if value in {"station_name", "stationName"}:
+                                metadata["station_name_source"] = (
+                                    _LOCATION_SOURCE_STATION_NAME
+                                )
     except Exception as exc:
         logger.warning(f"Error reading metadata from {file_path.name}: {exc}")
 
@@ -596,10 +613,11 @@ def _read_pro_metadata(
 
     name = metadata.get("station_name")
     if name is None or pd.isna(name) or (isinstance(name, str) and not name.strip()):
-        if throw:
+        if require_station_name:
             raise ValueError(f"No StationName found in {file_path.name}.")
         else:
             metadata["station_name"] = file_path.stem
+            metadata["station_name_source"] = _LOCATION_SOURCE_FILENAME_STEM
 
     metadata["station_name"] = _sanitize_station_name(metadata["station_name"])
 
@@ -1096,7 +1114,12 @@ def _read_pro_raw(
     with _open_any_as_text(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
         lines = f.readlines()
 
-    metadata = _read_pro_metadata(filepath, logger=logger, throw=True)
+    metadata = _read_pro_metadata(
+        filepath,
+        logger=logger,
+        throw=True,
+        require_station_name=False,
+    )
 
     temp_profiles = _parse_pro_profiles_from_lines(
         lines=lines,
@@ -1214,6 +1237,10 @@ def _create_pro_dataset(
                     ]
                 ),
             }
+        )
+        ds.attrs[_LOCATION_SOURCE_ATTR] = metadata.get(
+            "station_name_source",
+            "unknown",
         )
         return ds
 
@@ -1365,6 +1392,10 @@ def _create_pro_dataset(
                 ]
             )
         }
+    )
+    ds.attrs[_LOCATION_SOURCE_ATTR] = metadata.get(
+        "station_name_source",
+        "unknown",
     )
     
     # Attach metadata from registry to all variables

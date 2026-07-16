@@ -156,9 +156,11 @@ def _combine_two(
 
       This ensures we never mix layers of a single profile between datasets.
 
-    - For all other variables (non-layer), fall back to element-wise
-      prefer-left semantics via `combine_first` (left wins where non-null,
-      right fills gaps).
+    - Non-layer variables follow the same profile-status selection where either
+      side has a valid profile. Where neither side has one (e.g. plain forcing
+      timelines with profile_status 0 everywhere), they fall back to element-wise
+      prefer-left semantics via `combine_first` (left wins where non-null, right
+      fills gaps).
     """
     attr_conflicts: list[str] = []
     compat_conflicts: list[str] = []
@@ -266,8 +268,19 @@ def _combine_two(
                 if bool(diff.any()):
                     compat_conflicts.append(f"'{name}'")
 
-        # Uniform profile-aware selection for all vars
-        merged = xr.where(mask_l, var_left, xr.where(mask_r, var_right, var_left))
+        if layer_dim in var_left.dims or layer_dim in var_right.dims:
+            # Layer variables: whole-profile selection by status, so the layers of
+            # one profile are never mixed between datasets. Where neither side has
+            # a valid profile, keep left (usually NaNs / error codes).
+            merged = xr.where(mask_l, var_left, xr.where(mask_r, var_right, var_left))
+        else:
+            # Non-layer variables follow the profile choice where either side has
+            # a valid profile. Where neither has one (e.g. merging plain forcing
+            # timelines, profile_status 0 everywhere), profile selection cannot
+            # decide - fall back to element-wise prefer-left so no data is lost:
+            # left wins where non-null, right fills the gaps.
+            fallback = var_left.combine_first(var_right)
+            merged = xr.where(mask_l, var_left, xr.where(mask_r, var_right, fallback))
 
         out[name] = merged
 

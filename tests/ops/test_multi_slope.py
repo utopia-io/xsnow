@@ -64,6 +64,66 @@ class TestMultiSlopeMerging:
         # Should have 1 location, 2 slopes
         assert ds.sizes['location'] == 1
         assert ds.sizes['slope'] == 2
+
+    def test_fold_filename_fallback_aspect_locations(self, synthetic_pro, tmp_path):
+        """Fold SNOWPACK aspect suffixes only when location came from filename."""
+        synthetic_pro.aspect_file(
+            tmp_path / "STATION.pro",
+            station_name=None,
+            slope_angle=0,
+            slope_azi=0,
+        )
+        synthetic_pro.aspect_file(
+            tmp_path / "STATION1.pro",
+            station_name=None,
+            slope_angle=35,
+            slope_azi=180,
+        )
+
+        ds = read(tmp_path, lazy=False, n_cpus_use=1, max_layers=3)
+
+        assert list(ds.location.values) == ["STATION"]
+        assert ds.sizes["slope"] == 2
+        assert set(ds.inclination.values.tolist()) == {0, 35}
+        assert "_xsnow_location_source" not in ds.data.attrs
+
+    def test_do_not_fold_explicit_trailing_digit_station_name(self, synthetic_pro, tmp_path):
+        """Do not override explicit StationName metadata that looks like an aspect suffix."""
+        synthetic_pro.aspect_file(
+            tmp_path / "STATION.pro",
+            station_name="STATION",
+            slope_angle=0,
+            slope_azi=0,
+        )
+        synthetic_pro.aspect_file(
+            tmp_path / "STATION1.pro",
+            station_name="STATION1",
+            slope_angle=35,
+            slope_azi=180,
+        )
+
+        ds = read(tmp_path, lazy=False, n_cpus_use=1, max_layers=3)
+
+        assert set(ds.location.values.tolist()) == {"STATION", "STATION1"}
+
+    def test_do_not_fold_without_compatible_flat_base(self, synthetic_pro, tmp_path):
+        """Require a compatible flat base profile before folding aspect suffixes."""
+        synthetic_pro.aspect_file(
+            tmp_path / "STATION.pro",
+            station_name=None,
+            slope_angle=10,
+            slope_azi=0,
+        )
+        synthetic_pro.aspect_file(
+            tmp_path / "STATION1.pro",
+            station_name=None,
+            slope_angle=35,
+            slope_azi=180,
+        )
+
+        ds = read(tmp_path, lazy=False, n_cpus_use=1, max_layers=3)
+
+        assert set(ds.location.values.tolist()) == {"STATION", "STATION1"}
     
     def test_merge_preserves_data(self, synthetic_pro, tmp_path):
         """Test that data from each slope is preserved during merge."""

@@ -12,6 +12,8 @@ Strategy:
 
 import pytest
 import numpy as np
+import pandas as pd
+import xarray as xr
 from pathlib import Path
 
 from xsnow import read, xsnowDataset
@@ -284,6 +286,88 @@ def test_read_netcdf_file(real_file_subset, tmp_path):
     
     assert ds_from_nc is not None
     assert ds_from_nc.sizes == ds_original.sizes
+
+
+def _write_netcdf_selector_dataset(tmp_path: Path) -> Path:
+    """Write a small multi-coordinate NetCDF dataset for selector tests."""
+    locations = ["A", "B"]
+    times = pd.date_range("2025-01-01", periods=3, freq="h")
+    slopes = [0, 1]
+    realizations = ["r0", "r1"]
+    shape = (len(locations), len(times), len(slopes), len(realizations))
+    values = np.arange(np.prod(shape), dtype=float).reshape(shape)
+
+    ds = xr.Dataset(
+        data_vars={
+            "marker": (
+                ("location", "time", "slope", "realization"),
+                values,
+            ),
+        },
+        coords={
+            "location": locations,
+            "time": times,
+            "slope": slopes,
+            "realization": realizations,
+            "latitude": ("location", [46.5, 47.0]),
+            "longitude": ("location", [10.5, 11.0]),
+            "altitude": ("location", [2500.0, 2600.0]),
+            "inclination": ("slope", [0.0, 35.0]),
+            "azimuth": ("slope", [0.0, 180.0]),
+        },
+    )
+    nc_file = tmp_path / "selector_source.nc"
+    ds.to_netcdf(nc_file)
+    return nc_file
+
+
+def test_read_netcdf_applies_selectors(tmp_path):
+    """NetCDF reads should subset before eager loading when selectors are given."""
+    nc_file = _write_netcdf_selector_dataset(tmp_path)
+
+    loaded = read(
+        nc_file,
+        time=slice("2025-01-01T01:00", None),
+        location=["B"],
+        slope=[1],
+        realization=["r1"],
+        lazy=False,
+    )
+
+    assert loaded.sizes == {
+        "location": 1,
+        "time": 2,
+        "slope": 1,
+        "realization": 1,
+    }
+    assert loaded.location.values.tolist() == ["B"]
+    assert loaded.realization.values.tolist() == ["r1"]
+    assert loaded.slope.values.tolist() == [1]
+    np.testing.assert_array_equal(
+        loaded.time.values,
+        np.array(
+            ["2025-01-01T01:00:00", "2025-01-01T02:00:00"],
+            dtype="datetime64[ns]",
+        ),
+    )
+
+    expected = np.array([[[[19.0]], [[23.0]]]])
+    np.testing.assert_allclose(loaded["marker"].values, expected)
+    np.testing.assert_allclose(loaded.inclination.values, [35.0])
+    np.testing.assert_allclose(loaded.azimuth.values, [180.0])
+
+
+def test_read_netcdf_lazy_applies_selectors(tmp_path):
+    """Lazy NetCDF reads should expose the same selected coordinate domain."""
+    nc_file = _write_netcdf_selector_dataset(tmp_path)
+
+    loaded = read(nc_file, location="A", slope=0, realization="r0", lazy=True)
+
+    assert "location" not in loaded.sizes
+    assert "slope" not in loaded.sizes
+    assert "realization" not in loaded.sizes
+    assert loaded.sizes["time"] == 3
+    np.testing.assert_allclose(loaded["marker"].values, [0.0, 4.0, 8.0])
 
 
 # ============================================================================

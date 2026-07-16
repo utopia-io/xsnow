@@ -309,6 +309,38 @@ SlopeAzi= 180
         return filepath
 
     @staticmethod
+    def aspect_file(
+        path: Path,
+        station_name: str | None = None,
+        slope_angle: int = 0,
+        slope_azi: int = 0,
+        latitude: float = 46.5,
+        longitude: float = 10.5,
+        altitude: float = 2500,
+        n_layers: int = 3,
+    ) -> Path:
+        """Generate a minimal PRO file for slope/aspect merging tests."""
+        station_line = "" if station_name is None else f"StationName= {station_name}\n"
+        heights = ",".join(str(0.1 * i) for i in range(1, n_layers + 1))
+        densities = ",".join(str(100 * i) for i in range(1, n_layers + 1))
+
+        path.write_text(
+            f"""[STATION_PARAMETERS]
+{station_line}Latitude= {latitude}
+Longitude= {longitude}
+Altitude= {altitude}
+SlopeAngle= {slope_angle}
+SlopeAzi= {slope_azi}
+
+[DATA]
+0500,01.01.2025 12:00:00
+0501,{n_layers},{heights}
+0502,{n_layers},{densities}
+"""
+        )
+        return path
+
+    @staticmethod
     def with_declared_units(
         path: Path,
         station_name: str = "UNITTEST",

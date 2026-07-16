@@ -28,50 +28,83 @@ def _read_xsnow_netcdf(
     source: Union[str, Path],
     unit_validation: str = "strict",
     logger: Optional[logging.Logger] = None,
+    lazy: bool = False,
+    time_sel=None,
+    location_sel=None,
+    slope_sel=None,
+    realization_sel=None,
 ) -> Optional[xsnowDataset]:
     """
     Read xsnow's custom netcdf format.
 
     This includes proper json decoding of any 'mapping' attribute and
     handling of fixed-length byte coordinate strings.
-    
+
     Args:
         source: Path to the NetCDF file.
         unit_validation: Stored-unit validation mode. `'strict'` raises when
             present unit attrs differ from xsnow units; `'light'` warns.
         logger: Optional logger for validation warnings.
-        
+        lazy: If True, keep the data variables on disk and return a dataset
+            backed by the open file; the caller reads variables on demand
+            (e.g. via .compute()) and closes the dataset. If False (default),
+            load everything into memory and close the file.
+        time_sel: TimeSelector for filtering by time (already coerced).
+        location_sel: LocationSelector for filtering by location (already coerced).
+        slope_sel: SlopeSelector for filtering by slope (already coerced).
+        realization_sel: RealizationSelector for filtering by realization
+            (already coerced).
+
     Returns:
         An xsnowDataset instance, or None if reading fails.
     """
     logger = get_logger(__name__, logger=logger)
 
-    # open lazily, then materialize metadata/coords eagerly
-    with xr.open_dataset(source) as _ds:
-        ds = _ds.load()
+    opened = xr.open_dataset(source)
+    try:
+        ds = opened
 
-    # Decode fixed-length byte coords back to str
-    for coord_name in ("location", "realization"):
-        if coord_name in ds.coords:
-            coord_data = ds[coord_name]
-            if coord_data.dtype.kind == 'S':  # byte strings
-                decoded_values = [
-                    (val.decode("utf-8") if isinstance(val, (bytes, np.bytes_)) else str(val))
-                    for val in coord_data.values
-                ]
-                ds[coord_name] = (coord_data.dims, decoded_values)
+        # Decode fixed-length byte coords back to str (before the selectors run,
+        # so string labels match)
+        for coord_name in ("location", "realization"):
+            if coord_name in ds.coords:
+                coord_data = ds[coord_name]
+                if coord_data.dtype.kind == 'S':  # byte strings
+                    decoded_values = [
+                        (val.decode("utf-8") if isinstance(val, (bytes, np.bytes_)) else str(val))
+                        for val in coord_data.values
+                    ]
+                    ds[coord_name] = (coord_data.dims, decoded_values)
 
-    # Restore mapping attrs from JSON
-    ds = _decode_mapping_attrs_from_netcdf(ds)
-    ds = _promote_slope_metadata_coords(ds)
-    validate_xsnow_unit_attrs(
-        ds,
-        unit_validation=unit_validation,
-        logger=logger,
-        source=f"NetCDF file {source}",
-    )
+        # Restore mapping attrs from JSON
+        ds = _decode_mapping_attrs_from_netcdf(ds)
+        ds = _promote_slope_metadata_coords(ds)
+        validate_xsnow_unit_attrs(
+            ds,
+            unit_validation=unit_validation,
+            logger=logger,
+            source=f"NetCDF file {source}",
+        )
 
-    return xsnowDataset(ds)
+        # Apply selectors if provided (already coerced by read()), while the data
+        # is still on disk, so an eager load only reads the requested subset
+        if time_sel:
+            ds = time_sel.apply(ds)
+        if location_sel:
+            ds = location_sel.apply(ds)
+        if slope_sel:
+            ds = slope_sel.apply(ds)
+        if realization_sel:
+            ds = realization_sel.apply(ds)
+
+        if not lazy:
+            ds.load()
+            opened.close()
+
+        return xsnowDataset(ds)
+    except Exception:
+        opened.close()
+        raise
 
 
 def _decode_mapping_attrs_from_netcdf(ds: xr.Dataset) -> xr.Dataset:
