@@ -62,6 +62,56 @@ def _make_simple_scalar_ds(value: float, time: int, attrs=None) -> xr.Dataset:
     )
 
 
+def _make_forcing_timeline_ds(times, ta_values) -> xr.Dataset:
+    """Create a forcing-only dataset with no valid profile_status entries."""
+    times = pd.to_datetime(times)
+    values = np.asarray(ta_values, dtype=float).reshape(1, len(times), 1, 1)
+    profile_status = np.zeros_like(values, dtype="i1")
+
+    return xr.Dataset(
+        {
+            "TA": (("location", "time", "slope", "realization"), values),
+            "profile_status": (
+                ("location", "time", "slope", "realization"),
+                profile_status,
+            ),
+        },
+        coords={
+            "location": ["A"],
+            "time": times,
+            "slope": [0],
+            "realization": [0],
+        },
+    )
+
+
+def _make_layered_no_profile_ds(times, values) -> xr.Dataset:
+    """Create a layered dataset with no valid profiles for fallback checks."""
+    times = pd.to_datetime(times)
+    values = np.asarray(values, dtype=float).reshape(1, len(times), 1, 1, 1)
+    profile_status = np.zeros((1, len(times), 1, 1), dtype="i1")
+
+    return xr.Dataset(
+        {
+            "density": (
+                ("location", "time", "slope", "realization", "layer"),
+                values,
+            ),
+            "profile_status": (
+                ("location", "time", "slope", "realization"),
+                profile_status,
+            ),
+        },
+        coords={
+            "location": ["A"],
+            "time": times,
+            "slope": [0],
+            "realization": [0],
+            "layer": [0],
+        },
+    )
+
+
 def _make_slope_metadata_ds(value: float, time: int) -> xr.Dataset:
     return xr.Dataset(
         {"v": (("location", "time", "slope", "realization"), np.array([[[[value]]]]))},
@@ -428,6 +478,49 @@ def test_combine_compat_override_prefers_left_even_if_different():
 
     out = xsnow.combine([ds_left, ds_right], compat="override")
     assert float(out["v"].values.squeeze()) == 1.0
+
+
+@pytest.mark.synthetic
+def test_combine_forcing_timelines_fill_gaps_without_valid_profiles():
+    left = _make_forcing_timeline_ds(
+        ["2025-01-01T00:00", "2025-01-01T01:00", "2025-01-01T02:00"],
+        [270.0, 271.0, np.nan],
+    )
+    right = _make_forcing_timeline_ds(
+        ["2025-01-01T01:00", "2025-01-01T02:00", "2025-01-01T03:00"],
+        [999.0, 272.0, 273.0],
+    )
+
+    out = xsnow.combine([left, right], join="outer")
+    actual = out["TA"].sel(location="A", slope=0, realization=0).values
+
+    np.testing.assert_allclose(actual, [270.0, 271.0, 272.0, 273.0])
+    np.testing.assert_array_equal(
+        out["profile_status"].sel(location="A", slope=0, realization=0).values,
+        [0, 0, 0, 0],
+    )
+
+
+@pytest.mark.synthetic
+def test_combine_layered_variables_do_not_fill_without_valid_profiles():
+    left = _make_layered_no_profile_ds(
+        ["2025-01-01T00:00", "2025-01-01T01:00", "2025-01-01T02:00"],
+        [100.0, 101.0, np.nan],
+    )
+    right = _make_layered_no_profile_ds(
+        ["2025-01-01T01:00", "2025-01-01T02:00", "2025-01-01T03:00"],
+        [999.0, 102.0, 103.0],
+    )
+
+    out = xsnow.combine([left, right], join="outer")
+    actual = out["density"].sel(
+        location="A",
+        slope=0,
+        realization=0,
+        layer=0,
+    ).values
+
+    np.testing.assert_allclose(actual, [100.0, 101.0, np.nan, np.nan])
 
 
 @pytest.mark.synthetic
