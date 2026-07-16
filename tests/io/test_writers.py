@@ -16,8 +16,11 @@ import pandas as pd
 import xarray as xr
 from pathlib import Path
 
+import netCDF4
+
 from tests.conftest import ALL_FILE_EXTS, COMPRESSION_MODULES
-from xsnow import read, xsnowDataset
+from xsnow import read, single_profile, xsnowDataset
+from xsnow.io.netcdf import _bounded_chunk_cache
 
 
 # ============================================================================
@@ -842,6 +845,39 @@ StationName= {long_name}
         
         # Should be preserved (up to 64 chars)
         assert original[:64] == loaded[:64]
+
+# ============================================================================
+# NETCDF CHUNK CACHE
+# ============================================================================
+
+@pytest.mark.synthetic
+def test_bounded_chunk_cache_sets_and_restores():
+    outside = netCDF4.get_chunk_cache()
+    with _bounded_chunk_cache(4 * 1024 * 1024):
+        assert netCDF4.get_chunk_cache()[0] == 4 * 1024 * 1024
+    assert netCDF4.get_chunk_cache() == outside
+
+
+@pytest.mark.synthetic
+def test_bounded_chunk_cache_none_is_noop():
+    outside = netCDF4.get_chunk_cache()
+    with _bounded_chunk_cache(None):
+        assert netCDF4.get_chunk_cache() == outside
+
+
+@pytest.mark.synthetic
+def test_chunk_cache_size_roundtrip_kwarg(tmp_path, compare_datasets):
+    """to_netcdf and read accept chunk_cache_size and still roundtrip."""
+    ds = single_profile()
+    nc_path = tmp_path / "chunk_cache.nc"
+    ds.to_netcdf(nc_path, chunk_cache_size=2 * 1024 * 1024)
+
+    ds_loaded = read(nc_path, chunk_cache_size=2 * 1024 * 1024)
+    compare_datasets(ds, ds_loaded)
+
+    ds_unclamped = read(nc_path, chunk_cache_size=None)
+    compare_datasets(ds, ds_unclamped)
+
 
 # ============================================================================
 # UTILITY

@@ -330,6 +330,47 @@ def test_parse_file_empty_data_section(tmp_path, synthetic_pro):
     assert metadata['station_name'] == "EMPTY_DATA_SECTION"
 
 @pytest.mark.synthetic
+def test_parse_nodata_values_masked(tmp_path):
+    """
+    SNOWPACK writes -999 for values it cannot compute (e.g. the critical
+    cut length on the bottom and surface elements). They must read back
+    as NaN, never as data.
+    """
+    filepath = tmp_path / "NODATA.pro"
+    filepath.write_text(
+        """[STATION_PARAMETERS]
+StationName= NODATA
+Latitude= 46.5
+Longitude= 10.5
+Altitude= 2500
+SlopeAngle= 0
+SlopeAzi= 0
+
+[HEADER]
+0500,Date
+0501,nElems,height [> 0: top, < 0: bottom of elem.] (cm)
+0502,nElems,element density (kg m-3)
+0606,nElems,critical cut length (m)
+
+[DATA]
+0500,15.01.2025 12:00:00
+0501,4,10,20,30,40
+0502,4,300,250,200,150
+0606,4,-999.00,0.45,0.30,-999.00
+"""
+    )
+
+    _, profiles = _read_pro_raw(filepath)
+
+    assert len(profiles) == 1
+    rc = profiles[0]['rc_flat']
+    assert np.isnan(rc[0]) and np.isnan(rc[3])
+    np.testing.assert_allclose(rc[1:3], [0.45, 0.30])
+    # Real values on other variables stay untouched
+    np.testing.assert_allclose(profiles[0]['density'], [300, 250, 200, 150])
+
+
+@pytest.mark.synthetic
 def test_read_pro_raw_soil_removal_all_soil(tmp_path, synthetic_pro):
     """
     Edge case: Profile with ONLY soil layers.
