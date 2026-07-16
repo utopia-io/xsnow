@@ -28,6 +28,8 @@ from .base import _handle_duplicate_names, PRO_FILE_REGEX, SMET_FILE_REGEX
 
 _LOCATION_LEVEL_COORDS = ("latitude", "longitude", "altitude", "location")
 _SLOPE_COORDS = ("inclination", "azimuth")
+_LOCATION_SOURCE_ATTR = "_xsnow_location_source"
+_LOCATION_SOURCE_FILENAME_STEM = "filename_stem"
 
 
 def _is_missing(value) -> bool:
@@ -464,9 +466,11 @@ def _fold_aspect_locations(
     slope dimension instead of treating each aspect as its own location.
 
     Folding is conservative: a location is only folded when its name ends in a
-    single nonzero digit, the base name is present in the same batch, and every
-    dataset of the candidate carries a finite nonzero inclination. Snow- and
-    wind stations (also ending in 2 and 1) should be on the flat.
+    single nonzero digit, the base name is present in the same batch, the
+    suffixed profile location was inferred from the filename rather than an
+    explicit ``StationName``, the base profile is a compatible flat field, and
+    every dataset of the candidate carries a finite nonzero inclination. Snow-
+    and wind stations (also ending in 2 and 1) should be on the flat.
 
     Args:
         grouped_by_location: Datasets grouped by their location string.
@@ -477,6 +481,12 @@ def _fold_aspect_locations(
         their folded slopes so slope order stays deterministic.
     """
     logger = logger or get_logger(__name__)
+
+    def _all_from_filename_fallback(dsets: List[xr.Dataset]) -> bool:
+        return all(
+            ds.attrs.get(_LOCATION_SOURCE_ATTR) == _LOCATION_SOURCE_FILENAME_STEM
+            for ds in dsets
+        )
 
     def _all_inclined(dsets: List[xr.Dataset]) -> bool:
         for ds in dsets:
@@ -489,6 +499,52 @@ def _fold_aspect_locations(
                 return False
         return True
 
+    def _is_flat_filename_fallback_profile(ds: xr.Dataset) -> bool:
+        if "layer" not in ds.dims:
+            return False
+        if ds.attrs.get(_LOCATION_SOURCE_ATTR) != _LOCATION_SOURCE_FILENAME_STEM:
+            return False
+        if "inclination" not in ds.coords:
+            return False
+        inclination = np.asarray(ds["inclination"].values, dtype=float).reshape(-1)
+        return bool(
+            inclination.size
+            and np.isfinite(inclination).all()
+            and np.allclose(inclination, 0.0)
+        )
+
+    def _has_compatible_flat_base(
+        candidate_dsets: List[xr.Dataset],
+        base_dsets: List[xr.Dataset],
+    ) -> bool:
+        flat_base_dsets = [
+            ds for ds in base_dsets if _is_flat_filename_fallback_profile(ds)
+        ]
+        if not flat_base_dsets:
+            return False
+
+        for coord_name in ("latitude", "longitude", "altitude"):
+            base_values = [
+                value
+                for ds in flat_base_dsets
+                for value in _non_null_scalar_coord_values(ds, coord_name)
+            ]
+            candidate_values = [
+                value
+                for ds in candidate_dsets
+                for value in _non_null_scalar_coord_values(ds, coord_name)
+            ]
+            if not base_values or not candidate_values:
+                continue
+            if any(
+                not _values_equal(base_value, candidate_value)
+                for base_value in base_values
+                for candidate_value in candidate_values
+            ):
+                return False
+
+        return True
+
     folded: Dict[str, List[xr.Dataset]] = {}
     for loc in sorted(grouped_by_location):  # base sorts before <base><n>
         dsets = grouped_by_location[loc]
@@ -498,7 +554,9 @@ def _fold_aspect_locations(
             and loc[-1].isdigit()
             and loc[-1] != "0"
             and base in grouped_by_location
+            and _all_from_filename_fallback(dsets)
             and _all_inclined(dsets)
+            and _has_compatible_flat_base(dsets, grouped_by_location[base])
         )
         if not is_aspect_slope:
             folded.setdefault(loc, []).extend(dsets)
@@ -572,6 +630,9 @@ def _merge_and_finalize(
     # Fold SNOWPACK per-aspect station names (<station><n>) into their base
     # location, so their profiles concatenate along the slope dimension below.
     grouped_by_location = _fold_aspect_locations(grouped_by_location, logger)
+    for dsets in grouped_by_location.values():
+        for ds in dsets:
+            ds.attrs.pop(_LOCATION_SOURCE_ATTR, None)
 
     # HANDLE DUPLICATE STATION NAMES
     station_names = list(grouped_by_location.keys())
@@ -686,6 +747,7 @@ def _merge_and_finalize(
         join='outer', 
         coords='all',
     )
+    final_xr_dataset.attrs.pop(_LOCATION_SOURCE_ATTR, None)
     
     # Preserve CF-compliant metadata
     if not final_xr_dataset.attrs:
