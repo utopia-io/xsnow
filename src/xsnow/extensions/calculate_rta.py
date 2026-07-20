@@ -5,12 +5,12 @@ from xsnow.plugin import register_xsnowDataset_method
 from xsnow.extensions.assign import assign_to_dataset
 
 @register_xsnowDataset_method
-def compute_rta(ds: xr.Dataset, config, rta_threshold=0.8) -> xr.Dataset:
+def compute_rta(ds: xr.Dataset, rta_threshold=0.8) -> xr.Dataset:
     """
     Compute Relative Threshold Area (RTA) for each profile in an xsnow Dataset.
-    This is a simplified but faithful translation of sarp.snowprofile::computeRTA().
+    This is a translation of sarp.snowprofile::computeRTA().
     """
-    dataset_cls = ds.__class__
+    #dataset_cls = ds.__class__
     depth      = ds["height"].values
     hardness   = ds["hand_hardness"].values
     grain_size = ds["grain_size"].values
@@ -64,7 +64,7 @@ def compute_rta(ds: xr.Dataset, config, rta_threshold=0.8) -> xr.Dataset:
         dims, coords
     )
     
-    return dataset_cls(ds)
+    return ds #dataset_cls(ds)
 
 #region rta helpers
 def _rta_interface(ds, hardness, grain_size, grain_type, dhard_lower, dgsize_lower, weibull_adj, hbar, gbar, dhbar, dgbar, wbar, sd_h, sd_g, sd_dh, sd_dg, sd_w, dims, coords) -> xr.DataArray:
