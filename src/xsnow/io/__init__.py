@@ -153,6 +153,13 @@ def read(
               datasets preserve stored attrs and validate present
               `attrs["units"]` against xsnow units: `'strict'` raises on
               mismatches, while `'light'` warns and leaves attrs unchanged.
+            - `chunk_cache_size`: NetCDF sources only. Size in bytes of each
+              netCDF4/HDF5 per-variable chunk cache while the file is open.
+              By default, xsnow leaves the process's current netCDF4 setting
+              untouched. On datasets with many variables, these caches can
+              collectively consume gigabytes. Set a smaller value (e.g. 1 MiB:
+              `1024**2`, or `1_048_576` bytes) to limit aggregate chunk-cache
+              memory. Smaller caches may reduce I/O performance.
             - `norm_slopes`: Controls slope coordinate normalization during
               final merging:
                 * `'auto'` (default): normalize when slopes are consistent
@@ -202,6 +209,9 @@ def read(
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
             # lazy=None (auto) stays eager for a single NetCDF file
+            netcdf_kwargs = {}
+            if 'chunk_cache_size' in parser_kwargs:
+                netcdf_kwargs['chunk_cache_size'] = parser_kwargs['chunk_cache_size']
             return _read_xsnow_netcdf(
                 source,
                 unit_validation=parser_kwargs.get('unit_validation', 'strict'),
@@ -211,6 +221,7 @@ def read(
                 location_sel=location_sel,
                 slope_sel=slope_sel,
                 realization_sel=realization_sel,
+                **netcdf_kwargs,
             )
         except UnitValidationError:
             raise
