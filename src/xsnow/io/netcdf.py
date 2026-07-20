@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Union
 
+import netCDF4
 import numpy as np
 import xarray as xr
 
@@ -24,6 +26,27 @@ from ..utils import get_logger, _promote_slope_metadata_coords, reorder_dims
 from .base import _round_coord
 
 
+@contextmanager
+def _bounded_chunk_cache(cache_bytes: Optional[int]):
+    """
+    Clamp the netCDF4 per-variable chunk cache while opening or writing a file.
+
+    Arguments:
+        cache_bytes: Cache size in bytes, or None to leave netCDF4's
+            current process-global setting untouched.
+    """
+    if cache_bytes is None:
+        yield
+        return
+    previous = netCDF4.get_chunk_cache()
+    _, nelems, preemption = previous
+    netCDF4.set_chunk_cache(cache_bytes, nelems, preemption)
+    try:
+        yield
+    finally:
+        netCDF4.set_chunk_cache(*previous)
+
+
 def _read_xsnow_netcdf(
     source: Union[str, Path],
     unit_validation: str = "strict",
@@ -33,6 +56,7 @@ def _read_xsnow_netcdf(
     location_sel=None,
     slope_sel=None,
     realization_sel=None,
+    chunk_cache_size: Optional[int] = None,
 ) -> Optional[xsnowDataset]:
     """
     Read xsnow's custom netcdf format.
@@ -54,13 +78,18 @@ def _read_xsnow_netcdf(
         slope_sel: SlopeSelector for filtering by slope (already coerced).
         realization_sel: RealizationSelector for filtering by realization
             (already coerced).
+        chunk_cache_size: Per-variable netCDF4/HDF5 chunk cache in bytes
+            while the file is open. None leaves the process's current netCDF4
+            setting untouched; set a small value (e.g. 1 MiB) to limit
+            aggregate chunk-cache memory on datasets with many variables.
 
     Returns:
         An xsnowDataset instance, or None if reading fails.
     """
     logger = get_logger(__name__, logger=logger)
 
-    opened = xr.open_dataset(source)
+    with _bounded_chunk_cache(chunk_cache_size):
+        opened = xr.open_dataset(source)
     try:
         ds = opened
 
@@ -180,6 +209,7 @@ def to_netcdf(
     logger: Optional[logging.Logger] = None,
     compress: bool = True,
     complevel: int = 4,
+    chunk_cache_size: Optional[int] = None,
     **kwargs
 ) -> None:
     """
@@ -197,6 +227,10 @@ def to_netcdf(
         logger: An optional preconfigured logger instance.
         compress: zlib-compress the data variables.
         complevel: zlib compression level (1-9) when compress is True.
+        chunk_cache_size: Per-variable netCDF4/HDF5 chunk cache in bytes
+            during the write. None leaves the process's current netCDF4
+            setting untouched; set a small value (e.g. 1 MiB) to limit
+            aggregate chunk-cache memory on datasets with many variables.
         **kwargs: Additional keyword arguments passed to `xarray.Dataset.to_netcdf()`.
     """
     if ds.data is None:
@@ -242,5 +276,6 @@ def to_netcdf(
         kwargs["encoding"] = encoding
 
     path = Path(path)
-    ds_to_save.to_netcdf(path, **kwargs)
+    with _bounded_chunk_cache(chunk_cache_size):
+        ds_to_save.to_netcdf(path, **kwargs)
     logger.info(f"Dataset successfully saved to {path}")
