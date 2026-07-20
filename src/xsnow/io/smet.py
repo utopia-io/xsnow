@@ -702,6 +702,28 @@ def read_smet(
     return ds
 
 
+def _first_slope_value(ds: xsnowDataset, *coord_names: str) -> Optional[float]:
+    """Return a single-location dataset's finite slope descriptor, or None.
+
+    Reads the first (slope 0) value of the first present coordinate so to_smet
+    can echo it back as a SlopeAngle/SlopeAzi header. The canonical inclination/
+    azimuth coordinates are tried first, then the SlopeAngle/SlopeAzi aliases a
+    terrain source may carry as plain location coordinates. Returns None when no
+    named coordinate is present or the value is NaN (no known slope), which keeps
+    flat-field forcing free of slope headers.
+    """
+    for coord_name in coord_names:
+        if coord_name not in ds.coords:
+            continue
+        values = np.asarray(ds[coord_name].values).ravel()
+        if values.size == 0:
+            continue
+        value = float(values[0])
+        if not np.isnan(value):
+            return value
+    return None
+
+
 @register_xsnowDataset_method
 def to_smet(
     ds: xsnowDataset,
@@ -789,6 +811,11 @@ def to_smet(
         f.write(f"latitude = {lat:.4f}\n")
         f.write(f"longitude = {lon:.4f}\n")
         f.write(f"altitude = {alt:.0f}\n")
+        slope_angle = _first_slope_value(ds, "inclination", "SlopeAngle")
+        slope_azi = _first_slope_value(ds, "azimuth", "SlopeAzi")
+        if slope_angle is not None and slope_azi is not None:
+            f.write(f"SlopeAngle = {slope_angle:.1f}\n")
+            f.write(f"SlopeAzi = {slope_azi:.1f}\n")
         f.write(f"nodata = {nodata:.1f}\n")
         fields = "timestamp " + " ".join(df.columns)
         f.write(f"fields = {fields}\n")
