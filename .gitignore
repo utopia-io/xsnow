@@ -8,6 +8,7 @@ dist/*
 *.egg-info/
 src/**/*.egg-info/
 src/xsnow/_version.py
+*.html
 
 # ── Python cache ─────────────────────────────────────────
 src/**/__pycache__
@@ -31,3 +32,14 @@ uv.lock
 # ── Debug code ──────────────────────────────────────
 debug_parser.py
 tests/data_itegraty_test.ipynb
+
+# ── Backup files ────────────────────────────────────────
+*.bak
+*.backup
+*.old
+
+# ── log files ────────────────────────────────────────
+*.log
+
+# ── IDE settings ──────────────────────────────────────
+.vscode

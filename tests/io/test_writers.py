@@ -13,9 +13,11 @@ Strategy:
 import pytest
 import numpy as np
 import pandas as pd
+import xarray as xr
 from pathlib import Path
 
-from xsnow import read
+from tests.conftest import ALL_FILE_EXTS, COMPRESSION_MODULES
+from xsnow import read, xsnowDataset
 
 
 # ============================================================================
@@ -99,6 +101,72 @@ def test_to_netcdf_roundtrip(real_file_subset, tmp_path, compare_datasets):
     # Should be identical (within floating point tolerance)
     compare_datasets(ds_original, ds_loaded, rtol=1e-6)
 
+
+@pytest.mark.real_data
+def test_to_netcdf_roundtrip_preserves_slope_metadata_as_coords(real_file_subset, tmp_path):
+    """
+    Slope metadata remains coordinates in the stored file and after roundtrip.
+    """
+    ds_original = read(real_file_subset)
+    assert "inclination" in ds_original.data.coords
+    assert "azimuth" in ds_original.data.coords
+
+    nc_file = tmp_path / "slope_coords.nc"
+    ds_original.to_netcdf(nc_file)
+
+    with xr.open_dataset(nc_file) as raw:
+        raw_loaded = raw.load()
+
+    for coord in ("inclination", "azimuth"):
+        assert coord in raw_loaded.coords
+        assert coord not in raw_loaded.data_vars
+
+    ds_loaded = read(nc_file)
+    for coord in ("inclination", "azimuth"):
+        assert coord in ds_loaded.data.coords
+        assert coord not in ds_loaded.data.data_vars
+        np.testing.assert_allclose(
+            ds_loaded.data[coord].values,
+            ds_original.data[coord].values,
+            equal_nan=True,
+        )
+
+
+def test_read_netcdf_promotes_legacy_slope_metadata_data_vars(tmp_path):
+    """
+    Older files with demoted slope metadata are restored to coordinates.
+    """
+    legacy = xr.Dataset(
+        data_vars={
+            "HS": (
+                ("location", "time", "slope", "realization"),
+                np.array([[[[1.2], [1.3]]]]),
+            ),
+            "inclination": (("location", "slope"), np.array([[0.0, 35.0]])),
+            "azimuth": (("location", "slope"), np.array([[0.0, 180.0]])),
+        },
+        coords={
+            "location": ["A"],
+            "time": [pd.Timestamp("2025-01-01")],
+            "slope": [0, 1],
+            "realization": [0],
+        },
+    )
+    nc_file = tmp_path / "legacy_demoted_slope_coords.nc"
+    legacy.to_netcdf(nc_file)
+
+    loaded = read(nc_file)
+
+    for coord in ("inclination", "azimuth"):
+        assert coord in loaded.data.coords
+        assert coord not in loaded.data.data_vars
+        assert loaded.data[coord].dims == ("slope",)
+
+    subset = loaded.sel(slope=(loaded.azimuth == 180.0))
+    assert subset.sizes["slope"] == 1
+    assert float(subset.inclination.values[0]) == 35.0
+
+
 def _normalize_location_string(loc):
     """Helper to normalize location values that may be bytes or strings."""
     if isinstance(loc, bytes):
@@ -162,17 +230,18 @@ def test_to_pro_basic(sample_pro_file, tmp_path):
     # Read a single station
     ds = read(sample_pro_file)
     
-    output_file = tmp_path / "output.pro"
-    ds.to_pro(output_file)
+    for ext in ALL_FILE_EXTS:
+        output_file = tmp_path / ("output.pro" + ext)
+        ds.to_pro(output_file)
     
-    # File should exist and have content
-    assert output_file.exists()
-    assert output_file.stat().st_size > 0
-    
-    # Should have proper structure
-    content = output_file.read_text()
-    assert '[STATION_PARAMETERS]' in content
-    assert '[DATA]' in content
+        # File should exist and have content
+        assert output_file.exists()
+        assert output_file.stat().st_size > 0
+        
+        # Should have proper structure
+        content = read_compressed(output_file)
+        assert '[STATION_PARAMETERS]' in content
+        assert '[DATA]' in content
 
 
 @pytest.mark.real_data
@@ -184,21 +253,67 @@ def test_to_pro_roundtrip_structure(sample_pro_file, tmp_path):
     """
     ds_original = read(sample_pro_file)
     
-    # Write to .pro
-    output_file = tmp_path / "roundtrip.pro"
-    ds_original.to_pro(output_file)
-    
-    # Read back
-    ds_loaded = read(output_file)
-    
-    # Check dimensions match
-    assert ds_loaded.sizes['location'] == ds_original.sizes['location']
-    assert ds_loaded.sizes['time'] == ds_original.sizes['time']
-    
-    # Check variables present
-    for var in ['height', 'density']:
-        if var in ds_original.data:
-            assert var in ds_loaded.data
+    for ext in ALL_FILE_EXTS:
+        # Write to .pro
+        output_file = tmp_path / ("roundtrip.pro" + ext)
+        ds_original.to_pro(output_file)
+        
+        # Read back
+        ds_loaded = read(output_file)
+        
+        # Check dimensions match
+        assert ds_loaded.sizes['location'] == ds_original.sizes['location']
+        assert ds_loaded.sizes['time'] == ds_original.sizes['time']
+        
+        # Check variables present
+        for var in ['height', 'density']:
+            if var in ds_original.data:
+                assert var in ds_loaded.data
+
+
+@pytest.mark.synthetic
+def test_to_pro_converts_xsnow_units_to_pro_units(tmp_path, synthetic_pro):
+    """PRO writer converts xsnow-unit data back to SNOWPACK PRO units."""
+    source_file = synthetic_pro.with_declared_units(tmp_path / "source.pro")
+    ds = read(source_file, lazy=False, max_layers=2)
+
+    output_file = tmp_path / "written.pro"
+    ds.to_pro(output_file)
+
+    content = output_file.read_text()
+    assert "0501,2,10,20" in content
+    assert "0506,2,5,10" in content
+    assert "0512,2,0.5,1" in content
+    assert "0513,3,550,440,0" in content
+    assert "0517,2,1.2,2.4" in content
+
+
+@pytest.mark.synthetic
+def test_to_pro_writes_parameter_header_definitions(tmp_path, synthetic_pro):
+    """PRO writer emits parameter definitions required by external readers."""
+    source_file = synthetic_pro.with_declared_units(tmp_path / "source.pro")
+    ds = read(source_file, lazy=False, max_layers=2)
+
+    output_file = tmp_path / "with_header.pro"
+    ds.to_pro(output_file)
+
+    content = output_file.read_text()
+    assert "[STATION_PARAMETERS]" in content
+    assert "[HEADER]" in content
+    assert "[DATA]" in content
+    assert content.index("[HEADER]") < content.index("[DATA]")
+    assert "0500,Date" in content
+    assert "0501,nElems,height [> 0: top, < 0: bottom of elem.] (cm)" in content
+    assert "0502,nElems,density (kg m-3)" in content
+    assert "0512,nElems,grain size (mm)" in content
+    assert "0513,nElems,grain type (Swiss Code F1F2F3)" in content
+    assert "0517,nElems,stress (kPa)" in content
+
+    loaded = read(output_file, lazy=False, max_layers=2)
+    assert loaded is not None
+    np.testing.assert_allclose(loaded["height"].values[0, 0, 0, 0, :], [0.1, 0.2])
+    np.testing.assert_allclose(loaded["grain_type"].values[0, 0, 0, 0, :], [550, 440])
+    np.testing.assert_allclose(loaded["stress"].values[0, 0, 0, 0, :], [1200, 2400])
 
 
 @pytest.mark.synthetic
@@ -252,17 +367,139 @@ def test_to_smet_basic(real_file_subset, tmp_path):
         first_location = str(ds.data.location.values[0])
         ds = ds.sel(location=first_location)
     
-    output_file = tmp_path / "output.smet"
-    ds.to_smet(output_file)
-    
-    # File should exist
-    assert output_file.exists()
-    
-    # Should have SMET structure
+    for ext in ALL_FILE_EXTS:
+        output_file = tmp_path / ("output.smet" + ext)
+        ds.to_smet(output_file)
+
+        # File should exist
+        assert output_file.exists()
+
+        # Should have SMET structure
+        content = read_compressed(output_file)
+        assert 'SMET' in content
+        assert '[HEADER]' in content
+        assert '[DATA]' in content
+
+
+@pytest.fixture
+def smet_writer_dataset():
+    """Single-location dataset with missing values and string data for SMET export."""
+    times = pd.date_range("2025-01-01", periods=2, freq="D")
+    ds = xr.Dataset(
+        data_vars={
+            "TA": (("location", "time", "slope"), [[[270.123456], [np.nan]]]),
+            "weather": (("location", "time", "slope"), [[["clear"], ["storm"]]]),
+            "density": (("location", "time", "slope", "layer"), [[[[100.0, 200.0]], [[np.nan, np.nan]]]]),
+        },
+        coords={
+            "location": ["TEST"],
+            "time": times,
+            "slope": [0],
+            "layer": [0, 1],
+            "latitude": ("location", [46.5]),
+            "longitude": ("location", [10.5]),
+            "altitude": ("location", [2500.0]),
+            "azimuth": ("slope", [180.0]),
+            "inclination": ("slope", [30.0]),
+        },
+    )
+    return xsnowDataset(ds)
+
+
+@pytest.mark.synthetic
+def test_to_smet_output_units_convert_from_xsnow_units(smet_units_xsnow_dataset, tmp_path):
+    """Output-style SMET writing converts xsnow units to output storage units."""
+    from xsnow.io.smet import read_smet
+
+    output_file = tmp_path / "output_units.smet"
+    smet_units_xsnow_dataset.to_smet(output_file)
+
     content = output_file.read_text()
-    assert 'SMET' in content
-    assert '[HEADER]' in content
-    assert '[DATA]' in content
+    assert "station_id = TEST" in content
+    assert "station_name = TEST" in content
+    assert "units = ISO8601 degC % cm" in content
+    assert "0.000\t50.000\t25.000" in content
+
+    loaded = read_smet(output_file)
+    np.testing.assert_allclose(loaded["TA"].isel(time=0).values, [[[0.0]]])
+    np.testing.assert_allclose(loaded["RH"].isel(time=0).values, [[[0.5]]])
+    np.testing.assert_allclose(loaded["HS_mod"].isel(time=0).values, [[[0.25]]])
+
+
+@pytest.mark.synthetic
+def test_to_smet_input_units_convert_from_xsnow_units(smet_units_xsnow_dataset, tmp_path):
+    """Input-style SMET writing uses forcing units where registry declares them."""
+    from xsnow.io.smet import read_smet
+
+    output_file = tmp_path / "input_units.smet"
+    xsnowDataset(smet_units_xsnow_dataset.data[["TA", "RH"]]).to_smet(
+        output_file,
+        unit_type="input",
+    )
+
+    content = output_file.read_text()
+    assert "units = ISO8601 K 1" in content
+    assert "273.150\t0.500" in content
+
+    loaded = read_smet(output_file)
+    np.testing.assert_allclose(loaded["TA"].isel(time=0).values, [[[0.0]]])
+    np.testing.assert_allclose(loaded["RH"].isel(time=0).values, [[[0.5]]])
+
+
+@pytest.mark.synthetic
+def test_to_smet_forcing_unit_type_aliases_input(smet_units_xsnow_dataset, tmp_path):
+    """Forcing is accepted as an alias for input-style SMET units."""
+    output_file = tmp_path / "forcing_units.smet"
+    xsnowDataset(smet_units_xsnow_dataset.data[["TA", "RH"]]).to_smet(
+        output_file,
+        unit_type="forcing",
+    )
+
+    content = output_file.read_text()
+    assert "units = ISO8601 K 1" in content
+    assert "273.150\t0.500" in content
+
+
+@pytest.mark.synthetic
+def test_to_smet_rejects_unknown_unit_type(smet_units_xsnow_dataset, tmp_path):
+    """SMET writer validates the selected unit convention."""
+    with pytest.raises(ValueError, match="unit_type"):
+        smet_units_xsnow_dataset.to_smet(tmp_path / "bad.smet", unit_type="archive")
+
+
+@pytest.mark.synthetic
+def test_to_smet_writes_nodata_precision_and_unquoted_strings(smet_writer_dataset, tmp_path):
+    """SMET writer should emit rectangular rows even when values are missing."""
+    output_file = tmp_path / "nodata.smet"
+    smet_writer_dataset.to_smet(output_file)
+
+    content = output_file.read_text()
+    assert "nodata = -999.0" in content
+    assert "fields = timestamp TA weather" in content
+    assert '"' not in content
+    assert "270.123" in content
+    assert "-999.0" in content
+
+    data_lines = content.split("[DATA]\n", maxsplit=1)[1].splitlines()
+    assert data_lines
+    column_counts = {len(line.split()) for line in data_lines}
+    assert column_counts == {3}
+
+
+@pytest.mark.synthetic
+def test_to_smet_roundtrip_preserves_missing_values(smet_writer_dataset, tmp_path):
+    """A SMET written with nodata tokens should parse back to NaN values."""
+    from xsnow.io.smet import read_smet
+
+    output_file = tmp_path / "roundtrip_missing.smet"
+    smet_writer_dataset.to_smet(output_file)
+
+    loaded = read_smet(output_file)
+    assert loaded is not None
+    assert "TA" in loaded
+    assert np.isclose(loaded["TA"].isel(time=0).values, 270.123).all()
+    assert np.isnan(loaded["TA"].isel(time=1).values).all()
+    assert "layer" not in loaded["TA"].dims
 
 
 @pytest.mark.synthetic
@@ -295,7 +532,6 @@ def test_to_smet_single_location_requirement(real_file_subset, tmp_path):
 
 
 @pytest.mark.real_data
-@pytest.mark.skip(reason="SMET writer produces malformed output - needs investigation")
 def test_to_smet_only_exports_time_series(real_file_subset, tmp_path):
     """
     Test that SMET output only includes time series variables (no layers).
@@ -311,7 +547,7 @@ def test_to_smet_only_exports_time_series(real_file_subset, tmp_path):
     ds.to_smet(output_file)
     
     # Read back and check
-    from xsnow.xsnow_io import read_smet
+    from xsnow.io.smet import read_smet
     ds_smet = read_smet(output_file)
     
     # Should have no layer dimension
@@ -606,6 +842,19 @@ StationName= {long_name}
         
         # Should be preserved (up to 64 chars)
         assert original[:64] == loaded[:64]
+
+# ============================================================================
+# UTILITY
+# ============================================================================
+
+def read_compressed(filepath: Path):
+    if filepath.suffix in COMPRESSION_MODULES.keys():
+        module = COMPRESSION_MODULES[filepath.suffix]
+        with module.open(filepath, "rt") as f:
+            content = f.read()
+    else:
+        content = filepath.read_text()
+    return content
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

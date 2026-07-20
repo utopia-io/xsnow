@@ -62,6 +62,20 @@ def _make_simple_scalar_ds(value: float, time: int, attrs=None) -> xr.Dataset:
     )
 
 
+def _make_slope_metadata_ds(value: float, time: int) -> xr.Dataset:
+    return xr.Dataset(
+        {"v": (("location", "time", "slope", "realization"), np.array([[[[value]]]]))},
+        coords={
+            "location": ["A"],
+            "time": [time],
+            "slope": [0],
+            "realization": [0],
+            "inclination": ("slope", [35.0]),
+            "azimuth": ("slope", [180.0]),
+        },
+    )
+
+
 # =========================================================================
 # xsnow.concat tests -- SYNTHETIC DATA
 # =========================================================================
@@ -102,6 +116,34 @@ def test_concat_outer_with_xsnowdataset_wraps_output():
 
 
 @pytest.mark.synthetic
+def test_concat_preserves_slope_metadata_as_coords():
+    ds1 = _make_slope_metadata_ds(1.0, 0)
+    ds2 = _make_slope_metadata_ds(2.0, 1)
+
+    result = xsnow.concat([xsnowDataset(ds1), xsnowDataset(ds2)], dim="time")
+    out = result.data
+
+    for coord in ("inclination", "azimuth"):
+        assert coord in out.coords
+        assert coord not in out.data_vars
+        assert out[coord].dims == ("slope",)
+
+
+@pytest.mark.synthetic
+def test_combine_promotes_legacy_slope_metadata_data_vars():
+    left = _make_slope_metadata_ds(1.0, 0)
+    right = _make_slope_metadata_ds(2.0, 1).reset_coords(["inclination", "azimuth"])
+
+    result = xsnow.combine([xsnowDataset(left), xsnowDataset(right)])
+    out = result.data
+
+    for coord in ("inclination", "azimuth"):
+        assert coord in out.coords
+        assert coord not in out.data_vars
+        assert out[coord].dims == ("slope",)
+
+
+@pytest.mark.synthetic
 def test_concat_inner_uses_inner_for_time_but_union_for_layer():
     """
     join='inner' should use intersection for 'time' but union for 'layer'.
@@ -126,9 +168,9 @@ def test_concat_inner_uses_inner_for_time_but_union_for_layer():
     assert list(result["layer"].values) == [0, 1, 2]
 
     # Shape: realization x time x layer
-    assert result.dims["realization"] == 2
-    assert result.dims["time"] == 1
-    assert result.dims["layer"] == 3
+    assert result.sizes["realization"] == 2
+    assert result.sizes["time"] == 1
+    assert result.sizes["layer"] == 3
 
     # assert explicit values
     v = result["v"]
@@ -1492,7 +1534,7 @@ def test_merge_augment_with_smets_ignores_profile_status(
     """
     xs_layered = snp_gridded_xs
     xs_smets = snp_gridded_smets_xs
-
+    
     met_vars = ["TA", "RH", "VW", "DW", "ISWR", "profile_status"]
     have_any_met = any(v in xs_layered.data_vars for v in met_vars)
     if not have_any_met:

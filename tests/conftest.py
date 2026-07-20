@@ -13,7 +13,9 @@ Synthetic Data Strategy:
   - Each test gets isolated tmp_path
 """
 
-import os
+import bz2
+import gzip
+import lzma
 import subprocess
 import pytest
 import numpy as np
@@ -23,6 +25,13 @@ from pathlib import Path
 import shutil
 
 from xsnow import xsnowDataset, read
+import xsnow.plugin
+
+# Snapshot the "core" xsnowDataset surface at conftest import time, i.e.
+# before any test module has a chance to `import xsnow.extensions.*` and
+# permanently monkeypatch `xsnowDataset` via `register_xsnowDataset_method`.
+DEFAULT_XSNOWDATASET_ATTRS = frozenset(dir(xsnowDataset))
+DEFAULT_REGISTERED_METHODS = frozenset(xsnow.plugin.list_registered_methods())
 
 # ============================================================================
 # TEST DATA REPOSITORY MANAGEMENT
@@ -32,6 +41,8 @@ HERE = Path(__file__).parent
 TESTDATA_DIR = HERE / "data"
 TESTDATA_REPO = "https://gitlab.com/avalanche-warning/universal/archive/test-data"
 
+COMPRESSION_MODULES = {".gz": gzip, ".bz2": bz2, ".xz": lzma}
+ALL_FILE_EXTS = [""] + list(COMPRESSION_MODULES.keys())
 
 def _ensure_testdata_repo():
     """
@@ -296,6 +307,43 @@ SlopeAzi= 180
         filepath = tmp_path / f"{station_name}.pro"
         filepath.write_text(content)
         return filepath
+
+    @staticmethod
+    def with_declared_units(
+        path: Path,
+        station_name: str = "UNITTEST",
+        height_unit: str = "cm",
+        height_values: tuple[float, float] = (10.0, 20.0),
+    ) -> Path:
+        """Generate a minimal PRO file with explicit header units."""
+        path.write_text(
+            f"""[STATION_PARAMETERS]
+StationName= {station_name}
+Latitude= 46.5
+Longitude= 10.5
+Altitude= 2500
+SlopeAngle= 35
+SlopeAzi= 180
+
+[HEADER]
+0501,nElems,height [> 0: top, < 0: bottom of elem.] ({height_unit})
+0502,nElems,element density (kg m-3)
+0506,nElems,liquid water content by volume (%)
+0512,nElems,grain size (mm)
+0513,nElems,grain type (Swiss Code F1F2F3)
+0517,nElems,stress (kPa)
+
+[DATA]
+0500,01.01.2025 12:00:00
+0501,2,{height_values[0]},{height_values[1]}
+0502,2,100,200
+0506,2,5,10
+0512,2,0.5,1.0
+0513,3,550,440,0
+0517,2,1.2,2.4
+"""
+        )
+        return path
     
     @staticmethod
     def with_soil_layers(tmp_path: Path, n_snow: int = 3, n_soil: int = 2) -> Path:
@@ -611,24 +659,85 @@ def minimal_xr_dataset():
 
 
 @pytest.fixture
+def smet_units_xsnow_dataset():
+    """Single-location xsnow dataset with variables in xsnow-internal units."""
+    times = pd.date_range("2025-01-01", periods=2, freq="D")
+    ds = xr.Dataset(
+        data_vars={
+            "TA": (("location", "time", "slope"), [[[0.0], [-10.0]]]),
+            "RH": (("location", "time", "slope"), [[[0.5], [0.75]]]),
+            "HS_mod": (("location", "time", "slope"), [[[0.25], [0.3]]]),
+        },
+        coords={
+            "location": ["TEST"],
+            "time": times,
+            "slope": [0],
+            "latitude": ("location", [46.5]),
+            "longitude": ("location", [10.5]),
+            "altitude": ("location", [2500.0]),
+        },
+    )
+    ds["TA"].attrs["units"] = "degC"
+    ds["RH"].attrs["units"] = "1"
+    ds["HS_mod"].attrs["units"] = "m"
+    return xsnowDataset(ds)
+
+
+@pytest.fixture
+def stored_units_xr_dataset():
+    """Factory for minimal stored datasets with registered unit metadata."""
+    def make(unit: str = "m") -> xr.Dataset:
+        ds = xr.Dataset(
+            data_vars={
+                "height": (
+                    ("location", "time", "slope", "realization", "layer"),
+                    np.array([[[[[0.1, 0.2]]]]]),
+                ),
+            },
+            coords={
+                "location": ["TEST"],
+                "time": [pd.Timestamp("2025-01-01")],
+                "slope": [0],
+                "realization": [0],
+                "layer": [0, 1],
+            },
+        )
+        ds["height"].attrs["units"] = unit
+        ds["height"].attrs["custom_attr"] = "preserve-me"
+        return ds
+
+    return make
+
+
+@pytest.fixture
 def snow_profile_xr_dataset():
     """xarray.Dataset with realistic snow profile structure."""
+    height = np.array([[[0.1, 0.2, 0.3], [0.15, 0.25, 0.35]]])
+    density = np.array([[[100, 200, 300], [110, 210, 310]]])
+    hs = height.max(axis=2)
     ds = xr.Dataset(
         {
-            'height': (['location', 'time', 'layer'],
-                      np.array([[[0.1, 0.2, 0.3], [0.15, 0.25, 0.35]]])),
-            'density': (['location', 'time', 'layer'],
-                       np.array([[[100, 200, 300], [110, 210, 310]]]))
+            'height': (['location', 'time', 'layer'], height),
+            'density': (['location', 'time', 'layer'], density),
+            'profile_status': (['location', 'time', 'slope'], np.ones((1, 2, 1), dtype='i1')),
+            'HS': (['location', 'time', 'slope'], hs[..., None]),
+            'is_valid': (['location', 'time', 'slope'], hs[..., None] > 0),
         },
         coords={
             'location': ['TestStation'],  # ✨ CHANGED: String instead of [0]
             'time': pd.date_range('2025-01-01', periods=2, freq='D'),
             'layer': [0, 1, 2],
+            'slope': [0],
             'latitude': ('location', [46.5]),
             'longitude': ('location', [10.5]),
-            'altitude': ('location', [2500.0])
+            'altitude': ('location', [2500.0]),
+            'azimuth': ('slope', [180.0]),
+            'inclination': ('slope', [30.0]),
         }
     )
+    ds['height'].attrs['units'] = 'm'
+    ds['density'].attrs['units'] = 'kg m-3'
+    ds['HS'].attrs['units'] = 'm'
     return ds
 
 
@@ -636,6 +745,16 @@ def snow_profile_xr_dataset():
 def xsnow_dataset(snow_profile_xr_dataset):
     """xsnowDataset wrapper around snow profile data."""
     return xsnowDataset(snow_profile_xr_dataset)
+
+
+@pytest.fixture(scope="session")
+def default_xsnowdataset_attrs() -> frozenset[str]:
+    return DEFAULT_XSNOWDATASET_ATTRS
+
+
+@pytest.fixture(scope="session")
+def default_registered_methods() -> frozenset[str]:
+    return DEFAULT_REGISTERED_METHODS
 
 
 # ============================================================================
@@ -900,4 +1019,4 @@ if __name__ == "__main__":
         path = TESTDATA_DIR / subdir
         if path.exists():
             count = len(list(path.glob("*")))
-            print(f"  {subdir:20s}: {count} files") 
+            print(f"  {subdir:20s}: {count} files")

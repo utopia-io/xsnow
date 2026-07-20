@@ -14,7 +14,8 @@ parts:
       - file: tutorials/subsetting_filtering
       - file: tutorials/combining_data
       - file: tutorials/tabular_inspection
-      - file: tutorials/simple_plots
+      - file: tutorials/plotting
+      - file: tutorials/units
       - file: tutorials/timezones
       - file: tutorials/gtypes_labels
       - file: tutorials/lazy_analysis
@@ -30,6 +31,14 @@ parts:
     chapters:
       - file: api/index
         sections:
+          - file: api/_generated/xsnow.io
+            sections:
+              - file: api/_generated/xsnow.io.pro
+              - file: api/_generated/xsnow.io.smet
+              - file: api/_generated/xsnow.io.netcdf
+              - file: api/_generated/xsnow.io.zarr
+              - file: api/_generated/xsnow.io.merge
+              - file: api/_generated/xsnow.io.base
           - file: api/_generated/xsnow.xsnow_io
           - file: api/_generated/xsnow.core
           - file: api/_generated/xsnow.sample_data
@@ -39,10 +48,11 @@ parts:
           - file: api/_generated/xsnow.plugin
           - file: api/_generated/xsnow.utils
           - file: api/_generated/xsnow.graincode_converter
+          - file: api/_generated/xsnow.units
       
       - file: api/extensions/index
         sections:
           - file: api/_generated/xsnow.extensions.classification
           - file: api/_generated/xsnow.extensions.hazard_chart
           - file: api/_generated/xsnow.extensions.critical_crack_length
-
+          - file: api/_generated/xsnow.extensions.season_plot

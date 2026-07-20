@@ -428,7 +428,7 @@ def test_dask_delayed_decorator_is_used():
     """
     Tests that the @delayed decorator is properly applied to create lazy tasks.
     """
-    from xsnow.xsnow_io import _create_dataset_from_pro_file
+    from xsnow.io.pro import _create_dataset_from_pro_file
     import dask
     
     # The function should be wrapped by Dask's delayed

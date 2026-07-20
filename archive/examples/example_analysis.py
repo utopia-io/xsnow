@@ -1,4 +1,4 @@
-# example_analysis.py
+git status# example_analysis.py
 """
 Example script demonstrating how to use the analysis functions from the
 xsnow package.

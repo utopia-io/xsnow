@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import Iterable, Optional, Literal, Union, Sequence, Dict, Any, Mapping
+from typing import Iterable, NoReturn, Optional, Literal, Union, Sequence, Dict, Any, Mapping
 import numpy as np
 import pandas as pd
 import xarray as xr
 
 from .core import xsnowDataset
 from .plugin import register_xsnowDataset_method
+from .utils import _promote_slope_metadata_coords
 
 
 JoinMode = Literal["left", "right", "outer", "inner", "union"]
@@ -30,8 +31,8 @@ def _as_xr_dataset(obj: Union["xsnowDataset", xr.Dataset]) -> xr.Dataset:
     Normalize inputs: xsnowDataset -> underlying xr.Dataset; pass-through xr.Dataset.
     """
     if isinstance(obj, xr.Dataset):
-        return obj
-    return obj.data
+        return _promote_slope_metadata_coords(obj)
+    return _promote_slope_metadata_coords(obj.data)
 
 
 def _ensure_profile_status(ds: xr.Dataset) -> xr.Dataset:
@@ -206,7 +207,7 @@ def _combine_two(
     )
     status_left = status_left.astype("float32").fillna(0).astype("i1")
     status_right = status_right.astype("float32").fillna(0).astype("i1")
-
+               
     # Valid profile mask on core dims (status >= 1 means valid profile)
     has_left = status_left >= 1
     has_right = status_right >= 1
@@ -217,7 +218,7 @@ def _combine_two(
 
     # 3) Prepare output as a copy of left (coords + attrs)
     out = left.copy()
-
+    
     # Build combined profile_status explicitly
     combined_status = xr.where(
         use_left_core,
@@ -637,10 +638,10 @@ def concat(
     saw_xsnow = False
     for obj in objs:
         if isinstance(obj, xsnowDataset):
-            xr_objs.append(obj.data)
+            xr_objs.append(_promote_slope_metadata_coords(obj.data))
             saw_xsnow = True
         elif isinstance(obj, xr.Dataset):
-            xr_objs.append(obj)
+            xr_objs.append(_promote_slope_metadata_coords(obj))
         else:
             raise TypeError(
                 f"xsnow.concat only supports xsnowDataset or xarray.Dataset, got {type(obj)}"
@@ -908,7 +909,7 @@ def update(
     self: xsnowDataset,
     *args: Any,
     **kwargs: Any,
-) -> xsnowDataset:
+) -> NoReturn:
     """
     Placeholder to prevent accidental use of xarray's Dataset.update on xsnowDataset.
 
@@ -931,7 +932,7 @@ def combine_first(
     self: xsnowDataset,
     *args: Any,
     **kwargs: Any,
-) -> xsnowDataset:
+) -> NoReturn:
     """
     Placeholder to prevent accidental use of xarray's Dataset.combine_first on xsnowDataset.
 

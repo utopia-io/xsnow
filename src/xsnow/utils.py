@@ -12,7 +12,7 @@ import os
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Union, Any, Optional, List, Sequence
+from typing import Union, Any, Optional, List, Sequence, overload
 
 import numpy as np
 import xarray as xr
@@ -421,6 +421,44 @@ def normalize_slope_coords(
     return ds
 
 
+def _promote_slope_metadata_coords(
+    ds: xr.Dataset,
+    slope_coord_names: Sequence[str] = ("azimuth", "inclination"),
+    normalize: bool = True,
+    logger: Optional[logging.Logger] = None,
+) -> xr.Dataset:
+    """
+    Promote legacy slope metadata data variables back to coordinates.
+
+    This preserves backwards compatibility with files written while
+    ``azimuth`` or ``inclination`` were saved as data variables. Only
+    variables carrying a ``slope`` dimension are promoted.
+    """
+    to_promote = [
+        name
+        for name in slope_coord_names
+        if name in ds.data_vars and "slope" in ds[name].dims
+    ]
+    if not to_promote:
+        return ds
+
+    promoted = ds.set_coords(to_promote)
+    if not normalize:
+        return promoted
+
+    coords_to_normalize = [
+        name
+        for name in slope_coord_names
+        if name in promoted.coords and "slope" in promoted[name].dims
+    ]
+    return normalize_slope_coords(
+        promoted,
+        slope_coord_names=list(coords_to_normalize),
+        allow_per_location=True,
+        logger=logger,
+    )
+
+
 def detect_slope_coord_issues(ds: xr.Dataset) -> dict:
     """
     Detect potential issues with slope coordinate dimensions.
@@ -497,6 +535,18 @@ def detect_slope_coord_issues(ds: xr.Dataset) -> dict:
     return diagnostics
 
 
+@overload
+def reorder_dims(
+    ds: xsnowDataset,
+    preferred_order: Sequence[str] = ("location", "time", "slope", "realization", "layer"),
+    last_dims: Optional[Sequence[str]] = None,
+) -> xsnowDataset: ...
+@overload
+def reorder_dims(
+    ds: xr.Dataset,
+    preferred_order: Sequence[str] = ("location", "time", "slope", "realization", "layer"),
+    last_dims: Optional[Sequence[str]] = None,
+) -> xr.Dataset: ...
 @register_xsnowDataset_method
 def reorder_dims(
     ds: Union[xsnowDataset, xr.Dataset],

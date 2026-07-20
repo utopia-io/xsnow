@@ -16,15 +16,19 @@ authors = [
 dependencies = [
     "netcdf4>=1.7.2",
     "numpy>=2.3.2",
-    "pandas>=2.3.1",
+    "pandas>=2.3.1, <4",
     "xarray>=2025.7.1",
     "scipy>=1.16.1",
     "bottleneck>=1.5.0",
-    "pooch",
+    "pooch>=1.9.0",
     "tzdata>=2024.1",
     "pytest>=8.4.2",
     "dask>=2025.9.1",
+    "matplotlib>=3.10.6",
+    "folium>=0.20.0",
+    "zarr>=3.1.5",
 ]
+
 keywords = ["snow", "stratigraphy", "avalanche", "xarray", "post-processing"]
 classifiers = [
   "License :: OSI Approved :: GNU Affero General Public License v3",
@@ -37,6 +41,7 @@ classifiers = [
 testing = [
   "pytest>=8.0",
   "pytest-cov",
+  "pytz>=2024.1",
   "psutil>=7.1.0",
   "pytest-benchmark>=5.1.0",
   "memory-profiler>=0.61.0",
@@ -44,6 +49,10 @@ testing = [
 ]
 gpu = [
   "cupy-cuda12x; platform_system == 'Linux'",  # nvidia wheels
+]
+viz = [
+  "plotly>=5.0",  # interactive plots (e.g. extensions.season_plot)
+  "nivix @ git+https://gitlab.com/avalanche-warning/visualization/nivix.git",
 ]
 lint = [
   "mypy>=1.6",
@@ -60,6 +69,28 @@ release = [
   "ruamel.yaml>=0.18",
   "cffconvert>=2.0.0",
 ]
+# NEW: Large-scale data management features
+largescale = [
+  "dask[distributed]>=2025.9.1",  # Distributed processing (note: dask is already in core deps)
+  "psutil>=7.1.0",                # Memory monitoring (note: psutil is in testing deps)
+]
+
+# uv dependency groups (PEP 735): installed by uv sync, not published with the
+# package. The `test` group mirrors the `testing` optional-dependencies extra,
+# which is kept for pip/CI (pip install -e ".[testing]"). Keep the two in sync.
+[dependency-groups]
+test = [
+  "pytest>=8.0",
+  "pytest-cov",
+  "pytz>=2024.1",
+  "psutil>=7.1.0",
+  "pytest-benchmark>=5.1.0",
+  "memory-profiler>=0.61.0",
+  "pytest-timeout>=2.4.0",
+]
+
+[tool.uv]
+default-groups = ["test"]
 
 [project.urls]
 "Homepage"      = "https://gitlab.com/avacollabra/postprocessing/xsnow"
@@ -71,6 +102,9 @@ where = ["src"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+xsnow = ["py.typed", "*.pyi"]
 
 [tool.setuptools_scm]
 write_to = "src/xsnow/_version.py"
@@ -91,7 +125,13 @@ markers = [
     "real_data: marks tests that use real data files",
     "synthetic: marks tests that use synthetic data",
     "edge_case: marks edge case tests",
+    "largescale: marks large-scale data management tests",  # NEW marker
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:multiprocessing",
+    # Zarr v3 maturity warnings: fixed-length string dtype has no stable v3
+    # spec yet, and consolidated metadata isn't part of the v3 spec. Both are
+    # benign for xsnow's round-trip usage.
+    "ignore::zarr.errors.UnstableSpecificationWarning",
+    "ignore::zarr.errors.ZarrUserWarning",
 ]

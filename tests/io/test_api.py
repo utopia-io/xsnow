@@ -9,9 +9,11 @@ import xarray as xr
 import re
 import warnings
 
+from tests.conftest import ALL_FILE_EXTS, COMPRESSION_MODULES
 from xsnow import read, xsnowDataset
 from xsnow.selectors import TimeSelector, SlopeSelector, RealizationSelector
 from xsnow.sample_data import snp_gridded_dir, snp_snowobs_dir
+
 
 # --- Test Data Fixtures ---
 
@@ -53,17 +55,25 @@ fields = timestamp TA HS
 
 @pytest.fixture
 def data_directory(tmp_path, pro_data_content, smet_data_content):
-    """Creates a temporary directory with a .pro and a .smet file."""
-    pro_file = tmp_path / "test.pro"
-    pro_file.write_text(pro_data_content)
+    """Creates a temporary directory with a .pro and a .smet file. The optional argument
+    sets the type of compression to use (defaults to uncompressed)."""
+    def _inner(ext=""):
+        pro_file = tmp_path / "test.pro"
+        smet_file = tmp_path / "test.smet"
     
-    smet_file = tmp_path / "test.smet"
-    smet_file.write_text(smet_data_content)
+        if ext:
+            save_compressed(pro_file, pro_data_content, ext)
+            save_compressed(smet_file, smet_data_content, ext)
+        else:
+            pro_file.write_text(pro_data_content)
+            smet_file.write_text(smet_data_content)
+
+        return tmp_path
     
-    return tmp_path
+    return _inner
 
 @pytest.fixture
-def multi_station_dir(tmp_path):
+def multi_station_dir(tmp_path, request):
     """Creates a directory with .pro files for two different stations."""
     station_a_content = """
 [STATION_PARAMETERS]
@@ -81,8 +91,36 @@ StationName= station_B
 0501,1,0.2
 0502,1,200
 """
-    (tmp_path / "station_A.pro").write_text(station_a_content)
-    (tmp_path / "station_B.pro").write_text(station_b_content)
+    station_a_file = tmp_path / "station_A.pro"
+    station_b_file = tmp_path / "station_B.pro"
+    if hasattr(request, "param"):
+        save_compressed(station_a_file, station_a_content, request.param)
+        save_compressed(station_b_file, station_b_content, request.param)
+    else:
+        station_a_file.write_text(station_a_content)
+        station_b_file.write_text(station_b_content)
+    return tmp_path
+
+@pytest.fixture
+def multi_dir_data(tmp_path, pro_data_content, smet_data_content, request):
+    not_a_station_content = """
+[STATION_PARAMETERS]
+StationName= NotAStation
+[DATA]
+0500,01.01.2025 12:00:00
+0501,1,0.2
+0502,1,200
+"""
+
+    dir1 = tmp_path / "dir1"
+    dir2 = tmp_path / "dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+
+    save_compressed(dir1 / "not_a_station.profile", not_a_station_content, request.param)
+    save_compressed(dir1 / "test.pro", pro_data_content, request.param)
+    save_compressed(dir2 / "test.smet", smet_data_content, request.param)
+
     return tmp_path
 
 @pytest.fixture
@@ -121,6 +159,7 @@ fields = timestamp TA
 2025-02-09T12:00:00 270.0
 """)
     return initial_dir, update_dir, tmp_path / "merge.smet"
+
 @pytest.fixture
 def io_test_dataset():
     """Creates a minimal xsnowDataset for I/O tests like to_pro."""
@@ -178,13 +217,25 @@ def gridded_data_integrity_check(snp_gridded_sample_dir):
 
     return directory_path
 
+# --- Utility ---
+
+def save_compressed(uncompressed_filepath, content, ext):
+    if ext:
+        compressed_filepath = uncompressed_filepath.with_suffix(uncompressed_filepath.suffix + ext)
+        module = COMPRESSION_MODULES[ext]
+        with module.open(compressed_filepath, "wt") as f:
+            f.write(content)
+    else:
+        uncompressed_filepath.write_text(content)
+
 # --- Test Cases ---
 
-def test_read_single_pro_file(data_directory):
+@pytest.mark.parametrize("compress", ALL_FILE_EXTS)
+def test_read_single_pro_file(data_directory, compress):
     """
     Tests reading a single .pro file and verifies the data structure.
     """
-    pro_file = data_directory / "test.pro"
+    pro_file = data_directory(compress) / ("test.pro" + compress)
     ds = read(pro_file)
     assert isinstance(ds, xsnowDataset)
     assert 'layer' in ds.dims
@@ -194,11 +245,12 @@ def test_read_single_pro_file(data_directory):
     actual_density = profile1['density'].isel(layer=2).item()
     assert np.isclose(actual_density, expected_density)
 
-def test_single_smet_file_metadata(data_directory):
+@pytest.mark.parametrize("compress", ALL_FILE_EXTS)
+def test_single_smet_file_metadata(data_directory, compress):
     """
     Tests reading a single .smet file and verifies the metadata of the dataset and variables.
     """
-    smet_file = data_directory / "test.smet"
+    smet_file = data_directory(compress) / ("test.smet" + compress)
     ds = read(smet_file)
     assert ds.attrs
     assert 'crs' in ds.attrs
@@ -208,11 +260,12 @@ def test_single_smet_file_metadata(data_directory):
         assert 'units' in ds[var].attrs
         assert 'standard_name' in ds[var].attrs
 
-def test_single_pro_file_metadata(data_directory):
+@pytest.mark.parametrize("compress", ALL_FILE_EXTS)
+def test_single_pro_file_metadata(data_directory, compress):
     """
     Tests reading a single .pro file and verifies the metadata of the dataset and variables.
     """
-    pro_file = data_directory / "test.pro"
+    pro_file = data_directory(compress) / ("test.pro" + compress)
     ds = read(pro_file)
     assert ds.attrs
     assert 'crs' in ds.attrs
@@ -222,12 +275,23 @@ def test_single_pro_file_metadata(data_directory):
     assert 'timezone' in ds['time'].attrs
     assert ds['time'].attrs['timezone'] == 'UTC+01:00'  # converted from int
 
-def test_read_from_directory(data_directory):
+@pytest.mark.parametrize("compress", ALL_FILE_EXTS)
+def test_read_from_directory(data_directory, compress):
     """
     Tests reading all files from a directory and merging the data.
     """
-    ds = read(data_directory)
+    ds = read(data_directory(compress))
     assert isinstance(ds, xsnowDataset)
+    assert 'density' in ds.data.data_vars
+    assert 'TA' in ds.data.data_vars
+    assert 'layer' not in ds.data['TA'].dims
+
+@pytest.mark.parametrize("multi_dir_data", ALL_FILE_EXTS, indirect=True)
+def test_recursive_read(multi_dir_data):
+    ds = read(multi_dir_data, recursive=True)
+    assert isinstance(ds, xsnowDataset)
+    assert "NotAStation" not in ds.location.values
+    assert ds.location.values == ["TEST_STATION"]
     assert 'density' in ds.data.data_vars
     assert 'TA' in ds.data.data_vars
     assert 'layer' not in ds.data['TA'].dims
@@ -237,7 +301,7 @@ def test_read_with_time_selector_at_source(data_directory):
     Tests at-the-source filtering using a TimeSelector.
     """
     time_filter = TimeSelector(sel=slice('2025-01-02 00:00:00', '2025-01-02 23:59:59'))
-    ds = read(data_directory, time=time_filter)
+    ds = read(data_directory(), time=time_filter)
     assert isinstance(ds, xsnowDataset)
     assert ds.sizes['time'] == 1
     loaded_time = pd.to_datetime(ds.time.values[0])
@@ -247,7 +311,7 @@ def test_read_with_max_layers_kwarg(data_directory):
     """
     Tests passing parser-specific keyword arguments like `max_layers`.
     """
-    ds = read(data_directory, max_layers=3)
+    ds = read(data_directory(), max_layers=3)
     assert isinstance(ds, xsnowDataset)
     assert ds.sizes['layer'] == 3
     last_layer_density = ds.data['density'].sel(time='2025-01-02 12:00:00').isel(layer=-1).item()
@@ -260,6 +324,7 @@ def test_read_empty_directory(tmp_path):
     ds = read(tmp_path)
     assert ds is None
 
+@pytest.mark.parametrize("multi_station_dir", ALL_FILE_EXTS, indirect=True)
 def test_read_with_integer_location_index(multi_station_dir):
     """
     Tests that read() creates string-based location coordinates (not integer indices).
@@ -592,7 +657,8 @@ def test_read_real_pro_with_mixed_sh(snp_gridded_sample_dir):
             # This is an SH profile, verify its properties
             assert np.isclose(top_layer['grain_type'].item(), 660)
             assert np.isclose(top_layer['density'].item(), 100)
-            assert np.isclose(top_layer['grain_size'].item(), 0.5)
+            assert top_layer['grain_size'].attrs["units"] == "m"
+            assert np.isclose(top_layer['grain_size'].item(), 0.0005)
             found_sh_profile = True
         
         # FIX: A valid, non-SH profile is one where the temperature is NOT NaN.

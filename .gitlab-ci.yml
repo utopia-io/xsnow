@@ -292,13 +292,12 @@ performance-parser:
     - apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
     - python -m pip install --upgrade pip
     - pip install -r docs/requirements.txt
-    - pip install -e .
+    - pip install -e ".[viz]"
     - python dist/update_footer_citation.py
   cache:
     key: "pip-docs"
     paths:
       - .cache/pip
-      - public/
     policy: pull-push
   artifacts:
     paths: [ public ]
@@ -326,9 +325,59 @@ performance-parser:
 #     - python dist/publish_zenodo.py --tag "$CI_COMMIT_TAG"
 
 ########################################
+# Root Pages deployment -> /
+########################################
+pages-root:
+  stage: docs
+  script:
+    - rm -rf public
+    - mkdir -p public/versionpicker
+    - |
+      printf '%s\n' \
+        '<!doctype html>' \
+        '<meta charset="utf-8">' \
+        '<meta http-equiv="refresh" content="0; url=./stable/">' \
+        '<link rel="canonical" href="./stable/">' \
+        '<title>Redirecting...</title>' \
+        '<p>Redirecting to <a href="./stable/">stable</a> docs...</p>' \
+        '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
+        > public/index.html
+    - |
+      {
+        echo '<!doctype html><meta charset="utf-8">';
+        echo '<title>xsnow documentation versions</title>';
+        echo '<h1>xsnow documentation versions</h1>';
+        echo '<ul>';
+        echo '  <li><a href="../stable/">stable</a> (default)</li>';
+        echo '  <li><a href="../dev/">dev</a> (bleeding edge)</li>';
+        for tag in $(git tag --sort=-v:refname); do
+          prefix=$(printf '%s' "$tag" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -e 's/[^a-z0-9.]/-/g' -e 's/^[.-]*//' \
+            | cut -b1-63 \
+            | sed -e 's/[.-]*$//')
+          if [ -n "$prefix" ]; then
+            echo "  <li><a href=\"../${prefix}/\">${tag}</a></li>";
+          fi
+        done
+        echo '</ul>';
+        echo '<p>Tip: You can directly visit /stable/, /dev/, or a tagged release such as /v0.1.0/.</p>';
+      } > public/versionpicker/index.html
+  pages:
+    publish: public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+    - if: $CI_COMMIT_BRANCH == "dev"
+      when: on_success
+    - if: $CI_COMMIT_TAG
+      when: on_success
+    - when: never
+
+########################################
 # Docs from default branch  -> /stable/
 ########################################
-docs-stable:
+pages-stable:
   <<: *default-docs
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
@@ -343,76 +392,29 @@ docs-stable:
     - mkdir -p docs/api/_generated
     - sphinx-apidoc -f -e -o docs/api/_generated src/xsnow
     - sed -i '1s/^xsnow\.extensions\.//' docs/api/_generated/*.rst || true
+    - sed -i '1s/^xsnow\.io\./io./' docs/api/_generated/*.rst || true
     - sed -i '1s/^xsnow\.//' docs/api/_generated/*.rst || true
+    - sed -i '/^Submodules$/,/^Module contents$/ { /^Module contents$/!d; }' docs/api/_generated/xsnow.io.rst || true
+    - sed -i '/^Module contents$/,+2d' docs/api/_generated/xsnow.io.rst || true
     - jupyter-book build docs
-    - mkdir -p public/stable
-    - cp -r docs/_build/html/* public/stable/
-    - |
-      mkdir -p public
-      if [ -d public/stable ]; then
-        printf '%s\n' \
-          '<!doctype html>' \
-          '<meta charset="utf-8">' \
-          '<meta http-equiv="refresh" content="0; url=./stable/">' \
-          '<link rel="canonical" href="./stable/">' \
-          '<title>Redirecting…</title>' \
-          '<p>Redirecting to <a href="./stable/">stable</a> docs…</p>' \
-          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
-          > public/index.html
-      elif [ -d public/dev ]; then
-        printf '%s\n' \
-          '<!doctype html>' \
-          '<meta charset="utf-8">' \
-          '<meta http-equiv="refresh" content="0; url=./dev/">' \
-          '<link rel="canonical" href="./dev/">' \
-          '<title>Redirecting…</title>' \
-          '<p>Redirecting to <a href="./dev/">dev</a> docs…</p>' \
-          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
-          > public/index.html
-      else
-        printf '%s\n' \
-          '<!doctype html>' \
-          '<meta charset="utf-8">' \
-          '<title>xsnow documentation</title>' \
-          '<h1>xsnow documentation</h1>' \
-          '<p>No built documentation folders are currently available.</p>' \
-          > public/index.html
-      fi
-    - |
-      mkdir -p public/versionpicker
-      {
-        echo '<!doctype html><meta charset="utf-8">';
-        echo '<title>xsnow documentation versions</title>';
-        echo '<h1>xsnow documentation versions</h1>';
-        echo '<ul>';
-        if [ -d public/stable ]; then
-          echo '  <li><a href="../stable/">stable</a> (default)</li>';
-        fi
-        if [ -d public/dev ]; then
-          echo '  <li><a href="../dev/">dev</a> (bleeding edge)</li>';
-        fi
-        for d in public/*/ ; do
-          bn=$(basename "$d" /)
-          if [ "$bn" != "stable" ] && [ "$bn" != "dev" ] && [ "$bn" != "versionpicker" ]; then
-            echo "  <li><a href=\"../${bn}/\">${bn}</a></li>";
-          fi
-        done
-        echo '</ul>';
-        echo '<p>Tip: You can directly visit /stable/, /dev/, or /vX.Y.Z/ (tagged releases).';
-        echo ' During early development, /dev/ may be the only one available.</p>';
-      } > public/versionpicker/index.html
+    - rm -rf public
+    - mkdir -p public
+    - cp -a docs/_build/html/. public/
+  pages:
+    publish: public
+    path_prefix: stable
+    expire_in: never
 
 ########################################
 # Docs from dev branch -> /dev/
 ########################################
-docs-dev:
+pages-dev:
   <<: *default-docs
   rules:
     - if: $CI_COMMIT_BRANCH == "dev"
       when: always
   allow_failure: true
   script:
-    - rm -rf public/latest || true
     - export XSNOW_VERSION=$(python -c "import xsnow; print(xsnow.__version__)")
     - export DOC_LABEL="dev (${XSNOW_VERSION})"
     - sed -i "s/ENV_DOC_VERSION/${DOC_LABEL}/" docs/index.md
@@ -422,69 +424,23 @@ docs-dev:
     - mkdir -p docs/api/_generated
     - sphinx-apidoc -f -e -o docs/api/_generated src/xsnow
     - sed -i '1s/^xsnow\.extensions\.//' docs/api/_generated/*.rst || true
+    - sed -i '1s/^xsnow\.io\./io./' docs/api/_generated/*.rst || true
     - sed -i '1s/^xsnow\.//' docs/api/_generated/*.rst || true
-    - jupyter-book build docs || true
-    - mkdir -p public/dev
-    - if [ -d docs/_build/html ]; then cp -r docs/_build/html/* public/dev/; fi
-    - |
-      mkdir -p public
-      if [ -d public/stable ]; then
-        printf '%s\n' \
-          '<!doctype html>' \
-          '<meta charset="utf-8">' \
-          '<meta http-equiv="refresh" content="0; url=./stable/">' \
-          '<link rel="canonical" href="./stable/">' \
-          '<title>Redirecting…</title>' \
-          '<p>Redirecting to <a href="./stable/">stable</a> docs…</p>' \
-          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
-          > public/index.html
-      elif [ -d public/dev ]; then
-        printf '%s\n' \
-          '<!doctype html>' \
-          '<meta charset="utf-8">' \
-          '<meta http-equiv="refresh" content="0; url=./dev/">' \
-          '<link rel="canonical" href="./dev/">' \
-          '<title>Redirecting…</title>' \
-          '<p>Redirecting to <a href="./dev/">dev</a> docs…</p>' \
-          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
-          > public/index.html
-      else
-        printf '%s\n' \
-          '<!doctype html>' \
-          '<meta charset="utf-8">' \
-          '<title>xsnow documentation</title>' \
-          '<h1>xsnow documentation</h1>' \
-          '<p>No built documentation folders are currently available.</p>' \
-          > public/index.html
-      fi
-    - |
-      mkdir -p public/versionpicker
-      {
-        echo '<!doctype html><meta charset="utf-8">';
-        echo '<title>xsnow documentation versions</title>';
-        echo '<h1>xsnow documentation versions</h1>';
-        echo '<ul>';
-        if [ -d public/stable ]; then
-          echo '  <li><a href="../stable/">stable</a> (default)</li>';
-        fi
-        if [ -d public/dev ]; then
-          echo '  <li><a href="../dev/">dev</a> (bleeding edge)</li>';
-        fi
-        for d in public/*/ ; do
-          bn=$(basename "$d" /)
-          if [ "$bn" != "stable" ] && [ "$bn" != "dev" ] && [ "$bn" != "versionpicker" ]; then
-            echo "  <li><a href=\"../${bn}/\">${bn}</a></li>";
-          fi
-        done
-        echo '</ul>';
-        echo '<p>Tip: You can directly visit /stable/, /dev/, or /vX.Y.Z/ (tagged releases).';
-        echo ' During early development, /dev/ may be the only one available.</p>';
-      } > public/versionpicker/index.html
+    - sed -i '/^Submodules$/,/^Module contents$/ { /^Module contents$/!d; }' docs/api/_generated/xsnow.io.rst || true
+    - sed -i '/^Module contents$/,+2d' docs/api/_generated/xsnow.io.rst || true
+    - jupyter-book build docs
+    - rm -rf public
+    - mkdir -p public
+    - cp -a docs/_build/html/. public/
+  pages:
+    publish: public
+    path_prefix: dev
+    expire_in: never
 
 ########################################
 # Docs from git tag (release) -> /<tag>/
 ########################################
-docs-tagged:
+pages-tagged:
   <<: *default-docs
   rules:
     - if: $CI_COMMIT_TAG
@@ -498,87 +454,15 @@ docs-tagged:
     - mkdir -p docs/api/_generated
     - sphinx-apidoc -f -e -o docs/api/_generated src/xsnow
     - sed -i '1s/^xsnow\.extensions\.//' docs/api/_generated/*.rst || true
+    - sed -i '1s/^xsnow\.io\./io./' docs/api/_generated/*.rst || true
     - sed -i '1s/^xsnow\.//' docs/api/_generated/*.rst || true
+    - sed -i '/^Submodules$/,/^Module contents$/ { /^Module contents$/!d; }' docs/api/_generated/xsnow.io.rst || true
+    - sed -i '/^Module contents$/,+2d' docs/api/_generated/xsnow.io.rst || true
     - jupyter-book build docs
-    - mkdir -p "public/${CI_COMMIT_TAG}"
-    - cp -r docs/_build/html/* "public/${CI_COMMIT_TAG}/"
-    - |
-      mkdir -p public
-      if [ -d public/stable ]; then
-        printf '%s\n' \
-          '<!doctype html>' \
-          '<meta charset="utf-8">' \
-          '<meta http-equiv="refresh" content="0; url=./stable/">' \
-          '<link rel="canonical" href="./stable/">' \
-          '<title>Redirecting…</title>' \
-          '<p>Redirecting to <a href="./stable/">stable</a> docs…</p>' \
-          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
-          > public/index.html
-      elif [ -d public/dev ]; then
-        printf '%s\n' \
-          '<!doctype html>' \
-          '<meta charset="utf-8">' \
-          '<meta http-equiv="refresh" content="0; url=./dev/">' \
-          '<link rel="canonical" href="./dev/">' \
-          '<title>Redirecting…</title>' \
-          '<p>Redirecting to <a href="./dev/">dev</a> docs…</p>' \
-          '<p>Looking for other versions? See <a href="./versionpicker/">version picker</a>.</p>' \
-          > public/index.html
-      else
-        printf '%s\n' \
-          '<!doctype html>' \
-          '<meta charset="utf-8">' \
-          '<title>xsnow documentation</title>' \
-          '<h1>xsnow documentation</h1>' \
-          '<p>No built documentation folders are currently available.</p>' \
-          > public/index.html
-      fi
-    - |
-      mkdir -p public/versionpicker
-      {
-        echo '<!doctype html><meta charset="utf-8">';
-        echo '<title>xsnow documentation versions</title>';
-        echo '<h1>xsnow documentation versions</h1>';
-        echo '<ul>';
-        if [ -d public/stable ]; then
-          echo '  <li><a href="../stable/">stable</a> (default)</li>';
-        fi
-        if [ -d public/dev ]; then
-          echo '  <li><a href="../dev/">dev</a> (bleeding edge)</li>';
-        fi
-        for d in public/*/ ; do
-          bn=$(basename "$d" /)
-          if [ "$bn" != "stable" ] && [ "$bn" != "dev" ] && [ "$bn" != "versionpicker" ]; then
-            echo "  <li><a href=\"../${bn}/\">${bn}</a></li>";
-          fi
-        done
-        echo '</ul>';
-        echo '<p>Tip: You can directly visit /stable/, /dev/, or /vX.Y.Z/ (tagged releases).';
-        echo ' During early development, /dev/ may be the only one available.</p>';
-      } > public/versionpicker/index.html
-
-########################################
-# Publish GitLab Pages
-########################################
-pages:
-  stage: docs
-  needs:
-    - job: docs-stable
-      optional: true
-    - job: docs-dev
-      optional: true
-    - job: docs-tagged
-      optional: true
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      when: on_success
-    - if: $CI_COMMIT_BRANCH == "dev"
-      when: always
-    - if: $CI_COMMIT_TAG
-      when: on_success
-    - when: never
-  allow_failure: true
-  script:
-    - echo "Publishing GitLab Pages artifacts"
-  artifacts:
-    paths: [ public ]
+    - rm -rf public
+    - mkdir -p public
+    - cp -a docs/_build/html/. public/
+  pages:
+    publish: public
+    path_prefix: "$CI_COMMIT_TAG"
+    expire_in: never
