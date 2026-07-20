@@ -607,7 +607,7 @@ def plot_season(
             ...
         ValueError: Station 'NOPE' not in dataset. Available stations: [...]
     """
-    go, make_subplots = _import_plotly()
+    _, make_subplots = _import_plotly()
 
     parameters = list(parameters)
     if not parameters:
