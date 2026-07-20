@@ -16,8 +16,11 @@ import pandas as pd
 import xarray as xr
 from pathlib import Path
 
+import netCDF4
+
 from tests.conftest import ALL_FILE_EXTS, COMPRESSION_MODULES
-from xsnow import read, xsnowDataset
+from xsnow import read, single_profile, xsnowDataset
+from xsnow.io.netcdf import _bounded_chunk_cache
 
 
 # ============================================================================
@@ -842,6 +845,82 @@ StationName= {long_name}
         
         # Should be preserved (up to 64 chars)
         assert original[:64] == loaded[:64]
+
+# ============================================================================
+# NETCDF CHUNK CACHE
+# ============================================================================
+
+@pytest.mark.synthetic
+def test_bounded_chunk_cache_sets_and_restores():
+    outside = netCDF4.get_chunk_cache()
+    current = (outside[0], outside[1] + 1, 0.5)
+    try:
+        netCDF4.set_chunk_cache(*current)
+        with _bounded_chunk_cache(4 * 1024 * 1024):
+            assert netCDF4.get_chunk_cache() == (
+                4 * 1024 * 1024,
+                current[1],
+                current[2],
+            )
+        assert netCDF4.get_chunk_cache() == current
+    finally:
+        netCDF4.set_chunk_cache(*outside)
+
+
+@pytest.mark.synthetic
+def test_bounded_chunk_cache_none_is_noop():
+    outside = netCDF4.get_chunk_cache()
+    with _bounded_chunk_cache(None):
+        assert netCDF4.get_chunk_cache() == outside
+
+
+@pytest.mark.synthetic
+def test_chunk_cache_size_roundtrip_kwarg(tmp_path, compare_datasets):
+    """to_netcdf and read accept chunk_cache_size and still roundtrip."""
+    ds = single_profile()
+    nc_path = tmp_path / "chunk_cache.nc"
+    ds.to_netcdf(nc_path, chunk_cache_size=2 * 1024 * 1024)
+
+    ds_loaded = read(nc_path, chunk_cache_size=2 * 1024 * 1024)
+    compare_datasets(ds, ds_loaded)
+
+    ds_unclamped = read(nc_path, chunk_cache_size=None)
+    compare_datasets(ds, ds_unclamped)
+
+
+@pytest.mark.synthetic
+def test_chunk_cache_size_lazy_read(tmp_path):
+    """A lazy read applies the cache at open and remains usable afterward."""
+    ds = single_profile()
+    nc_path = tmp_path / "lazy_chunk_cache.nc"
+    ds.to_netcdf(nc_path)
+    expected_height = ds["height"].values.copy()
+
+    outside = netCDF4.get_chunk_cache()
+    cache_size = 2 * 1024 * 1024
+
+    loaded = read(nc_path, lazy=True, chunk_cache_size=cache_size)
+    try:
+        assert loaded is not None
+        assert netCDF4.get_chunk_cache() == outside
+        assert not loaded.data["height"].variable._in_memory
+
+        # Unwrap xarray's lazy indexing adapters to inspect the file-backed
+        # netCDF4 variable before forcing data into memory.
+        backend_array = loaded.data["height"].variable._data
+        while hasattr(backend_array, "array"):
+            backend_array = backend_array.array
+        assert backend_array.get_array().get_var_chunk_cache() == (
+            cache_size,
+            outside[1],
+            outside[2],
+        )
+
+        np.testing.assert_allclose(loaded["height"].values, expected_height)
+    finally:
+        if loaded is not None:
+            loaded.close()
+
 
 # ============================================================================
 # UTILITY
