@@ -25,14 +25,6 @@ from ..utils import get_logger, _promote_slope_metadata_coords, reorder_dims
 
 from .base import _round_coord
 
-# netCDF4's default per-variable HDF5 chunk cache is 64 MB, allocated as each
-# variable is touched and retained until its file handle closes. Across the
-# many variables of a snow dataset that can accumulate gigabytes on one open
-# handle. The following values are netCDF4's defaults, while the memory chunk
-# size is a user setting and applied around open/create moments.
-_CHUNK_CACHE_NELEMS = 521
-_CHUNK_CACHE_PREEMPTION = 0.75
-
 
 @contextmanager
 def _bounded_chunk_cache(cache_bytes: Optional[int]):
@@ -41,14 +33,14 @@ def _bounded_chunk_cache(cache_bytes: Optional[int]):
 
     Arguments:
         cache_bytes: Cache size in bytes, or None to leave netCDF4's
-            process-global default untouched.
+            current process-global setting untouched.
     """
     if cache_bytes is None:
         yield
         return
     previous = netCDF4.get_chunk_cache()
-    netCDF4.set_chunk_cache(cache_bytes, _CHUNK_CACHE_NELEMS,
-        _CHUNK_CACHE_PREEMPTION)
+    _, nelems, preemption = previous
+    netCDF4.set_chunk_cache(cache_bytes, nelems, preemption)
     try:
         yield
     finally:
@@ -87,9 +79,9 @@ def _read_xsnow_netcdf(
         realization_sel: RealizationSelector for filtering by realization
             (already coerced).
         chunk_cache_size: Per-variable netCDF4/HDF5 chunk cache in bytes
-            while the file is open. None leaves netCDF4's process default
-            (64 MB per variable) untouched; set a small value (e.g. 1 MB)
-            to bound memory on datasets with many variables.
+            while the file is open. None leaves the process's current netCDF4
+            setting untouched; set a small value (e.g. 1 MiB) to limit
+            aggregate chunk-cache memory on datasets with many variables.
 
     Returns:
         An xsnowDataset instance, or None if reading fails.
@@ -236,9 +228,9 @@ def to_netcdf(
         compress: zlib-compress the data variables.
         complevel: zlib compression level (1-9) when compress is True.
         chunk_cache_size: Per-variable netCDF4/HDF5 chunk cache in bytes
-            during the write. None leaves netCDF4's process default
-            (64 MB per variable) untouched; set a small value (e.g. 1 MB)
-            to bound memory on datasets with many variables.
+            during the write. None leaves the process's current netCDF4
+            setting untouched; set a small value (e.g. 1 MiB) to limit
+            aggregate chunk-cache memory on datasets with many variables.
         **kwargs: Additional keyword arguments passed to `xarray.Dataset.to_netcdf()`.
     """
     if ds.data is None:

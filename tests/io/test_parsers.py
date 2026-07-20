@@ -329,7 +329,6 @@ def test_parse_file_empty_data_section(tmp_path, synthetic_pro):
     metadata = _read_pro_metadata(empty_data_section, throw=False)
     assert metadata['station_name'] == "EMPTY_DATA_SECTION"
 
-
 @pytest.mark.synthetic
 def test_read_pro_raw_soil_removal_all_soil(tmp_path, synthetic_pro):
     """

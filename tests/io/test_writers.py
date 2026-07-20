@@ -853,9 +853,18 @@ StationName= {long_name}
 @pytest.mark.synthetic
 def test_bounded_chunk_cache_sets_and_restores():
     outside = netCDF4.get_chunk_cache()
-    with _bounded_chunk_cache(4 * 1024 * 1024):
-        assert netCDF4.get_chunk_cache()[0] == 4 * 1024 * 1024
-    assert netCDF4.get_chunk_cache() == outside
+    current = (outside[0], outside[1] + 1, 0.5)
+    try:
+        netCDF4.set_chunk_cache(*current)
+        with _bounded_chunk_cache(4 * 1024 * 1024):
+            assert netCDF4.get_chunk_cache() == (
+                4 * 1024 * 1024,
+                current[1],
+                current[2],
+            )
+        assert netCDF4.get_chunk_cache() == current
+    finally:
+        netCDF4.set_chunk_cache(*outside)
 
 
 @pytest.mark.synthetic
@@ -877,6 +886,40 @@ def test_chunk_cache_size_roundtrip_kwarg(tmp_path, compare_datasets):
 
     ds_unclamped = read(nc_path, chunk_cache_size=None)
     compare_datasets(ds, ds_unclamped)
+
+
+@pytest.mark.synthetic
+def test_chunk_cache_size_lazy_read(tmp_path):
+    """A lazy read applies the cache at open and remains usable afterward."""
+    ds = single_profile()
+    nc_path = tmp_path / "lazy_chunk_cache.nc"
+    ds.to_netcdf(nc_path)
+    expected_height = ds["height"].values.copy()
+
+    outside = netCDF4.get_chunk_cache()
+    cache_size = 2 * 1024 * 1024
+
+    loaded = read(nc_path, lazy=True, chunk_cache_size=cache_size)
+    try:
+        assert loaded is not None
+        assert netCDF4.get_chunk_cache() == outside
+        assert not loaded.data["height"].variable._in_memory
+
+        # Unwrap xarray's lazy indexing adapters to inspect the file-backed
+        # netCDF4 variable before forcing data into memory.
+        backend_array = loaded.data["height"].variable._data
+        while hasattr(backend_array, "array"):
+            backend_array = backend_array.array
+        assert backend_array.get_array().get_var_chunk_cache() == (
+            cache_size,
+            outside[1],
+            outside[2],
+        )
+
+        np.testing.assert_allclose(loaded["height"].values, expected_height)
+    finally:
+        if loaded is not None:
+            loaded.close()
 
 
 # ============================================================================

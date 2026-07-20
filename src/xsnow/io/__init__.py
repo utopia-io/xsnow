@@ -153,12 +153,13 @@ def read(
               datasets preserve stored attrs and validate present
               `attrs["units"]` against xsnow units: `'strict'` raises on
               mismatches, while `'light'` warns and leaves attrs unchanged.
-            - `chunk_cache_size`: NetCDF sources only. Per-variable
-              netCDF4/HDF5 chunk cache in bytes while the file is open.
-              By default netCDF4's process default (64 MB per variable) is
-              left untouched; that can accumulate gigabytes across the many
-              variables of a snow dataset on one open handle, so set a small
-              value (e.g. 1 MB) to bound memory on variable-rich datasets.
+            - `chunk_cache_size`: NetCDF sources only. Size in bytes of each
+              netCDF4/HDF5 per-variable chunk cache while the file is open.
+              By default, xsnow leaves the process's current netCDF4 setting
+              untouched. On datasets with many variables, these caches can
+              collectively consume gigabytes. Set a smaller value (e.g. 1 MiB:
+              `1024**2`, or `1_048_576` bytes) to limit aggregate chunk-cache
+              memory. Smaller caches may reduce I/O performance.
             - `norm_slopes`: Controls slope coordinate normalization during
               final merging:
                 * `'auto'` (default): normalize when slopes are consistent
