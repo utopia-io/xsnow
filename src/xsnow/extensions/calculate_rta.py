@@ -1,23 +1,25 @@
 import numpy as np
 import xarray as xr
+from typing import Any, Optional
 from xsnow import registry
+from xsnow.core import xsnowDataset
 from xsnow.plugin import register_xsnowDataset_method
 from xsnow.extensions.assign import assign_to_dataset
 
 @register_xsnowDataset_method
-def compute_rta(ds: xr.Dataset, rta_threshold=0.8) -> xr.Dataset:
+def compute_rta(xs: Any, rta_threshold=0.8) -> xsnowDataset:
     """
     Compute Relative Threshold Area (RTA) for each profile in an xsnow Dataset.
     This is a translation of sarp.snowprofile::computeRTA().
     """
     #dataset_cls = ds.__class__
-    depth      = ds["height"].values
-    hardness   = ds["hand_hardness"].values
-    grain_size = ds["grain_size"].values
-    grain_type = ds["grain_type"].values
-    grain_type_str = ds["grain_type"].icssg.primary().values
-    hard_diff  = ds["hardness_difference"].values
-    gs_diff    = ds["gs_difference"].values
+    depth      = xs["height"].values
+    hardness   = xs["hand_hardness"].values
+    grain_size = xs["grain_size"].values
+    grain_type = xs["grain_type"].values
+    grain_type_str = xs["grain_type"].icssg.primary().values
+    hard_diff  = xs["hardness_difference"].values
+    gs_diff    = xs["gs_difference"].values
 
     *outer_shape, L = depth.shape
        
@@ -48,23 +50,23 @@ def compute_rta(ds: xr.Dataset, rta_threshold=0.8) -> xr.Dataset:
     rta_max = np.nanmax(rta, axis=-1)
     rta = rta / np.where(rta_max[..., None] == 0, 1.0, rta_max[..., None])
 
-    dims = ds["height"].dims
+    dims = xs["height"].dims
     outer_dims = dims[:-1]
-    coords = {d: ds[d].values for d in outer_dims}
-    coords["layer"] = ds["height"].coords["layer"].values
+    coords = {d: xs[d].values for d in outer_dims}
+    coords["layer"] = xs["height"].coords["layer"].values
     dsArray = xr.DataArray(rta, dims=dims, coords=coords, name="rta")
-    ds = assign_to_dataset(ds, dsArray, "rta", "Relative Threshold Area", "dimensionless")
-    sk38_masked = ds['sk38'].where(ds['rta'] > rta_threshold)
-    ds = assign_to_dataset(ds, sk38_masked, "sk38_masked", f"Sk38 Hardness Masked by RTA > {rta_threshold}", "dimensionless")
+    xs = assign_to_dataset(xs, dsArray, "rta", "Relative Threshold Area", "dimensionless")
+    sk38_masked = xs['sk38'].where(xs['rta'] > rta_threshold)
+    xs = assign_to_dataset(xs, sk38_masked, "sk38_masked", f"Sk38 Hardness Masked by RTA > {rta_threshold}", "dimensionless")
 
-    ds = _rta_interface(
-        ds, hardness, grain_size, grain_type_str, dhard_lower, dgsize_lower, weibull_adj,
+    xs = _rta_interface(
+        xs, hardness, grain_size, grain_type_str, dhard_lower, dgsize_lower, weibull_adj,
         hbar, gbar, dhbar, dgbar, wbar,
         sd_h, sd_g, sd_dh, sd_dg, sd_w,
         dims, coords
     )
     
-    return ds #dataset_cls(ds)
+    return xsnowDataset(xs)
 
 #region rta helpers
 def _rta_interface(ds, hardness, grain_size, grain_type, dhard_lower, dgsize_lower, weibull_adj, hbar, gbar, dhbar, dgbar, wbar, sd_h, sd_g, sd_dh, sd_dg, sd_w, dims, coords) -> xr.DataArray:

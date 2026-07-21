@@ -43,16 +43,16 @@ def test_compute_rta_attaches_expected_outputs(rta_ds):
     """Tests that compute_rta adds the expected outputs and preserves dims."""
     ds_with_rta = rta_ds.compute_rta(rta_threshold=0.8)
 
-    assert isinstance(ds_with_rta, xr.Dataset)
-    assert "rta" in ds_with_rta
-    assert "rta_interface" in ds_with_rta
-    assert "sk38_masked" in ds_with_rta
+    assert isinstance(ds_with_rta, xsnowDataset)
+    assert "rta" in ds_with_rta.data
+    assert "rta_interface" in ds_with_rta.data
+    assert "sk38_masked" in ds_with_rta.data
 
-    assert ds_with_rta["rta"].dims == ("location", "time", "layer")
-    assert ds_with_rta["rta_interface"].dims == ("location", "time", "layer")
-    assert ds_with_rta["sk38_masked"].dims == ("location", "time", "layer")
+    assert ds_with_rta.data["rta"].dims == ("location", "time", "layer")
+    assert ds_with_rta.data["rta_interface"].dims == ("location", "time", "layer")
+    assert ds_with_rta.data["sk38_masked"].dims == ("location", "time", "layer")
 
-    assert np.isclose(np.nanmax(ds_with_rta["rta"].values), 1.0)
-    assert np.isclose(np.nanmax(ds_with_rta["rta_interface"].values), 1.0)
-    assert np.isfinite(ds_with_rta["rta"].values).any()
-    assert np.isfinite(ds_with_rta["rta_interface"].values).any()
+    assert np.isclose(np.nanmax(ds_with_rta.data["rta"].values), 1.0)
+    assert np.isclose(np.nanmax(ds_with_rta.data["rta_interface"].values), 1.0)
+    assert np.isfinite(ds_with_rta.data["rta"].values).any()
+    assert np.isfinite(ds_with_rta.data["rta_interface"].values).any()
