@@ -10,6 +10,16 @@ PRO_DATACODE_MAP = {
 
 @register_xsnowDataset_method
 def assign_to_dataset(ds, dataArray, name, longName, units, data_code=None):
+    '''
+    Assign a DataArray to an xsnowDataset, preserving metadata and registry information.
+    Parameters:
+    - ds: The xsnowDataset or xarray.Dataset to which the DataArray will be assigned.
+    - dataArray: The xarray.DataArray to assign.
+    - name: The name of the variable to assign in the dataset.
+    - longName: A descriptive long name for the variable.
+    - units: The units of the variable.
+    - data_code: Optional data code for registry purposes. If not provided, it will be inferred from the name using PRO_DATACODE_MAP.
+    '''
     base_ds = ds.data if hasattr(ds, "data") else ds
     if not isinstance(base_ds, xr.Dataset):
         raise TypeError(f"Unsupported dataset type for assignment: {type(ds)!r}")
