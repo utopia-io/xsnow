@@ -1,0 +1,49 @@
+import xarray as xr
+from xsnow import registry
+from xsnow.plugin import register_xsnowDataset_method
+
+PRO_DATACODE_MAP = {
+    "p_unstable": "0609",
+    "p_unstable_proportion": "1131", # proportion of layers with p_unstable > 0.77
+    "rta":"0606",
+}
+
+@register_xsnowDataset_method
+def assign_to_dataset(ds, dataArray, name, longName, units, data_code=None):
+    '''
+    Assign a DataArray to an xsnowDataset, preserving metadata and registry information.
+    Parameters:
+    - ds: The xsnowDataset or xarray.Dataset to which the DataArray will be assigned.
+    - dataArray: The xarray.DataArray to assign.
+    - name: The name of the variable to assign in the dataset.
+    - longName: A descriptive long name for the variable.
+    - units: The units of the variable.
+    - data_code: Optional data code for registry purposes. If not provided, it will be inferred from the name using PRO_DATACODE_MAP.
+    '''
+    base_ds = ds.data if hasattr(ds, "data") else ds
+    if not isinstance(base_ds, xr.Dataset):
+        raise TypeError(f"Unsupported dataset type for assignment: {type(ds)!r}")
+
+    if not isinstance(dataArray, xr.DataArray):
+        dataArray = xr.DataArray(dataArray, name=name)
+
+    # Attach registry metadata if available.
+    reg_entry = dict(registry.get(name, {}))
+    if data_code is None:
+        data_code = PRO_DATACODE_MAP.get(name)
+
+    if data_code is not None:
+        reg_entry.setdefault("data_code", data_code)
+        reg_entry.setdefault("pro_code", data_code)
+        reg_entry.setdefault("code", data_code)
+        reg_entry.setdefault("param_code", data_code)
+        registry[name] = reg_entry
+
+    dataArray.attrs = {
+        'long_name': reg_entry.get('long_name', longName),
+        'units': reg_entry.get('si_units', units),
+        'standard_name': reg_entry.get('standard_name', name),
+    }
+
+    new_xr = base_ds.assign(**{name: dataArray})
+    return new_xr
