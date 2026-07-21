@@ -107,20 +107,23 @@ def read(
         location: A `LocationSelector` object for filtering by station ID.
         slope: A `SlopeSelector` for filtering by slope angle.
         realization: A `RealizationSelector` for filtering by model realization.
-        lazy: If True, use Dask for lazy, memory-efficient loading (good for
-            large datasets). If False, load all data eagerly into memory with
-            parallel processing (good for small to medium datasets). If None
-            (default), auto-detect based on file count.
+        lazy: If True, return Dask-backed data variables. If False, load data
+            eagerly into memory. If None (default), NetCDF and Zarr sources
+            use lazy loading, while PRO/SMET collections choose based on
+            ``lazy_threshold``.
         lazy_threshold: Number of files above which lazy loading is enabled
-            when lazy=None (auto-detect). Default: 30 files.
+            for PRO/SMET collections when ``lazy=None``. Default: 30 files.
         parallel_lazy_creation: If True (default), parallelize the creation of lazy
             datasets using ThreadPoolExecutor. This speeds up the metadata parsing
             phase by 5-15x when working with hundreds or thousands of files.
         n_cpus_use: The number of CPU cores to use. If not provided, defaults
             to min(32, total_cores - 1), with a minimum of 1.
         logger: An optional, pre-configured logger instance.
-        chunks: Chunk sizes for dask arrays when lazy=True. Expected keys are
-            usually 'time' and 'layer'. Default: {'time': 100, 'layer': -1}.
+        chunks: Chunk sizes for Dask arrays when ``lazy=True``.
+            For NetCDF and Zarr, the mapping is forwarded to xarray; None
+            uses xarray/Dask automatic chunking, while ``{}`` requests backend-
+            preferred/native chunks. Ignored for eager archive reads. PRO/SMET
+            sources default to ``{'time': 100, 'layer': -1}``.
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions:
             - `max_layers`: Max layer dimension. `'auto'` (default) uses the
@@ -173,8 +176,15 @@ def read(
         A unified `xsnowDataset` object containing the data from all sources,
         or `None` if no valid data files are found.
 
+    Notes:
+        Lazy NetCDF and Zarr reads keep their backing store available for
+        deferred Dask reads. Call ``dataset.close()`` after the dataset and
+        any derived lazy objects have been computed or are no longer needed.
+        Eager archive reads (``lazy=False``) are loaded and closed before
+        ``read()`` returns.
+
     Examples:
-        >>> # Auto-detect (lazy for many files, eager for few)
+        >>> # Archives default to lazy; text collections use lazy_threshold
         >>> ds = read("data/")
         
         >>> # Force lazy loading for large datasets
@@ -208,7 +218,7 @@ def read(
     # NetCDF files
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
-            # lazy=None (auto) stays eager for a single NetCDF file
+            archive_lazy = True if lazy is None else lazy
             netcdf_kwargs = {}
             if 'chunk_cache_size' in parser_kwargs:
                 netcdf_kwargs['chunk_cache_size'] = parser_kwargs['chunk_cache_size']
@@ -216,7 +226,8 @@ def read(
                 source,
                 unit_validation=parser_kwargs.get('unit_validation', 'strict'),
                 logger=logger,
-                lazy=bool(lazy),
+                lazy=archive_lazy,
+                chunks=chunks,
                 time_sel=time_sel,
                 location_sel=location_sel,
                 slope_sel=slope_sel,
@@ -235,6 +246,7 @@ def read(
         (Path(source).is_dir() and (Path(source) / 'zarr.json').exists())
     ):
         try:
+            archive_lazy = True if lazy is None else lazy
             return _read_zarr(
                 source,
                 time_sel,
@@ -243,6 +255,8 @@ def read(
                 realization_sel,
                 logger,
                 unit_validation=parser_kwargs.get('unit_validation', 'strict'),
+                lazy=archive_lazy,
+                chunks=chunks,
             )
         except UnitValidationError:
             raise
@@ -309,6 +323,21 @@ def read(
         logger=logger,
         norm_slopes=parser_kwargs.get('norm_slopes', 'auto'),
     )
+
+    # Keep the public lazy contract consistent for every text-source result.
+    # SMET is parsed eagerly because it is a row-oriented text format, but a
+    # lazy request still returns Dask-backed arrays after merging.
+    if final_dataset is not None:
+        if lazy:
+            requested_chunks = chunks or {}
+            applicable_chunks = {
+                dim: size
+                for dim, size in requested_chunks.items()
+                if dim in final_dataset.dims
+            }
+            final_dataset = final_dataset.chunk(applicable_chunks or "auto")
+        else:
+            final_dataset.load()
     
     # --- Step 7: Trim padding if requested ---
     if final_dataset is not None and parser_kwargs.get('trim_padding', False):

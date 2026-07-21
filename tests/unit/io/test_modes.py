@@ -10,16 +10,119 @@ Strategy:
   - Verify explicit overrides work correctly
 """
 
-import pytest
+from pathlib import Path
+
+import dask.array as da
 import numpy as np
+import pytest
 import time
+import xarray as xr
 
 from xsnow import read
+
+
+@pytest.fixture(params=("netcdf", "zarr"))
+def archive_path(request, tmp_path) -> Path:
+    """Write the same small dataset to each supported archive backend."""
+    ds = xr.Dataset(
+        data_vars={
+            "marker": (
+                ("location", "time"),
+                np.arange(5, dtype=float).reshape(1, 5),
+            ),
+        },
+        coords={
+            "location": ["TEST"],
+            "time": np.arange(5),
+        },
+    )
+
+    if request.param == "netcdf":
+        path = tmp_path / "archive.nc"
+        ds.to_netcdf(path)
+    else:
+        path = tmp_path / "archive.zarr"
+        ds.chunk({"time": 2}).to_zarr(path)
+
+    return path
 
 
 # ============================================================================
 # CONSISTENCY TESTS
 # ============================================================================
+
+
+@pytest.mark.parametrize("lazy", (None, True, False))
+def test_archive_lazy_modes_have_matching_public_semantics(archive_path, lazy):
+    """Both archive formats default lazy and honor explicit overrides."""
+    loaded = read(archive_path, lazy=lazy)
+
+    assert loaded is not None
+    if lazy is False:
+        assert isinstance(loaded["marker"].data, np.ndarray)
+    else:
+        assert isinstance(loaded["marker"].data, da.Array)
+
+    loaded.close()
+
+
+def test_archive_lazy_mode_honors_custom_chunks(archive_path):
+    """The public chunks argument reaches both lazy archive backends."""
+    loaded = read(archive_path, lazy=True, chunks={"time": 2})
+
+    marker = loaded["marker"]
+    time_axis = marker.get_axis_num("time")
+    assert marker.chunks[time_axis] == (2, 2, 1)
+
+    loaded.close()
+
+
+@pytest.mark.parametrize(
+    "lazy,chunks,expected_chunks",
+    (
+        (None, None, "auto"),
+        (True, None, "auto"),
+        (True, {}, {}),
+        (False, None, None),
+        (False, {"time": 2}, None),
+    ),
+)
+@pytest.mark.parametrize(
+    "archive_kind,opener_name",
+    (("netcdf", "open_dataset"), ("zarr", "open_zarr")),
+)
+def test_archive_reader_forwards_expected_chunks(
+    tmp_path,
+    monkeypatch,
+    lazy,
+    chunks,
+    expected_chunks,
+    archive_kind,
+    opener_name,
+):
+    """Archive readers translate the public chunk policy consistently."""
+    source = tmp_path / ("archive.nc" if archive_kind == "netcdf" else "archive.zarr")
+    if archive_kind == "zarr":
+        source.mkdir()
+        (source / "zarr.json").write_text("{}")
+
+    source_ds = xr.Dataset(
+        {"marker": (("location", "time"), np.ones((1, 2)))},
+        coords={"location": ["TEST"], "time": [0, 1]},
+    )
+    received_chunks = []
+
+    def fake_opener(path, **kwargs):
+        received_chunks.append(kwargs.get("chunks"))
+        return source_ds.copy()
+
+    monkeypatch.setattr(xr, opener_name, fake_opener)
+
+    loaded = read(source, lazy=lazy, chunks=chunks)
+
+    assert loaded is not None
+    assert received_chunks == [expected_chunks]
+    loaded.close()
 
 @pytest.mark.real_data
 def test_eager_vs_lazy_same_results(real_file_subset, compare_datasets):

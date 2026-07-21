@@ -12,7 +12,7 @@ import json
 import logging
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 import netCDF4
 import numpy as np
@@ -52,6 +52,7 @@ def _read_xsnow_netcdf(
     unit_validation: str = "strict",
     logger: Optional[logging.Logger] = None,
     lazy: bool = False,
+    chunks: Optional[Dict[str, int]] = None,
     time_sel=None,
     location_sel=None,
     slope_sel=None,
@@ -69,10 +70,13 @@ def _read_xsnow_netcdf(
         unit_validation: Stored-unit validation mode. `'strict'` raises when
             present unit attrs differ from xsnow units; `'light'` warns.
         logger: Optional logger for validation warnings.
-        lazy: If True, keep the data variables on disk and return a dataset
-            backed by the open file; the caller reads variables on demand
-            (e.g. via .compute()) and closes the dataset. If False (default),
-            load everything into memory and close the file.
+        lazy: If True, return Dask-backed data backed by the open source file;
+            the caller must close the returned dataset. If False (default),
+            load and close the file before returning.
+        chunks: Dask chunk sizes used when ``lazy=True`` and forwarded to
+            ``xarray.open_dataset``. None uses xarray/Dask automatic chunking;
+            ``{}`` requests the NetCDF backend's preferred chunks. Ignored
+            when ``lazy=False``.
         time_sel: TimeSelector for filtering by time (already coerced).
         location_sel: LocationSelector for filtering by location (already coerced).
         slope_sel: SlopeSelector for filtering by slope (already coerced).
@@ -88,8 +92,9 @@ def _read_xsnow_netcdf(
     """
     logger = get_logger(__name__, logger=logger)
 
+    open_chunks = (chunks if chunks is not None else "auto") if lazy else None
     with _bounded_chunk_cache(chunk_cache_size):
-        opened = xr.open_dataset(source)
+        opened = xr.open_dataset(source, chunks=open_chunks)
     try:
         ds = opened
 

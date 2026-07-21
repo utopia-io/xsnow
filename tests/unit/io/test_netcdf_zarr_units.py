@@ -60,7 +60,7 @@ def _mock_zarr_store(tmp_path, monkeypatch, ds: xr.Dataset) -> Path:
     zarr_path = tmp_path / "stored_units.zarr"
     zarr_path.mkdir()
     (zarr_path / "zarr.json").write_text("{}")
-    monkeypatch.setattr(xr, "open_zarr", lambda path: ds.copy())
+    monkeypatch.setattr(xr, "open_zarr", lambda path, **kwargs: ds.copy())
     return zarr_path
 
 

@@ -80,6 +80,25 @@ class TestLazyLoadingDaskArrays:
                 # Should NOT have chunks attribute (not dask)
                 assert not hasattr(var.data, 'chunks'), \
                     f"{var_name} should not be dask array in eager mode"
+
+    @pytest.mark.synthetic
+    @pytest.mark.parametrize("lazy", (True, False))
+    def test_smet_explicit_lazy_mode_matches_public_contract(
+        self,
+        synthetic_smet,
+        tmp_path,
+        lazy,
+    ):
+        """SMET results follow the same Dask/eager output contract as PRO."""
+        smet_file = synthetic_smet.basic(tmp_path, n_timesteps=5)
+
+        ds = read(smet_file, lazy=lazy)
+
+        if lazy:
+            import dask.array as da
+            assert isinstance(ds.data['TA'].data, da.Array)
+        else:
+            assert isinstance(ds.data['TA'].data, np.ndarray)
     
     @pytest.mark.synthetic
     def test_auto_detect_lazy_mode(self, synthetic_pro, tmp_path):
