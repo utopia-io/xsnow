@@ -368,9 +368,10 @@ def test_read_zarr_eager(sample_data_dir, temp_zarr_dir, helper):
     
     # Read back (eager)
     print(f"  Reading from: {output_path}")
-    ds_read = xsnow.read(output_path, lazy=False).data
-    
-    assert ds_read is not None, "Failed to read Zarr"
+    loaded = xsnow.read(output_path, lazy=False)
+    assert loaded is not None, "Failed to read Zarr"
+    ds_read = loaded.data
+
     assert len(ds_read.dims) > 0, "No dimensions"
     
     print(f"✅ Read successfully (eager)")
@@ -401,7 +402,9 @@ def test_read_zarr_lazy(sample_data_dir, temp_zarr_dir, helper):
     
     # Read back (lazy)
     print(f"  Reading from: {output_path}")
-    ds_read = xsnow.read(output_path, lazy=True).data
+    loaded = xsnow.read(output_path, lazy=True)
+    assert loaded is not None, "Failed to read Zarr"
+    ds_read = loaded.data
     
     # Check it's lazy (has chunks)
     has_chunks = False

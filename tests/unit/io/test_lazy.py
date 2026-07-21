@@ -1,4 +1,4 @@
-# tests/integration/test_lazy_loading.py
+# tests/unit/io/test_lazy.py
 """
 Tests for lazy loading behavior with dask arrays.
 
@@ -19,10 +19,10 @@ class TestLazyLoadingDaskArrays:
         """
         Test that lazy=True returns datasets backed by dask arrays.
         """
-        # Create multiple files to trigger lazy mode
+        # Create multiple files for a representative lazy collection
         data_dir = synthetic_pro.multi_station(
             tmp_path,
-            n_stations=12,  # > 10 triggers auto-lazy
+            n_stations=12,
             n_profiles_each=10
         )
         
@@ -46,7 +46,7 @@ class TestLazyLoadingDaskArrays:
     @pytest.mark.synthetic
     def test_lazy_explicit_mode(self, synthetic_pro, tmp_path):
         """Test that explicitly setting lazy=True creates dask arrays."""
-        # Create small dataset (< 10 files, would default to eager)
+        # Create a small dataset (below the default threshold)
         data_dir = synthetic_pro.multi_station(
             tmp_path,
             n_stations=3,
@@ -115,12 +115,12 @@ class TestLazyLoadingDaskArrays:
         
         # Should auto-detect lazy=True and use dask arrays
         assert hasattr(ds.data['height'].data, 'chunks'), \
-            "Should auto-detect lazy=True for > 10 files"
+            "Should auto-detect lazy=True for > 30 files"
     
     @pytest.mark.synthetic
     def test_auto_detect_eager_mode(self, synthetic_pro, tmp_path):
         """Test that eager mode is auto-detected for small datasets."""
-        # Create 5 files (< 10 threshold)
+        # Create 5 files (below the default threshold)
         data_dir = synthetic_pro.multi_station(
             tmp_path,
             n_stations=5,
@@ -132,7 +132,7 @@ class TestLazyLoadingDaskArrays:
         
         # Should auto-detect lazy=False and use numpy arrays
         assert isinstance(ds.data['height'].data, np.ndarray), \
-            "Should auto-detect lazy=False for ≤ 10 files"
+            "Should auto-detect lazy=False for ≤ 30 files"
 
 
 class TestLazyLoadingChunks:

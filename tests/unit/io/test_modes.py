@@ -1,4 +1,4 @@
-# tests/loading/test_loading_modes.py
+# tests/unit/io/test_modes.py
 """
 Tests comparing eager vs lazy loading modes.
 
@@ -226,7 +226,7 @@ def test_eager_vs_lazy_handle_surface_hoar_same(real_file_subset):
 @pytest.mark.synthetic
 def test_auto_detect_small_dataset(tmp_path, synthetic_pro):
     """
-    Test that auto-detection uses EAGER for small datasets (≤10 files).
+    Test that auto-detection uses EAGER below the default 30-file threshold.
     
     Eager is more efficient for small datasets.
     """
@@ -239,16 +239,15 @@ def test_auto_detect_small_dataset(tmp_path, synthetic_pro):
     assert ds is not None
     assert ds.sizes['location'] == 5
     
-    # With ≤10 files, should use eager mode
-    # (We can't directly check which mode was used, but it should work)
+    assert isinstance(ds.data['height'].data, np.ndarray)
 
 
 @pytest.mark.synthetic
 def test_auto_detect_medium_dataset(tmp_path, synthetic_pro):
     """
-    Test that auto-detection uses LAZY for medium datasets (>10 files).
+    Test that auto-detection remains EAGER below the default threshold.
     
-    Lazy is more efficient for larger datasets.
+    Lazy mode is reserved for collections above 30 files by default.
     """
     # Create 15 files (medium dataset)
     synthetic_pro.multi_station(tmp_path, n_stations=15, n_profiles_each=2)
@@ -259,8 +258,7 @@ def test_auto_detect_medium_dataset(tmp_path, synthetic_pro):
     assert ds is not None
     assert ds.sizes['location'] == 15
     
-    # With >10 files, should use lazy mode
-    # (We can't directly check which mode was used, but it should work)
+    assert isinstance(ds.data['height'].data, np.ndarray)
 
 
 @pytest.mark.real_data
@@ -268,7 +266,7 @@ def test_auto_detect_large_dataset(gridded_pros_dir):
     """
     Test auto-detection with real large dataset.
     
-    Real datasets typically have >10 files, so should use lazy.
+    Real gridded datasets typically exceed the 30-file default threshold.
     """
     # Auto-detect
     ds = read(gridded_pros_dir, lazy=None, n_cpus_use=4)
@@ -278,28 +276,29 @@ def test_auto_detect_large_dataset(gridded_pros_dir):
 
 
 @pytest.mark.synthetic
-@pytest.mark.parametrize("n_files,expected_threshold", [
+@pytest.mark.parametrize("n_files,expected_mode", [
     (5, "eager"),   # ≤10: eager
     (10, "eager"),  # =10: eager
     (11, "lazy"),   # >10: lazy
     (20, "lazy"),   # >10: lazy
 ])
-def test_auto_detect_threshold_boundary(tmp_path, synthetic_pro, n_files, expected_threshold):
+def test_auto_detect_threshold_boundary(tmp_path, synthetic_pro, n_files, expected_mode):
     """
-    Test auto-detection at threshold boundaries.
+    Test auto-detection around a configured threshold.
     
-    Threshold is 10 files: ≤10 uses eager, >10 uses lazy.
+    With ``lazy_threshold=10``, ≤10 files use eager and >10 use lazy.
     """
     # Create exact number of files
     synthetic_pro.multi_station(tmp_path, n_stations=n_files, n_profiles_each=1)
     
-    # Auto-detect
-    ds = read(tmp_path, lazy=None, n_cpus_use=2)
+    ds = read(tmp_path, lazy=None, lazy_threshold=10, n_cpus_use=2)
     
     assert ds is not None
     assert ds.sizes['location'] == n_files
+    is_lazy = hasattr(ds.data['height'].data, 'chunks')
+    assert is_lazy is (expected_mode == "lazy")
     
-    print(f"\n{n_files} files → expected {expected_threshold} mode")
+    print(f"\n{n_files} files → expected {expected_mode} mode")
 
 
 # ============================================================================
@@ -313,11 +312,11 @@ def test_explicit_mode_override_force_eager(tmp_path, synthetic_pro):
     
     User can force eager mode regardless of file count.
     """
-    # Create 20 files (would normally auto-select lazy)
+    # Create 20 files (above the configured 10-file threshold)
     synthetic_pro.multi_station(tmp_path, n_stations=20, n_profiles_each=1)
     
     # Force eager mode
-    ds = read(tmp_path, lazy=False, n_cpus_use=4)
+    ds = read(tmp_path, lazy=False, lazy_threshold=10, n_cpus_use=4)
     
     assert ds is not None
     assert ds.sizes['location'] == 20

@@ -66,7 +66,7 @@ Focuses on input/output operations, file parsing, and data serialization (`src/x
 
 `test_pro_units.py`, `test_smet_units.py`, `test_netcdf_zarr_units.py`: Unit conversion/validation tests per file format.
 
-`test_modes.py`: Compares eager vs. lazy loading to ensure consistency.
+`test_modes.py`: Compares eager vs. lazy loading, including archive defaults and chunk propagation.
 
 `test_eager.py`: Specific tests for eager (in-memory) data loading.
 
