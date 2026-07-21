@@ -3,13 +3,13 @@ from xsnow import registry
 from xsnow.plugin import register_xsnowDataset_method
 
 PRO_DATACODE_MAP = {
-    "p_unstable": "609",
+    "p_unstable": "0609",
     "p_unstable_proportion": "1131", # proportion of layers with p_unstable > 0.77
     "rta":"0606",
 }
 
 @register_xsnowDataset_method
-def assign_to_dataset(ds,dataArray, name, longName, units, data_code=None):
+def assign_to_dataset(ds, dataArray, name, longName, units, data_code=None):
     base_ds = ds.data if hasattr(ds, "data") else ds
     if not isinstance(base_ds, xr.Dataset):
         raise TypeError(f"Unsupported dataset type for assignment: {type(ds)!r}")
