@@ -19,6 +19,7 @@ import time
 import xarray as xr
 
 from xsnow import read
+from xsnow.io import base as io_base
 
 
 @pytest.fixture(params=("netcdf", "zarr"))
@@ -54,15 +55,111 @@ def archive_path(request, tmp_path) -> Path:
 
 @pytest.mark.parametrize("lazy", (None, True, False))
 def test_archive_lazy_modes_have_matching_public_semantics(archive_path, lazy):
-    """Both archive formats default lazy and honor explicit overrides."""
+    """Small archives default eager while explicit overrides remain exact."""
     loaded = read(archive_path, lazy=lazy)
 
     assert loaded is not None
-    if lazy is False:
-        assert isinstance(loaded["marker"].data, np.ndarray)
-    else:
+    if lazy is True:
         assert isinstance(loaded["marker"].data, da.Array)
+    else:
+        assert isinstance(loaded["marker"].data, np.ndarray)
 
+    loaded.close()
+
+
+def test_archive_auto_eager_threshold_is_one_gibibyte():
+    """The automatic archive policy uses the documented 1 GiB limit."""
+    assert io_base._ARCHIVE_AUTO_EAGER_MAX_BYTES == 1024**3
+
+
+def test_archive_auto_mode_uses_strict_decoded_size_boundary(monkeypatch):
+    """Only estimates strictly below the threshold load eagerly."""
+    ds = xr.Dataset({"marker": ("sample", np.ones(4, dtype=np.float64))})
+
+    monkeypatch.setattr(io_base, "_ARCHIVE_AUTO_EAGER_MAX_BYTES", ds.nbytes + 1)
+    assert io_base._resolve_archive_lazy(ds, None) is False
+
+    monkeypatch.setattr(io_base, "_ARCHIVE_AUTO_EAGER_MAX_BYTES", ds.nbytes)
+    assert io_base._resolve_archive_lazy(ds, None) is True
+
+
+def test_archive_auto_mode_keeps_object_data_lazy():
+    """Pointer-based object nbytes estimates are not used for eager loading."""
+    ds = xr.Dataset({"label": ("sample", np.array(["variable"], dtype=object))})
+
+    assert io_base._resolve_archive_lazy(ds, None) is True
+    assert io_base._resolve_archive_lazy(ds, True) is True
+    assert io_base._resolve_archive_lazy(ds, False) is False
+
+
+def test_archive_auto_mode_keeps_unknown_estimates_lazy():
+    """An unavailable decoded-size estimate falls back to lazy loading."""
+
+    class UnknownSizeDataset:
+        variables = {}
+
+        @property
+        def nbytes(self):
+            raise TypeError("size unavailable")
+
+    assert io_base._resolve_archive_lazy(UnknownSizeDataset(), None) is True
+
+
+def test_archive_auto_mode_estimates_selected_data(tmp_path, monkeypatch):
+    """A small selection can load eagerly from an otherwise large archive."""
+    source = tmp_path / "archive.nc"
+    source_ds = xr.Dataset(
+        {"marker": (("location", "time"), np.ones((1, 10)))},
+        coords={"location": ["TEST"], "time": np.arange(10)},
+    ).chunk({"time": 2})
+    selected_nbytes = source_ds.isel(time=slice(0, 1)).nbytes
+    assert source_ds.nbytes > selected_nbytes
+
+    monkeypatch.setattr(
+        io_base,
+        "_ARCHIVE_AUTO_EAGER_MAX_BYTES",
+        selected_nbytes + 1,
+    )
+    monkeypatch.setattr(xr, "open_dataset", lambda path, **kwargs: source_ds.copy())
+
+    loaded = read(source, time=slice(0, 1))
+
+    assert loaded is not None
+    assert loaded.sizes["time"] == 1
+    assert isinstance(loaded["marker"].data, np.ndarray)
+
+
+@pytest.mark.parametrize(
+    "archive_kind,opener_name",
+    (("netcdf", "open_dataset"), ("zarr", "open_zarr")),
+)
+@pytest.mark.parametrize("threshold,expected_lazy", ((1, True), (1024**3, False)))
+def test_archive_auto_mode_applies_to_each_backend(
+    tmp_path,
+    monkeypatch,
+    archive_kind,
+    opener_name,
+    threshold,
+    expected_lazy,
+):
+    """NetCDF and Zarr both apply the decoded-size default policy."""
+    filename = "archive.nc" if archive_kind == "netcdf" else "archive.zarr"
+    source = tmp_path / filename
+    if archive_kind == "zarr":
+        source.mkdir()
+        (source / "zarr.json").write_text("{}")
+
+    source_ds = xr.Dataset(
+        {"marker": (("location", "time"), da.ones((1, 2), chunks=(1, 2)))},
+        coords={"location": ["TEST"], "time": [0, 1]},
+    )
+    monkeypatch.setattr(io_base, "_ARCHIVE_AUTO_EAGER_MAX_BYTES", threshold)
+    monkeypatch.setattr(xr, opener_name, lambda path, **kwargs: source_ds.copy())
+
+    loaded = read(source)
+
+    assert loaded is not None
+    assert isinstance(loaded["marker"].data, da.Array) is expected_lazy
     loaded.close()
 
 

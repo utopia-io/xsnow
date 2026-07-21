@@ -108,9 +108,10 @@ def read(
         slope: A `SlopeSelector` for filtering by slope angle.
         realization: A `RealizationSelector` for filtering by model realization.
         lazy: If True, return Dask-backed data variables. If False, load data
-            eagerly into memory. If None (default), NetCDF and Zarr sources
-            use lazy loading, while PRO/SMET collections choose based on
-            ``lazy_threshold``.
+            eagerly into memory. If None (default), NetCDF and Zarr sources are
+            loaded eagerly when their selected decoded data is estimated below
+            1 GiB, while larger archives remain lazy. PRO/SMET collections
+            choose based on ``lazy_threshold``.
         lazy_threshold: Number of files above which lazy loading is enabled
             for PRO/SMET collections when ``lazy=None``. Default: 30 files.
         parallel_lazy_creation: If True (default), parallelize the creation of lazy
@@ -119,11 +120,12 @@ def read(
         n_cpus_use: The number of CPU cores to use. If not provided, defaults
             to min(32, total_cores - 1), with a minimum of 1.
         logger: An optional, pre-configured logger instance.
-        chunks: Chunk sizes for Dask arrays when ``lazy=True``.
-            For NetCDF and Zarr, the mapping is forwarded to xarray; None
-            uses xarray/Dask automatic chunking, while ``{}`` requests backend-
-            preferred/native chunks. Ignored for eager archive reads. PRO/SMET
-            sources default to ``{'time': 100, 'layer': -1}``.
+        chunks: Chunk sizes for Dask arrays. For NetCDF and Zarr, the mapping
+            is forwarded to xarray when ``lazy`` is not False, including during
+            automatic size detection. None uses xarray/Dask automatic chunking,
+            while ``{}`` requests backend-preferred/native chunks. Ignored when
+            ``lazy=False``. PRO/SMET sources default to
+            ``{'time': 100, 'layer': -1}``.
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions:
             - `max_layers`: Max layer dimension. `'auto'` (default) uses the
@@ -177,15 +179,20 @@ def read(
         or `None` if no valid data files are found.
 
     Notes:
+        Automatic archive mode estimates decoded size after applying selectors;
+        it does not use compressed size on disk. Estimates exclude Python and
+        index overhead and temporary allocations. Archives containing object or
+        variable-length string data, or whose size cannot be estimated, remain
+        lazy.
+
         Lazy NetCDF and Zarr reads keep their backing store available for
-        deferred Dask reads. Call ``dataset.close()`` after the dataset and
-        any derived lazy objects have been computed or are no longer needed.
-        Eager archive reads (``lazy=False``) are loaded and closed before
-        ``read()`` returns.
+        deferred Dask reads. Call ``dataset.close()`` after the dataset and any
+        derived lazy objects have been computed or are no longer needed. Eager
+        archive reads are loaded and closed before ``read()`` returns.
 
     Examples:
-        >>> # Archives default to lazy; text collections use lazy_threshold
-        >>> ds = read("data/")
+        >>> # Small archives load eagerly; text collections use lazy_threshold
+        >>> ds = read("archive.nc")
         
         >>> # Force lazy loading for large datasets
         >>> ds = read("large_archive/", lazy=True, n_cpus_use=8)
@@ -218,7 +225,6 @@ def read(
     # NetCDF files
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
-            archive_lazy = True if lazy is None else lazy
             netcdf_kwargs = {}
             if 'chunk_cache_size' in parser_kwargs:
                 netcdf_kwargs['chunk_cache_size'] = parser_kwargs['chunk_cache_size']
@@ -226,7 +232,7 @@ def read(
                 source,
                 unit_validation=parser_kwargs.get('unit_validation', 'strict'),
                 logger=logger,
-                lazy=archive_lazy,
+                lazy=lazy,
                 chunks=chunks,
                 time_sel=time_sel,
                 location_sel=location_sel,
@@ -246,7 +252,6 @@ def read(
         (Path(source).is_dir() and (Path(source) / 'zarr.json').exists())
     ):
         try:
-            archive_lazy = True if lazy is None else lazy
             return _read_zarr(
                 source,
                 time_sel,
@@ -255,7 +260,7 @@ def read(
                 realization_sel,
                 logger,
                 unit_validation=parser_kwargs.get('unit_validation', 'strict'),
-                lazy=archive_lazy,
+                lazy=lazy,
                 chunks=chunks,
             )
         except UnitValidationError:

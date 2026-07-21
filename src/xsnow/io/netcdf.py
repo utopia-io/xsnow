@@ -23,7 +23,7 @@ from ..plugin import register_xsnowDataset_method
 from ..units import validate_xsnow_unit_attrs
 from ..utils import get_logger, _promote_slope_metadata_coords, reorder_dims
 
-from .base import _round_coord
+from .base import _resolve_archive_lazy, _round_coord
 
 
 @contextmanager
@@ -51,7 +51,7 @@ def _read_xsnow_netcdf(
     source: Union[str, Path],
     unit_validation: str = "strict",
     logger: Optional[logging.Logger] = None,
-    lazy: bool = False,
+    lazy: Optional[bool] = None,
     chunks: Optional[Dict[str, int]] = None,
     time_sel=None,
     location_sel=None,
@@ -71,12 +71,12 @@ def _read_xsnow_netcdf(
             present unit attrs differ from xsnow units; `'light'` warns.
         logger: Optional logger for validation warnings.
         lazy: If True, return Dask-backed data backed by the open source file;
-            the caller must close the returned dataset. If False (default),
-            load and close the file before returning.
-        chunks: Dask chunk sizes used when ``lazy=True`` and forwarded to
-            ``xarray.open_dataset``. None uses xarray/Dask automatic chunking;
-            ``{}`` requests the NetCDF backend's preferred chunks. Ignored
-            when ``lazy=False``.
+            the caller must close the returned dataset. If False, load and
+            close the file before returning. If None (default), load selected
+            data below the automatic archive-size threshold eagerly.
+        chunks: Dask chunk sizes forwarded to ``xarray.open_dataset`` when
+            ``lazy`` is not False. None uses xarray/Dask automatic chunking;
+            ``{}`` requests the NetCDF backend's preferred chunks.
         time_sel: TimeSelector for filtering by time (already coerced).
         location_sel: LocationSelector for filtering by location (already coerced).
         slope_sel: SlopeSelector for filtering by slope (already coerced).
@@ -92,7 +92,10 @@ def _read_xsnow_netcdf(
     """
     logger = get_logger(__name__, logger=logger)
 
-    open_chunks = (chunks if chunks is not None else "auto") if lazy else None
+    open_lazily = lazy is not False
+    open_chunks = (
+        (chunks if chunks is not None else "auto") if open_lazily else None
+    )
     with _bounded_chunk_cache(chunk_cache_size):
         opened = xr.open_dataset(source, chunks=open_chunks)
     try:
@@ -131,7 +134,13 @@ def _read_xsnow_netcdf(
         if realization_sel:
             ds = realization_sel.apply(ds)
 
-        if not lazy:
+        resolved_lazy = _resolve_archive_lazy(ds, lazy)
+        if lazy is None:
+            logger.debug(
+                f"Auto-detected archive lazy={resolved_lazy} from decoded size"
+            )
+
+        if not resolved_lazy:
             ds.load()
             opened.close()
 

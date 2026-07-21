@@ -23,6 +23,8 @@ from ..selectors import TimeSelector, LocationSelector, SlopeSelector, Realizati
 from ..units import UnitValidationError, validate_xsnow_unit_attrs
 from ..utils import get_logger, _promote_slope_metadata_coords
 
+from .base import _resolve_archive_lazy
+
 # Define the allowed modes matching xarray/zarr requirements
 ZarrModes = Literal['w', 'w-', 'a', 'a-', 'r+', 'r']
 
@@ -35,7 +37,7 @@ def _read_zarr(
     realization_sel: Optional[RealizationSelector] = None,
     logger: Optional[logging.Logger] = None,
     unit_validation: str = "strict",
-    lazy: bool = True,
+    lazy: Optional[bool] = None,
     chunks: Optional[Dict[str, int]] = None,
 ) -> Optional[xsnowDataset]:
     """
@@ -55,11 +57,11 @@ def _read_zarr(
             present unit attrs differ from xsnow units; `'light'` warns.
         lazy: If True, return Dask-backed data backed by the open archive; the
             caller must close the returned dataset. If False, load and close
-            the archive before returning.
-        chunks: Dask chunk sizes used when ``lazy=True`` and forwarded to
-            ``xarray.open_zarr``. None uses xarray/Dask automatic chunking;
-            ``{}`` requests the Zarr archive's native chunks. Ignored when
-            ``lazy=False``.
+            the archive before returning. If None (default), load selected data
+            below the automatic archive-size threshold eagerly.
+        chunks: Dask chunk sizes forwarded to ``xarray.open_zarr`` when
+            ``lazy`` is not False. None uses xarray/Dask automatic chunking;
+            ``{}`` requests the Zarr archive's native chunks.
         
     Returns:
         xsnowDataset with the loaded data, or None if loading fails
@@ -87,7 +89,10 @@ def _read_zarr(
         logger.debug(f"Reading Zarr archive: {path}")
         
         # Open with xarray
-        open_chunks = (chunks if chunks is not None else "auto") if lazy else None
+        open_lazily = lazy is not False
+        open_chunks = (
+            (chunks if chunks is not None else "auto") if open_lazily else None
+        )
         opened = xr.open_zarr(path, chunks=open_chunks)
         ds_raw = opened
         ds_raw = _promote_slope_metadata_coords(ds_raw)
@@ -114,7 +119,13 @@ def _read_zarr(
         if realization_sel:
             ds_raw = realization_sel.apply(ds_raw)
 
-        if not lazy:
+        resolved_lazy = _resolve_archive_lazy(ds_raw, lazy)
+        if lazy is None:
+            logger.debug(
+                f"Auto-detected archive lazy={resolved_lazy} from decoded size"
+            )
+
+        if not resolved_lazy:
             ds_raw.load()
             opened.close()
 
