@@ -543,7 +543,8 @@ def test_realistic_caching_workflow(real_file_subset, tmp_path, timer):
         (day2_dir / all_files[1].name).write_text(all_files[1].read_text())
         
         timer.start('day2')
-        ds = read(cache_file)
+        # Load eagerly because the cache is overwritten in place below.
+        ds = read(cache_file, lazy=False)
         ds = ds.append_latest(day2_dir)
         ds.to_netcdf(cache_file)
         timer.stop('day2')
@@ -557,7 +558,8 @@ def test_realistic_caching_workflow(real_file_subset, tmp_path, timer):
         (day3_dir / all_files[2].name).write_text(all_files[2].read_text())
         
         timer.start('day3')
-        ds = read(cache_file)
+        # Load eagerly because the cache is overwritten in place below.
+        ds = read(cache_file, lazy=False)
         ds = ds.append_latest(day3_dir)
         ds.to_netcdf(cache_file)
         timer.stop('day3')

@@ -491,8 +491,8 @@ StationName= MY_STATION
 0502,2,140,240
 """)
     
-    # Load cached data (fast)
-    ds_cached = read(cache_file)
+    # Load eagerly because the cache is overwritten in place below.
+    ds_cached = read(cache_file, lazy=False)
     print(f"  Loaded from cache: {ds_cached.sizes['time']} timesteps")
     
     # Update with only new data (efficient)

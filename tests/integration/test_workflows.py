@@ -61,8 +61,8 @@ class TestCachingWorkflow:
             #station_name="SYNTHETIC2"  # Different name to create new file
         )
         
-        # Load cached data
-        ds_cached = read(cache_file)
+        # Load eagerly because the cache is overwritten in place below.
+        ds_cached = read(cache_file, lazy=False)
         
         # Append with new data
         ds_updated = ds_cached.append_latest(archive_dir)
