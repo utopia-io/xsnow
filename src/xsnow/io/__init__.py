@@ -142,8 +142,10 @@ def read(
               spread, in days, for files to be considered homogeneous by smart
               detection. Default: 7.0 days.
             - `trim_padding`: If True, automatically trim trailing all-NaN
-              padding after loading. For lazy datasets this calls
-              `trim_padding()` and therefore computes data to detect padding.
+              padding after loading. For lazy datasets this computes a validity
+              reduction over selected variables to detect padding, while the
+              trimmed payload remains Dask-backed. Computing it later may read
+              the payload again.
             - `remove_soil`: If True (default), drops soil layers during parsing.
             - `add_surface_sh_as_layer`: If True (default), inserts a surface hoar
               layer explicitly as layer when indicated by the PRO file.
@@ -349,8 +351,9 @@ def read(
         if lazy:
             logger.warning(
                 """
-                WARNING: For lazy-loaded datasets, this will trigger computation of ALL
-                dask arrays to check for NaN values!
+                WARNING: trim_padding=True scans all selected variables that use the
+                layer dimension to find trailing all-NaN slices. The trimmed result
+                remains Dask-backed, so computing it later may read the data again.
 
                 For large lazy datasets, use this workflow instead:
                     # Load lazily

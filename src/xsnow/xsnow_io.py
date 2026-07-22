@@ -311,9 +311,12 @@ def trim_padding(
 
     Notes:
         This method assumes padding is at the end of the dimension. It checks
-        all data variables that contain each requested dimension. For Dask
-        backed arrays, the `.values` access used to detect non-NaN slices
-        triggers computation.
+        all data variables that contain each requested dimension. For
+        Dask-backed arrays, detecting the last non-NaN slice computes a
+        validity reduction over those variables, but the trimmed payload
+        remains Dask-backed. Computing that result later may read the payload
+        again. For large datasets, select a small subset first and consider
+        computing it before trimming.
     """
     logger = logging.getLogger(__name__)
     
