@@ -366,10 +366,10 @@ def test_to_smet_basic(real_file_subset, tmp_path):
     """
     ds = read(real_file_subset)
     
-    # Select single location
-    if ds.sizes['location'] > 1:
-        first_location = str(ds.data.location.values[0])
-        ds = ds.sel(location=first_location)
+    # Select one time series that can be represented by a single SMET file.
+    for dim in ("location", "slope", "realization"):
+        if ds.sizes.get(dim, 1) > 1:
+            ds = ds.isel({dim: 0})
     
     for ext in ALL_FILE_EXTS:
         output_file = tmp_path / ("output.smet" + ext)
@@ -661,10 +661,10 @@ def test_to_smet_only_exports_time_series(real_file_subset, tmp_path):
     """
     ds = read(real_file_subset)
     
-    # Select single location
-    if ds.sizes['location'] > 1:
-        first_location = str(ds.data.location.values[0])
-        ds = ds.sel(location=first_location)
+    # Select one time series that can be represented by a single SMET file.
+    for dim in ("location", "slope", "realization"):
+        if ds.sizes.get(dim, 1) > 1:
+            ds = ds.isel({dim: 0})
     
     output_file = tmp_path / "timeseries.smet"
     ds.to_smet(output_file)
