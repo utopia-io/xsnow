@@ -205,31 +205,6 @@ StationName= STATION_{i:02d}
 class TestPerformanceAndMemory:
     """Tests to verify performance benefits of both features."""
     
-    def test_validation_faster_than_full_scan(self, tmp_path):
-        """Validation should be much faster than scanning all files."""
-        # Create 20 files
-        for i in range(20):
-            filepath = tmp_path / f"station_{i}.pro"
-            layer_data = ",".join([str(0.01 * j) for j in range(10)])
-            density_data = ",".join([str(100 + j) for j in range(10)])
-            
-            filepath.write_text(f"""
-[STATION_PARAMETERS]
-StationName= STATION_{i:02d}
-[DATA]
-0500,01.01.2025 12:00:00
-0501,10,{layer_data}
-0502,10,{density_data}
-""")
-        
-        # Time validation path (should be fast)
-        start = time.time()
-        ds = read(tmp_path, lazy=False, max_layers=15)
-        validation_time = time.time() - start
-        
-        # Validation should be quick (< 2 seconds for 20 files is reasonable)
-        assert validation_time < 2.0
-    
     def test_trimming_reduces_memory(self, tmp_path):
         """Trimming should significantly reduce memory usage."""
         # Create dataset with substantial padding

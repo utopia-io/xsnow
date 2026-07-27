@@ -107,20 +107,25 @@ def read(
         location: A `LocationSelector` object for filtering by station ID.
         slope: A `SlopeSelector` for filtering by slope angle.
         realization: A `RealizationSelector` for filtering by model realization.
-        lazy: If True, use Dask for lazy, memory-efficient loading (good for
-            large datasets). If False, load all data eagerly into memory with
-            parallel processing (good for small to medium datasets). If None
-            (default), auto-detect based on file count.
+        lazy: If True, return Dask-backed data variables. If False, load data
+            eagerly into memory. If None (default), NetCDF and Zarr sources are
+            loaded eagerly when their selected decoded data is estimated below
+            1 GiB, while larger archives remain lazy. PRO/SMET collections
+            choose based on ``lazy_threshold``.
         lazy_threshold: Number of files above which lazy loading is enabled
-            when lazy=None (auto-detect). Default: 30 files.
+            for PRO/SMET collections when ``lazy=None``. Default: 30 files.
         parallel_lazy_creation: If True (default), parallelize the creation of lazy
             datasets using ThreadPoolExecutor. This speeds up the metadata parsing
             phase by 5-15x when working with hundreds or thousands of files.
         n_cpus_use: The number of CPU cores to use. If not provided, defaults
             to min(32, total_cores - 1), with a minimum of 1.
         logger: An optional, pre-configured logger instance.
-        chunks: Chunk sizes for dask arrays when lazy=True. Expected keys are
-            usually 'time' and 'layer'. Default: {'time': 100, 'layer': -1}.
+        chunks: Chunk sizes for Dask arrays. For NetCDF and Zarr, the mapping
+            is forwarded to xarray when ``lazy`` is not False, including during
+            automatic size detection. None uses xarray/Dask automatic chunking,
+            while ``{}`` requests backend-preferred/native chunks. Ignored when
+            ``lazy=False``. PRO/SMET sources default to
+            ``{'time': 100, 'layer': -1}``.
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions:
             - `max_layers`: Max layer dimension. `'auto'` (default) uses the
@@ -137,8 +142,10 @@ def read(
               spread, in days, for files to be considered homogeneous by smart
               detection. Default: 7.0 days.
             - `trim_padding`: If True, automatically trim trailing all-NaN
-              padding after loading. For lazy datasets this calls
-              `trim_padding()` and therefore computes data to detect padding.
+              padding after loading. For lazy datasets this computes a validity
+              reduction over selected variables to detect padding, while the
+              trimmed payload remains Dask-backed. Computing it later may read
+              the payload again.
             - `remove_soil`: If True (default), drops soil layers during parsing.
             - `add_surface_sh_as_layer`: If True (default), inserts a surface hoar
               layer explicitly as layer when indicated by the PRO file.
@@ -173,9 +180,21 @@ def read(
         A unified `xsnowDataset` object containing the data from all sources,
         or `None` if no valid data files are found.
 
+    Notes:
+        Automatic archive mode estimates decoded size after applying selectors;
+        it does not use compressed size on disk. Estimates exclude Python and
+        index overhead and temporary allocations. Archives containing object or
+        variable-length string data, or whose size cannot be estimated, remain
+        lazy.
+
+        Lazy NetCDF and Zarr reads keep their backing store available for
+        deferred Dask reads. Call ``dataset.close()`` after the dataset and any
+        derived lazy objects have been computed or are no longer needed. Eager
+        archive reads are loaded and closed before ``read()`` returns.
+
     Examples:
-        >>> # Auto-detect (lazy for many files, eager for few)
-        >>> ds = read("data/")
+        >>> # Small archives load eagerly; text collections use lazy_threshold
+        >>> ds = read("archive.nc")
         
         >>> # Force lazy loading for large datasets
         >>> ds = read("large_archive/", lazy=True, n_cpus_use=8)
@@ -208,7 +227,6 @@ def read(
     # NetCDF files
     if isinstance(source, (str, Path)) and Path(source).suffix == '.nc':
         try:
-            # lazy=None (auto) stays eager for a single NetCDF file
             netcdf_kwargs = {}
             if 'chunk_cache_size' in parser_kwargs:
                 netcdf_kwargs['chunk_cache_size'] = parser_kwargs['chunk_cache_size']
@@ -216,7 +234,8 @@ def read(
                 source,
                 unit_validation=parser_kwargs.get('unit_validation', 'strict'),
                 logger=logger,
-                lazy=bool(lazy),
+                lazy=lazy,
+                chunks=chunks,
                 time_sel=time_sel,
                 location_sel=location_sel,
                 slope_sel=slope_sel,
@@ -243,6 +262,8 @@ def read(
                 realization_sel,
                 logger,
                 unit_validation=parser_kwargs.get('unit_validation', 'strict'),
+                lazy=lazy,
+                chunks=chunks,
             )
         except UnitValidationError:
             raise
@@ -309,14 +330,30 @@ def read(
         logger=logger,
         norm_slopes=parser_kwargs.get('norm_slopes', 'auto'),
     )
+
+    # Keep the public lazy contract consistent for every text-source result.
+    # SMET is parsed eagerly because it is a row-oriented text format, but a
+    # lazy request still returns Dask-backed arrays after merging.
+    if final_dataset is not None:
+        if lazy:
+            requested_chunks = chunks or {}
+            applicable_chunks = {
+                dim: size
+                for dim, size in requested_chunks.items()
+                if dim in final_dataset.dims
+            }
+            final_dataset = final_dataset.chunk(applicable_chunks or "auto")
+        else:
+            final_dataset.load()
     
     # --- Step 7: Trim padding if requested ---
     if final_dataset is not None and parser_kwargs.get('trim_padding', False):
         if lazy:
             logger.warning(
                 """
-                WARNING: For lazy-loaded datasets, this will trigger computation of ALL
-                dask arrays to check for NaN values!
+                WARNING: trim_padding=True scans all selected variables that use the
+                layer dimension to find trailing all-NaN slices. The trimmed result
+                remains Dask-backed, so computing it later may read the data again.
 
                 For large lazy datasets, use this workflow instead:
                     # Load lazily

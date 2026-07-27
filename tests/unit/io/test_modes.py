@@ -1,4 +1,4 @@
-# tests/loading/test_loading_modes.py
+# tests/unit/io/test_modes.py
 """
 Tests comparing eager vs lazy loading modes.
 
@@ -10,16 +10,216 @@ Strategy:
   - Verify explicit overrides work correctly
 """
 
-import pytest
+from pathlib import Path
+
+import dask.array as da
 import numpy as np
+import pytest
 import time
+import xarray as xr
 
 from xsnow import read
+from xsnow.io import base as io_base
+
+
+@pytest.fixture(params=("netcdf", "zarr"))
+def archive_path(request, tmp_path) -> Path:
+    """Write the same small dataset to each supported archive backend."""
+    ds = xr.Dataset(
+        data_vars={
+            "marker": (
+                ("location", "time"),
+                np.arange(5, dtype=float).reshape(1, 5),
+            ),
+        },
+        coords={
+            "location": ["TEST"],
+            "time": np.arange(5),
+        },
+    )
+
+    if request.param == "netcdf":
+        path = tmp_path / "archive.nc"
+        ds.to_netcdf(path)
+    else:
+        path = tmp_path / "archive.zarr"
+        ds.chunk({"time": 2}).to_zarr(path)
+
+    return path
 
 
 # ============================================================================
 # CONSISTENCY TESTS
 # ============================================================================
+
+
+@pytest.mark.parametrize("lazy", (None, True, False))
+def test_archive_lazy_modes_have_matching_public_semantics(archive_path, lazy):
+    """Small archives default eager while explicit overrides remain exact."""
+    loaded = read(archive_path, lazy=lazy)
+
+    assert loaded is not None
+    if lazy is True:
+        assert isinstance(loaded["marker"].data, da.Array)
+    else:
+        assert isinstance(loaded["marker"].data, np.ndarray)
+
+    loaded.close()
+
+
+def test_archive_auto_eager_threshold_is_one_gibibyte():
+    """The automatic archive policy uses the documented 1 GiB limit."""
+    assert io_base._ARCHIVE_AUTO_EAGER_MAX_BYTES == 1024**3
+
+
+def test_archive_auto_mode_uses_strict_decoded_size_boundary(monkeypatch):
+    """Only estimates strictly below the threshold load eagerly."""
+    ds = xr.Dataset({"marker": ("sample", np.ones(4, dtype=np.float64))})
+
+    monkeypatch.setattr(io_base, "_ARCHIVE_AUTO_EAGER_MAX_BYTES", ds.nbytes + 1)
+    assert io_base._resolve_archive_lazy(ds, None) is False
+
+    monkeypatch.setattr(io_base, "_ARCHIVE_AUTO_EAGER_MAX_BYTES", ds.nbytes)
+    assert io_base._resolve_archive_lazy(ds, None) is True
+
+
+def test_archive_auto_mode_keeps_object_data_lazy():
+    """Pointer-based object nbytes estimates are not used for eager loading."""
+    ds = xr.Dataset({"label": ("sample", np.array(["variable"], dtype=object))})
+
+    assert io_base._resolve_archive_lazy(ds, None) is True
+    assert io_base._resolve_archive_lazy(ds, True) is True
+    assert io_base._resolve_archive_lazy(ds, False) is False
+
+
+def test_archive_auto_mode_keeps_unknown_estimates_lazy():
+    """An unavailable decoded-size estimate falls back to lazy loading."""
+
+    class UnknownSizeDataset:
+        variables = {}
+
+        @property
+        def nbytes(self):
+            raise TypeError("size unavailable")
+
+    assert io_base._resolve_archive_lazy(UnknownSizeDataset(), None) is True
+
+
+def test_archive_auto_mode_estimates_selected_data(tmp_path, monkeypatch):
+    """A small selection can load eagerly from an otherwise large archive."""
+    source = tmp_path / "archive.nc"
+    source_ds = xr.Dataset(
+        {"marker": (("location", "time"), np.ones((1, 10)))},
+        coords={"location": ["TEST"], "time": np.arange(10)},
+    ).chunk({"time": 2})
+    selected_nbytes = source_ds.isel(time=slice(0, 1)).nbytes
+    assert source_ds.nbytes > selected_nbytes
+
+    monkeypatch.setattr(
+        io_base,
+        "_ARCHIVE_AUTO_EAGER_MAX_BYTES",
+        selected_nbytes + 1,
+    )
+    monkeypatch.setattr(xr, "open_dataset", lambda path, **kwargs: source_ds.copy())
+
+    loaded = read(source, time=slice(0, 1))
+
+    assert loaded is not None
+    assert loaded.sizes["time"] == 1
+    assert isinstance(loaded["marker"].data, np.ndarray)
+
+
+@pytest.mark.parametrize(
+    "archive_kind,opener_name",
+    (("netcdf", "open_dataset"), ("zarr", "open_zarr")),
+)
+@pytest.mark.parametrize("threshold,expected_lazy", ((1, True), (1024**3, False)))
+def test_archive_auto_mode_applies_to_each_backend(
+    tmp_path,
+    monkeypatch,
+    archive_kind,
+    opener_name,
+    threshold,
+    expected_lazy,
+):
+    """NetCDF and Zarr both apply the decoded-size default policy."""
+    filename = "archive.nc" if archive_kind == "netcdf" else "archive.zarr"
+    source = tmp_path / filename
+    if archive_kind == "zarr":
+        source.mkdir()
+        (source / "zarr.json").write_text("{}")
+
+    source_ds = xr.Dataset(
+        {"marker": (("location", "time"), da.ones((1, 2), chunks=(1, 2)))},
+        coords={"location": ["TEST"], "time": [0, 1]},
+    )
+    monkeypatch.setattr(io_base, "_ARCHIVE_AUTO_EAGER_MAX_BYTES", threshold)
+    monkeypatch.setattr(xr, opener_name, lambda path, **kwargs: source_ds.copy())
+
+    loaded = read(source)
+
+    assert loaded is not None
+    assert isinstance(loaded["marker"].data, da.Array) is expected_lazy
+    loaded.close()
+
+
+def test_archive_lazy_mode_honors_custom_chunks(archive_path):
+    """The public chunks argument reaches both lazy archive backends."""
+    loaded = read(archive_path, lazy=True, chunks={"time": 2})
+
+    marker = loaded["marker"]
+    time_axis = marker.get_axis_num("time")
+    assert marker.chunks[time_axis] == (2, 2, 1)
+
+    loaded.close()
+
+
+@pytest.mark.parametrize(
+    "lazy,chunks,expected_chunks",
+    (
+        (None, None, "auto"),
+        (True, None, "auto"),
+        (True, {}, {}),
+        (False, None, None),
+        (False, {"time": 2}, None),
+    ),
+)
+@pytest.mark.parametrize(
+    "archive_kind,opener_name",
+    (("netcdf", "open_dataset"), ("zarr", "open_zarr")),
+)
+def test_archive_reader_forwards_expected_chunks(
+    tmp_path,
+    monkeypatch,
+    lazy,
+    chunks,
+    expected_chunks,
+    archive_kind,
+    opener_name,
+):
+    """Archive readers translate the public chunk policy consistently."""
+    source = tmp_path / ("archive.nc" if archive_kind == "netcdf" else "archive.zarr")
+    if archive_kind == "zarr":
+        source.mkdir()
+        (source / "zarr.json").write_text("{}")
+
+    source_ds = xr.Dataset(
+        {"marker": (("location", "time"), np.ones((1, 2)))},
+        coords={"location": ["TEST"], "time": [0, 1]},
+    )
+    received_chunks = []
+
+    def fake_opener(path, **kwargs):
+        received_chunks.append(kwargs.get("chunks"))
+        return source_ds.copy()
+
+    monkeypatch.setattr(xr, opener_name, fake_opener)
+
+    loaded = read(source, lazy=lazy, chunks=chunks)
+
+    assert loaded is not None
+    assert received_chunks == [expected_chunks]
+    loaded.close()
 
 @pytest.mark.real_data
 def test_eager_vs_lazy_same_results(real_file_subset, compare_datasets):
@@ -123,7 +323,7 @@ def test_eager_vs_lazy_handle_surface_hoar_same(real_file_subset):
 @pytest.mark.synthetic
 def test_auto_detect_small_dataset(tmp_path, synthetic_pro):
     """
-    Test that auto-detection uses EAGER for small datasets (≤10 files).
+    Test that auto-detection uses EAGER below the default 30-file threshold.
     
     Eager is more efficient for small datasets.
     """
@@ -136,16 +336,15 @@ def test_auto_detect_small_dataset(tmp_path, synthetic_pro):
     assert ds is not None
     assert ds.sizes['location'] == 5
     
-    # With ≤10 files, should use eager mode
-    # (We can't directly check which mode was used, but it should work)
+    assert isinstance(ds.data['height'].data, np.ndarray)
 
 
 @pytest.mark.synthetic
 def test_auto_detect_medium_dataset(tmp_path, synthetic_pro):
     """
-    Test that auto-detection uses LAZY for medium datasets (>10 files).
+    Test that auto-detection remains EAGER below the default threshold.
     
-    Lazy is more efficient for larger datasets.
+    Lazy mode is reserved for collections above 30 files by default.
     """
     # Create 15 files (medium dataset)
     synthetic_pro.multi_station(tmp_path, n_stations=15, n_profiles_each=2)
@@ -156,8 +355,7 @@ def test_auto_detect_medium_dataset(tmp_path, synthetic_pro):
     assert ds is not None
     assert ds.sizes['location'] == 15
     
-    # With >10 files, should use lazy mode
-    # (We can't directly check which mode was used, but it should work)
+    assert isinstance(ds.data['height'].data, np.ndarray)
 
 
 @pytest.mark.real_data
@@ -165,7 +363,7 @@ def test_auto_detect_large_dataset(gridded_pros_dir):
     """
     Test auto-detection with real large dataset.
     
-    Real datasets typically have >10 files, so should use lazy.
+    Real gridded datasets typically exceed the 30-file default threshold.
     """
     # Auto-detect
     ds = read(gridded_pros_dir, lazy=None, n_cpus_use=4)
@@ -175,28 +373,29 @@ def test_auto_detect_large_dataset(gridded_pros_dir):
 
 
 @pytest.mark.synthetic
-@pytest.mark.parametrize("n_files,expected_threshold", [
+@pytest.mark.parametrize("n_files,expected_mode", [
     (5, "eager"),   # ≤10: eager
     (10, "eager"),  # =10: eager
     (11, "lazy"),   # >10: lazy
     (20, "lazy"),   # >10: lazy
 ])
-def test_auto_detect_threshold_boundary(tmp_path, synthetic_pro, n_files, expected_threshold):
+def test_auto_detect_threshold_boundary(tmp_path, synthetic_pro, n_files, expected_mode):
     """
-    Test auto-detection at threshold boundaries.
+    Test auto-detection around a configured threshold.
     
-    Threshold is 10 files: ≤10 uses eager, >10 uses lazy.
+    With ``lazy_threshold=10``, ≤10 files use eager and >10 use lazy.
     """
     # Create exact number of files
     synthetic_pro.multi_station(tmp_path, n_stations=n_files, n_profiles_each=1)
     
-    # Auto-detect
-    ds = read(tmp_path, lazy=None, n_cpus_use=2)
+    ds = read(tmp_path, lazy=None, lazy_threshold=10, n_cpus_use=2)
     
     assert ds is not None
     assert ds.sizes['location'] == n_files
+    is_lazy = hasattr(ds.data['height'].data, 'chunks')
+    assert is_lazy is (expected_mode == "lazy")
     
-    print(f"\n{n_files} files → expected {expected_threshold} mode")
+    print(f"\n{n_files} files → expected {expected_mode} mode")
 
 
 # ============================================================================
@@ -210,11 +409,11 @@ def test_explicit_mode_override_force_eager(tmp_path, synthetic_pro):
     
     User can force eager mode regardless of file count.
     """
-    # Create 20 files (would normally auto-select lazy)
+    # Create 20 files (above the configured 10-file threshold)
     synthetic_pro.multi_station(tmp_path, n_stations=20, n_profiles_each=1)
     
     # Force eager mode
-    ds = read(tmp_path, lazy=False, n_cpus_use=4)
+    ds = read(tmp_path, lazy=False, lazy_threshold=10, n_cpus_use=4)
     
     assert ds is not None
     assert ds.sizes['location'] == 20

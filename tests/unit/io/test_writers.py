@@ -18,6 +18,7 @@ from pathlib import Path
 
 import netCDF4
 
+import xsnow.io.netcdf as netcdf_io
 from tests.conftest import ALL_FILE_EXTS, COMPRESSION_MODULES
 from xsnow import read, single_profile, xsnowDataset
 from xsnow.io.netcdf import _bounded_chunk_cache
@@ -889,7 +890,7 @@ def test_chunk_cache_size_roundtrip_kwarg(tmp_path, compare_datasets):
 
 
 @pytest.mark.synthetic
-def test_chunk_cache_size_lazy_read(tmp_path):
+def test_chunk_cache_size_lazy_read(tmp_path, monkeypatch):
     """A lazy read applies the cache at open and remains usable afterward."""
     ds = single_profile()
     nc_path = tmp_path / "lazy_chunk_cache.nc"
@@ -898,24 +899,21 @@ def test_chunk_cache_size_lazy_read(tmp_path):
 
     outside = netCDF4.get_chunk_cache()
     cache_size = 2 * 1024 * 1024
+    observed_cache = []
+    open_dataset = netcdf_io.xr.open_dataset
+
+    def recording_open_dataset(*args, **kwargs):
+        observed_cache.append(netCDF4.get_chunk_cache())
+        return open_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(netcdf_io.xr, "open_dataset", recording_open_dataset)
 
     loaded = read(nc_path, lazy=True, chunk_cache_size=cache_size)
     try:
         assert loaded is not None
+        assert observed_cache == [(cache_size, outside[1], outside[2])]
         assert netCDF4.get_chunk_cache() == outside
-        assert not loaded.data["height"].variable._in_memory
-
-        # Unwrap xarray's lazy indexing adapters to inspect the file-backed
-        # netCDF4 variable before forcing data into memory.
-        backend_array = loaded.data["height"].variable._data
-        while hasattr(backend_array, "array"):
-            backend_array = backend_array.array
-        assert backend_array.get_array().get_var_chunk_cache() == (
-            cache_size,
-            outside[1],
-            outside[2],
-        )
-
+        assert loaded["height"].chunks is not None
         np.testing.assert_allclose(loaded["height"].values, expected_height)
     finally:
         if loaded is not None:

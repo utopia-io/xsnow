@@ -6,10 +6,14 @@ This module tests the new validation feature that checks if files are
 homogeneous (suitable for smart detection) before using the file size
 heuristic to determine max_layers.
 """
-import pytest
+import logging
 import time
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+import xsnow.io.pro as pro_io
 from xsnow import read
 
 
@@ -210,6 +214,34 @@ class TestValidationThresholdConfiguration:
 
 class TestValidationWithMaxLayersDetection:
     """Tests that validation integrates correctly with max_layers detection."""
+
+    def test_smart_detection_scans_only_ten_largest(self, tmp_path, monkeypatch):
+        """Smart detection should parse only the ten largest files."""
+        files = []
+        for size in range(1, 21):
+            filepath = tmp_path / f"profile_{size:02d}.pro"
+            filepath.write_bytes(b"x" * size)
+            files.append(filepath)
+
+        scanned = []
+
+        def record_scan(filepath, add_sh, remove_soil):
+            scanned.append(filepath)
+            return filepath.stat().st_size
+
+        monkeypatch.setattr(pro_io, "_scan_pro_for_max_layers", record_scan)
+
+        max_layers = pro_io._determine_max_layers_smart(
+            files,
+            n_cpus_use=1,
+            add_sh=False,
+            remove_soil=False,
+            logger=logging.getLogger(__name__),
+            force=True,
+        )
+
+        assert scanned == list(reversed(files[-10:]))
+        assert max_layers == 22
     
     def test_validation_then_smart_detection(self, create_timed_files, tmp_path):
         """Validation should happen before smart detection."""

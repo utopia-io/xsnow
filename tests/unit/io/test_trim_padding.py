@@ -5,9 +5,12 @@ Tests for trim_padding functionality.
 This module tests the new trim_padding() method that removes NaN-only
 layers from datasets to reduce memory usage.
 """
-import pytest
-import numpy as np
+import dask
 import dask.array as da
+import numpy as np
+import pytest
+from dask.callbacks import Callback
+
 from xsnow import read
 
 
@@ -182,20 +185,24 @@ class TestTrimPaddingWithBuffer:
 
 class TestTrimPaddingWithLazyLoading:
     """Tests for trim_padding with lazy-loaded datasets."""
-    
-    @pytest.mark.xfail(reason="trim_padding implementation may need to explicitly compute dask arrays")
-    def test_trim_lazy_triggers_computation(self, dataset_with_padding):
-        """Trimming lazy dataset should trigger computation."""
+
+    def test_trim_lazy_computes_extent_and_preserves_laziness(
+        self, dataset_with_padding
+    ):
+        """Trimming computes the valid extent but keeps payload data lazy."""
         ds = read(dataset_with_padding, lazy=True, max_layers=20)
-        
-        # Check that data is lazy before trimming
+
         assert isinstance(ds['height'].data, da.Array)
-        
-        # Trim (should compute)
-        ds_trimmed = ds.trim_padding()
-        
-        # Result should be computed (numpy array)
-        assert isinstance(ds_trimmed['height'].data, np.ndarray)
+
+        executed_tasks = []
+        with dask.config.set(scheduler="synchronous"), Callback(
+            pretask=lambda key, _dask, _state: executed_tasks.append(key)
+        ):
+            ds_trimmed = ds.trim_padding()
+
+        assert executed_tasks
+        assert ds_trimmed.sizes['layer'] == 10
+        assert isinstance(ds_trimmed['height'].data, da.Array)
     
     def test_trim_lazy_warning(self, dataset_with_padding):
         """Should warn when trimming lazy dataset via read()."""

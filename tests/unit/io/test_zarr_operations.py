@@ -319,7 +319,7 @@ def test_read_zarr_with_time_selector_uses_xsnow_read(tmp_path, monkeypatch):
         },
     )
 
-    def fake_open_zarr(path):
+    def fake_open_zarr(path, **kwargs):
         assert Path(path) == zarr_path
         return zarr_data.copy()
 
@@ -368,12 +368,10 @@ def test_read_zarr_eager(sample_data_dir, temp_zarr_dir, helper):
     
     # Read back (eager)
     print(f"  Reading from: {output_path}")
-    ds_read = xr.open_zarr(output_path)
-    
-    # Force computation
-    ds_read = ds_read.compute()
-    
-    assert ds_read is not None, "Failed to read Zarr"
+    loaded = xsnow.read(output_path, lazy=False)
+    assert loaded is not None, "Failed to read Zarr"
+    ds_read = loaded.data
+
     assert len(ds_read.dims) > 0, "No dimensions"
     
     print(f"✅ Read successfully (eager)")
@@ -404,7 +402,9 @@ def test_read_zarr_lazy(sample_data_dir, temp_zarr_dir, helper):
     
     # Read back (lazy)
     print(f"  Reading from: {output_path}")
-    ds_read = xr.open_zarr(output_path)
+    loaded = xsnow.read(output_path, lazy=True)
+    assert loaded is not None, "Failed to read Zarr"
+    ds_read = loaded.data
     
     # Check it's lazy (has chunks)
     has_chunks = False
@@ -416,6 +416,7 @@ def test_read_zarr_lazy(sample_data_dir, temp_zarr_dir, helper):
     
     assert has_chunks, "Data not lazy loaded"
     print(f"  Dimensions: {dict(ds_read.sizes)}")
+    ds_read.close()
 
 
 # =============================================================================
