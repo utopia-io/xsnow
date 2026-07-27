@@ -411,6 +411,125 @@ def smet_writer_dataset():
 
 
 @pytest.mark.synthetic
+def test_to_smet_writes_and_roundtrips_slope_metadata(smet_writer_dataset, tmp_path):
+    """Finite scalar slope coordinates are written to and read from the header."""
+    from xsnow.io.smet import read_smet
+
+    output_file = tmp_path / "slope_metadata.smet"
+    smet_writer_dataset.to_smet(output_file)
+
+    content = output_file.read_text()
+    assert "SlopeAngle = 30.0" in content
+    assert "SlopeAzi = 180.0" in content
+
+    loaded = read_smet(output_file)
+    np.testing.assert_allclose(loaded.inclination.values, [30.0])
+    np.testing.assert_allclose(loaded.azimuth.values, [180.0])
+
+
+@pytest.mark.synthetic
+def test_to_smet_writes_slope_angle_without_azimuth(smet_writer_dataset, tmp_path):
+    """SlopeAngle is useful on its own and does not require SlopeAzi."""
+    dataset = xsnowDataset(smet_writer_dataset.data.drop_vars("azimuth"))
+    output_file = tmp_path / "slope_angle_only.smet"
+
+    dataset.to_smet(output_file)
+
+    content = output_file.read_text()
+    assert "SlopeAngle = 30.0" in content
+    assert "SlopeAzi" not in content
+
+
+@pytest.mark.synthetic
+def test_to_smet_can_omit_slope_metadata(smet_writer_dataset, tmp_path):
+    """Slope headers can be omitted for forcing that is valid for all slopes."""
+    output_file = tmp_path / "no_slope_metadata.smet"
+
+    smet_writer_dataset.to_smet(output_file, write_slope_metadata=False)
+
+    content = output_file.read_text()
+    assert "SlopeAngle" not in content
+    assert "SlopeAzi" not in content
+
+
+@pytest.mark.synthetic
+def test_to_smet_rejects_azimuth_without_slope_angle(smet_writer_dataset, tmp_path):
+    """SlopeAzi cannot be represented meaningfully without SlopeAngle."""
+    dataset = xsnowDataset(smet_writer_dataset.data.drop_vars("inclination"))
+    output_file = tmp_path / "azimuth_only.smet"
+
+    with pytest.raises(ValueError, match="SlopeAzi.*SlopeAngle"):
+        dataset.to_smet(output_file)
+
+    assert not output_file.exists()
+
+
+@pytest.mark.synthetic
+def test_to_smet_omits_nonfinite_slope_metadata(smet_writer_dataset, tmp_path):
+    """NaN and infinity are missing metadata, not valid SMET header values."""
+    dataset = xsnowDataset(
+        smet_writer_dataset.data.assign_coords(
+            inclination=("slope", [np.inf]),
+            azimuth=("slope", [np.nan]),
+        )
+    )
+    output_file = tmp_path / "nonfinite_slope.smet"
+
+    dataset.to_smet(output_file)
+
+    content = output_file.read_text()
+    assert "SlopeAngle" not in content
+    assert "SlopeAzi" not in content
+
+
+@pytest.mark.synthetic
+@pytest.mark.parametrize("dimension", ["location", "slope", "realization"])
+def test_to_smet_rejects_multiple_output_members(
+    smet_writer_dataset,
+    tmp_path,
+    dimension,
+):
+    """One SMET file cannot identify multiple locations, slopes, or realizations."""
+    base = smet_writer_dataset.data
+    if dimension == "location":
+        other = base.assign_coords(location=["SECOND"])
+        dataset = xr.concat([base, other], dim="location")
+    elif dimension == "slope":
+        other = base.assign_coords(
+            slope=[1],
+            inclination=("slope", [35.0]),
+            azimuth=("slope", [200.0]),
+        )
+        dataset = xr.concat([base, other], dim="slope")
+    else:
+        first = base.expand_dims(realization=[0])
+        other = first.assign_coords(realization=[1])
+        dataset = xr.concat([first, other], dim="realization")
+    output_file = tmp_path / f"multiple_{dimension}.smet"
+
+    with pytest.raises(ValueError, match=rf"ds\.sel\({dimension}="):
+        xsnowDataset(dataset).to_smet(output_file)
+
+    assert not output_file.exists()
+
+
+@pytest.mark.synthetic
+def test_to_smet_rejects_nonscalar_slope_coordinate(smet_writer_dataset, tmp_path):
+    """The metadata extractor must not silently take the first coordinate value."""
+    dataset = xsnowDataset(
+        smet_writer_dataset.data.drop_vars(["inclination", "azimuth"]).assign_coords(
+            SlopeAngle=("time", [20.0, 30.0]),
+        )
+    )
+    output_file = tmp_path / "nonscalar_slope.smet"
+
+    with pytest.raises(ValueError, match="SlopeAngle.*exactly one"):
+        dataset.to_smet(output_file)
+
+    assert not output_file.exists()
+
+
+@pytest.mark.synthetic
 def test_to_smet_output_units_convert_from_xsnow_units(smet_units_xsnow_dataset, tmp_path):
     """Output-style SMET writing converts xsnow units to output storage units."""
     from xsnow.io.smet import read_smet
