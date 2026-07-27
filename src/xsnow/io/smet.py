@@ -702,24 +702,37 @@ def read_smet(
     return ds
 
 
-def _first_slope_value(ds: xsnowDataset, *coord_names: str) -> Optional[float]:
-    """Return a single-location dataset's finite slope descriptor, or None.
+def _require_single_smet_series(ds: xsnowDataset) -> None:
+    """Reject dimensions that cannot be represented by one SMET time series."""
+    for dim in ('location', 'slope', 'realization'):
+        size = ds.sizes.get(dim)
+        if size is not None and size > 1:
+            raise ValueError(
+                "to_smet only supports datasets with a single location, slope, "
+                f"and realization. Use ds.sel({dim}=...) to select one {dim} first."
+            )
 
-    Reads the first (slope 0) value of the first present coordinate so to_smet
-    can echo it back as a SlopeAngle/SlopeAzi header. The canonical inclination/
-    azimuth coordinates are tried first, then the SlopeAngle/SlopeAzi aliases a
-    terrain source may carry as plain location coordinates. Returns None when no
-    named coordinate is present or the value is NaN (no known slope), which keeps
-    flat-field forcing free of slope headers.
-    """
+
+def _scalar_slope_value(ds: xsnowDataset, *coord_names: str) -> Optional[float]:
+    """Return the first present finite scalar slope descriptor, or None."""
     for coord_name in coord_names:
         if coord_name not in ds.coords:
             continue
         values = np.asarray(ds[coord_name].values).ravel()
         if values.size == 0:
             continue
-        value = float(values[0])
-        if not np.isnan(value):
+        if values.size != 1:
+            raise ValueError(
+                f"SMET slope coordinate {coord_name!r} must contain exactly one "
+                "value. Select a single location, slope, and realization first."
+            )
+        try:
+            value = float(values.item())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"SMET slope coordinate {coord_name!r} must contain a numeric value."
+            ) from exc
+        if np.isfinite(value):
             return value
     return None
 
@@ -730,6 +743,7 @@ def to_smet(
     path: Union[str, Path],
     max_files: Optional[int] = None,
     unit_type: SmetUnitType = "output",
+    write_slope_metadata: bool = True,
     **kwargs
 ) -> None:
     """
@@ -737,7 +751,8 @@ def to_smet(
 
     This function extracts data variables that do not have a 'layer' dimension
     (e.g., meteorological data, total snow height) and writes them into the
-    SMET format. It only supports writing data for a single location.
+    SMET format. It only supports writing data for a single location, slope,
+    and realization.
     If the destination path ends in '.gz', '.bz2', or '.xz', the output is
     compressed with the corresponding compressor.
 
@@ -752,6 +767,11 @@ def to_smet(
             (default) writes SNOWPACK output-style units where known, while
             `'input'` and its alias `'forcing'` write forcing/input-style units
             where known.
+        write_slope_metadata: Whether to write available ``SlopeAngle`` and
+            ``SlopeAzi`` header fields. Defaults to True. Set to False when one
+            forcing SMET time series per location is valid for all slopes. The
+            dataset must still contain at most one slope; select the shared
+            forcing time series first if necessary.
         **kwargs: Reserved for future filtering options.
     """
     if ds.data is None:
@@ -766,21 +786,20 @@ def to_smet(
                 f"specified maximum of {max_files} files to save."
             )
     
-    # Check location dimension (may be None if squeezed after .sel())
-    num_locations = ds.sizes.get('location', 0)
-    if num_locations is None:
-        num_locations = 0
-    
-    if num_locations > 1:
-        raise ValueError(
-            "to_smet only supports datasets with a single location. "
-            "Use ds.sel(location='name') to select one location first."
-        )
+    _require_single_smet_series(ds)
 
     smet_vars = [name for name, var in ds.data.data_vars.items() if 'layer' not in var.dims]
     if not smet_vars:
         logging.warning("Warning: No time-series variables found to write to SMET file.")
         return
+
+    slope_angle = None
+    slope_azi = None
+    if write_slope_metadata:
+        slope_angle = _scalar_slope_value(ds, "inclination", "SlopeAngle")
+        slope_azi = _scalar_slope_value(ds, "azimuth", "SlopeAzi")
+        if slope_azi is not None and slope_angle is None:
+            raise ValueError("Cannot write SlopeAzi without a finite SlopeAngle.")
 
     # Squeeze and convert to dataframe, keeping only data variables
     df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()[smet_vars]
@@ -811,10 +830,9 @@ def to_smet(
         f.write(f"latitude = {lat:.4f}\n")
         f.write(f"longitude = {lon:.4f}\n")
         f.write(f"altitude = {alt:.0f}\n")
-        slope_angle = _first_slope_value(ds, "inclination", "SlopeAngle")
-        slope_azi = _first_slope_value(ds, "azimuth", "SlopeAzi")
-        if slope_angle is not None and slope_azi is not None:
+        if slope_angle is not None:
             f.write(f"SlopeAngle = {slope_angle:.1f}\n")
+        if slope_azi is not None:
             f.write(f"SlopeAzi = {slope_azi:.1f}\n")
         f.write(f"nodata = {nodata:.1f}\n")
         fields = "timestamp " + " ".join(df.columns)
