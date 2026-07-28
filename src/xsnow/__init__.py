@@ -5,6 +5,7 @@ from .core import xsnowDataset, DatasetDecorator
 from .selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
 from .xsnow_io import read, append_latest, to_pro, to_smet, to_netcdf, to_zarr
 from .io.memory import MemoryLimitExceeded
+from .io.convert import ArchiveAppendError, build_archive
 from .plugin import register_xsnowDataset_method
 from .registry import registry
 from .sample_data import single_profile, single_profile_timeseries
@@ -38,6 +39,8 @@ __all__ = [
     'detect_slope_coord_issues',
     'reorder_dims',
     'cite',
+    'build_archive',
     'MemoryLimitExceeded',
+    'ArchiveAppendError',
 
 ]

@@ -44,6 +44,7 @@ from .memory import (
     MemoryLimitLike,
     resolve_memory_limit,
 )
+from .convert import ArchiveAppendError, build_archive
 from .merge import _resolve_filepaths, _merge_and_finalize
 from .pro import _read_pro_files_eager, _read_pro_files_lazy, to_pro
 from .smet import _read_smet_files, read_smet, to_smet
@@ -58,7 +59,9 @@ __all__ = [
     'to_smet',
     'to_netcdf',
     'to_zarr',
+    'build_archive',
     'MemoryLimitExceeded',
+    'ArchiveAppendError',
 ]
 
 
