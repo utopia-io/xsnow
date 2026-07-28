@@ -26,6 +26,8 @@ from ..selectors import (
 )
 from ..utils import get_logger
 
+from .memory import estimate_decoded_nbytes
+
 
 _ARCHIVE_AUTO_EAGER_MAX_BYTES = 1024**3
 
@@ -35,16 +37,10 @@ def _resolve_archive_lazy(ds: Any, lazy: Optional[bool]) -> bool:
     if lazy is not None:
         return lazy
 
-    try:
-        # Object arrays can contain variable-length values whose payload is not
-        # represented by xarray's pointer-based ``nbytes`` estimate.
-        if any(
-            variable.dtype.kind in {"O", "T"}
-            for variable in ds.variables.values()
-        ):
-            return True
-        estimated_nbytes = int(ds.nbytes)
-    except (AttributeError, TypeError, ValueError, OverflowError):
+    # A size that cannot be trusted (object or variable-length string data)
+    # keeps the archive lazy rather than gambling on an eager load.
+    estimated_nbytes = estimate_decoded_nbytes(ds)
+    if estimated_nbytes is None:
         return True
 
     return estimated_nbytes >= _ARCHIVE_AUTO_EAGER_MAX_BYTES

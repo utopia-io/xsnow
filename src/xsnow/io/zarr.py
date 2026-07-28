@@ -24,6 +24,12 @@ from ..units import UnitValidationError, validate_xsnow_unit_attrs
 from ..utils import get_logger, _promote_slope_metadata_coords
 
 from .base import _resolve_archive_lazy
+from .memory import (
+    MemoryLimitExceeded,
+    MemoryLimitLike,
+    check_memory_budget,
+    resolve_memory_limit,
+)
 
 # Define the allowed modes matching xarray/zarr requirements
 ZarrModes = Literal['w', 'w-', 'a', 'a-', 'r+', 'r']
@@ -39,6 +45,7 @@ def _read_zarr(
     unit_validation: str = "strict",
     lazy: Optional[bool] = None,
     chunks: Optional[Dict[str, int]] = None,
+    memory_limit: MemoryLimitLike = "auto",
 ) -> Optional[xsnowDataset]:
     """
     Internal function to read a Zarr archive.
@@ -62,13 +69,23 @@ def _read_zarr(
         chunks: Dask chunk sizes forwarded to ``xarray.open_zarr`` when
             ``lazy`` is not False. None uses xarray/Dask automatic chunking;
             ``{}`` requests the Zarr archive's native chunks.
-        
+        memory_limit: Pre-flight budget for an eager load. `'auto'` (default)
+            uses a fraction of detected available memory; a size string or byte
+            count sets an absolute cap; None disables the guard.
+
     Returns:
         xsnowDataset with the loaded data, or None if loading fails
+
+    Raises:
+        MemoryLimitExceeded: If an eager load would exceed ``memory_limit``.
     """
     logger = get_logger(__name__, logger=logger)
     opened: Optional[xr.Dataset] = None
-    
+
+    # Resolved up front so a malformed budget raises instead of being caught
+    # by this function's "return None on read failure" contract below.
+    budget_bytes = resolve_memory_limit(memory_limit, logger=logger)
+
     try:
         path = Path(path)
         
@@ -126,13 +143,23 @@ def _read_zarr(
             )
 
         if not resolved_lazy:
+            # Check the narrowed selection, not the whole archive, and check it
+            # before the allocation an OOM kill would make uncatchable.
+            check_memory_budget(
+                ds_raw,
+                budget_bytes,
+                source=f"Zarr archive {path}",
+                logger=logger,
+            )
             ds_raw.load()
             opened.close()
 
         # Wrap in xsnowDataset
         return xsnowDataset(ds_raw)
-        
-    except UnitValidationError:
+
+    except (UnitValidationError, MemoryLimitExceeded):
+        # Deliberate refusals, not read failures: surface them to the caller
+        # rather than degrading to the None "could not read" contract below.
         if opened is not None:
             opened.close()
         raise

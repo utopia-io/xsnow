@@ -24,6 +24,7 @@ from ..units import validate_xsnow_unit_attrs
 from ..utils import get_logger, _promote_slope_metadata_coords, reorder_dims
 
 from .base import _resolve_archive_lazy, _round_coord
+from .memory import MemoryLimitLike, check_memory_budget, resolve_memory_limit
 
 
 @contextmanager
@@ -58,6 +59,7 @@ def _read_xsnow_netcdf(
     slope_sel=None,
     realization_sel=None,
     chunk_cache_size: Optional[int] = None,
+    memory_limit: MemoryLimitLike = "auto",
 ) -> Optional[xsnowDataset]:
     """
     Read xsnow's custom netcdf format.
@@ -86,11 +88,18 @@ def _read_xsnow_netcdf(
             while the file is open. None leaves the process's current netCDF4
             setting untouched; set a small value (e.g. 1 MiB) to limit
             aggregate chunk-cache memory on datasets with many variables.
+        memory_limit: Pre-flight budget for an eager load. `'auto'` (default)
+            uses a fraction of detected available memory; a size string or byte
+            count sets an absolute cap; None disables the guard.
 
     Returns:
         An xsnowDataset instance, or None if reading fails.
+
+    Raises:
+        MemoryLimitExceeded: If an eager load would exceed ``memory_limit``.
     """
     logger = get_logger(__name__, logger=logger)
+    budget_bytes = resolve_memory_limit(memory_limit, logger=logger)
 
     open_lazily = lazy is not False
     open_chunks = (
@@ -141,6 +150,14 @@ def _read_xsnow_netcdf(
             )
 
         if not resolved_lazy:
+            # Check the narrowed selection, not the whole file, and check it
+            # before the allocation an OOM kill would make uncatchable.
+            check_memory_budget(
+                ds,
+                budget_bytes,
+                source=f"NetCDF file {source}",
+                logger=logger,
+            )
             ds.load()
             opened.close()
 

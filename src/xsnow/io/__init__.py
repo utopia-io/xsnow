@@ -39,6 +39,11 @@ from .base import (
     _sanitize_station_name,
     _handle_duplicate_names,
 )
+from .memory import (
+    MemoryLimitExceeded,
+    MemoryLimitLike,
+    resolve_memory_limit,
+)
 from .merge import _resolve_filepaths, _merge_and_finalize
 from .pro import _read_pro_files_eager, _read_pro_files_lazy, to_pro
 from .smet import _read_smet_files, read_smet, to_smet
@@ -53,6 +58,7 @@ __all__ = [
     'to_smet',
     'to_netcdf',
     'to_zarr',
+    'MemoryLimitExceeded',
 ]
 
 
@@ -70,6 +76,7 @@ def read(
     n_cpus_use: Optional[int] = None,
     logger: Optional[logging.Logger] = None,
     chunks: Optional[Dict[str, int]] = None,
+    memory_limit: MemoryLimitLike = "auto",
     **parser_kwargs: Any
 ) -> Optional[xsnowDataset]:
     """
@@ -112,6 +119,17 @@ def read(
             loaded eagerly when their selected decoded data is estimated below
             1 GiB, while larger archives remain lazy. PRO/SMET collections
             choose based on ``lazy_threshold``.
+        memory_limit: Pre-flight memory budget for eager NetCDF and Zarr reads.
+            Because a kernel OOM kill sends an uncatchable SIGKILL, the size of
+            the selected data is compared against this budget *before* the
+            eager load is issued, and `MemoryLimitExceeded` is raised instead
+            of risking the process. `'auto'` (default) uses 70% of detected
+            available memory; a size string (`'8GB'`, `'512MiB'`) or a byte
+            count sets an absolute cap; None disables the guard. The check is
+            applied after selectors narrow the dataset, so it sees the subset
+            actually being read. On a machine with no memory cgroup limit,
+            detected "available" memory includes reclaimable page cache, so
+            prefer an explicit cap where evicting that cache is itself harmful.
         lazy_threshold: Number of files above which lazy loading is enabled
             for PRO/SMET collections when ``lazy=None``. Default: 30 files.
         parallel_lazy_creation: If True (default), parallelize the creation of lazy
@@ -205,6 +223,22 @@ def read(
         >>> # Use a fixed layer dimension when the smart detector is unsuitable
         >>> ds = read("mixed_archive/", max_layers=120)
 
+        >>> # Cap an explicit eager read; raises rather than risking an OOM kill
+        >>> ds = read("season.zarr", lazy=False, memory_limit="8GB")
+
+        >>> # Fall back to lazy instead of failing when the archive is too big
+        >>> from xsnow import MemoryLimitExceeded
+        >>> try:
+        ...     ds = read("season.zarr", lazy=False)
+        ... except MemoryLimitExceeded:
+        ...     ds = read("season.zarr", lazy=True)
+
+        >>> # Narrowing the read shrinks what the guard measures
+        >>> ds = read("season.zarr", lazy=False, time=slice("2024-01", "2024-02"))
+
+        >>> # Opt out when you know the box can take it
+        >>> ds = read("season.zarr", lazy=False, memory_limit=None)
+
     See Also
     --------
     to_netcdf : Save datasets to NetCDF with proper formatting
@@ -216,6 +250,10 @@ def read(
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
         n_cpus_use = min(32, cpu_count - 1) if cpu_count and cpu_count > 1 else 1
+
+    # Resolved once, up front, so a malformed budget fails fast on every source
+    # type rather than being swallowed by a per-format read handler.
+    budget_bytes = resolve_memory_limit(memory_limit, logger=logger)
 
     time_sel = _coerce_time(time)
     location_sel = _coerce_location(location)
@@ -240,9 +278,12 @@ def read(
                 location_sel=location_sel,
                 slope_sel=slope_sel,
                 realization_sel=realization_sel,
+                memory_limit=budget_bytes,
                 **netcdf_kwargs,
             )
-        except UnitValidationError:
+        except (UnitValidationError, MemoryLimitExceeded):
+            # Deliberate refusals, not read failures: a swallowed memory guard
+            # would hand back None and leave the caller none the wiser.
             raise
         except Exception as e:
             logger.warning(f"Failed to read NetCDF file {source}: {e}")
@@ -264,8 +305,10 @@ def read(
                 unit_validation=parser_kwargs.get('unit_validation', 'strict'),
                 lazy=lazy,
                 chunks=chunks,
+                memory_limit=budget_bytes,
             )
-        except UnitValidationError:
+        except (UnitValidationError, MemoryLimitExceeded):
+            # See the NetCDF branch: refusals must not degrade to None.
             raise
         except Exception as e:
             logger.warning(f"Failed to read Zarr archive {source}: {e}")

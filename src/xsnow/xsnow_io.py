@@ -70,6 +70,14 @@ from .io.zarr import (
     _read_zarr,
 )
 
+from .io.memory import (
+    MemoryLimitExceeded,
+    available_memory_bytes,
+    check_memory_budget,
+    estimate_decoded_nbytes,
+    resolve_memory_limit,
+)
+
 from .io.merge import (
     _resolve_filepaths,
     _merge_and_finalize,
