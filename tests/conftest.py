@@ -965,11 +965,37 @@ def timer():
     return Timer()
 
 
+#: Below this, an RSS delta says nothing.
+#:
+#: Process RSS moves for reasons that have nothing to do with the code under
+#: test: garbage collection timing, allocator arenas being reused or returned
+#: to the OS, and page-cache reclamation caused by *earlier* tests in the same
+#: session. Measured swings of about -8 MB have been observed between two
+#: samples taken around a 30 KB allocation, so this floor is set well above
+#: that. Assertions on smaller deltas are measuring noise.
+MEMORY_NOISE_MB = 16.0
+
+
 @pytest.fixture
 def memory_monitor():
     """
-    Monitor memory usage during tests.
-    
+    Monitor process memory usage during tests.
+
+    RSS is **not monotonic**. In a long-running single-process pytest session
+    it can fall between two samples, which previously produced nonsensical
+    negative "increases" (a -48.4 MB reading made a ratio assertion flip).
+    Two things guard against that:
+
+    - every sample forces a ``gc.collect()`` first, so a reading reflects live
+      objects rather than whenever the collector happened to run;
+    - ``increase()`` is floored at zero, since a negative increase is always a
+      measurement artifact and never a fact about the code under test.
+
+    Use ``noise_mb`` for assertion thresholds rather than comparing two deltas
+    to each other: a difference of two noisy samples is noisier than either.
+    ``raw_increase()`` is available when a test genuinely wants the unclamped
+    number for reporting.
+
     Usage:
         def test_memory(memory_monitor):
             memory_monitor.start()
@@ -977,37 +1003,68 @@ def memory_monitor():
             increase = memory_monitor.increase()
             assert increase < 1000  # < 1 GB
     """
+    import gc
+
     import psutil
-    
+
     class MemoryMonitor:
+        #: Deltas at or below this are indistinguishable from sampling noise.
+        noise_mb = MEMORY_NOISE_MB
+
         def __init__(self):
             self.process = psutil.Process()
             self.baseline = None
-        
+
+        def _sample(self) -> float:
+            """RSS in MB, after collecting so the reading reflects live data."""
+            gc.collect()
+            return self.process.memory_info().rss / 1024 / 1024
+
         def start(self):
             """Record baseline memory usage."""
-            self.baseline = self.process.memory_info().rss / 1024 / 1024  # MB
+            self.baseline = self._sample()
             return self.baseline
-        
+
         def current(self) -> float:
             """Get current memory usage in MB."""
-            return self.process.memory_info().rss / 1024 / 1024
-        
-        def increase(self) -> float:
-            """Get memory increase from baseline in MB."""
+            return self._sample()
+
+        def raw_increase(self) -> float:
+            """
+            Increase from baseline in MB, unclamped.
+
+            May be negative when the OS reclaimed memory allocated earlier in
+            the session. Useful for reporting, not for assertions.
+            """
             if self.baseline is None:
                 raise RuntimeError("Call start() before checking increase()")
             return self.current() - self.baseline
-        
+
+        def increase(self) -> float:
+            """
+            Get memory increase from baseline in MB, floored at zero.
+
+            A negative increase means the process gave memory back between
+            samples, not that the code under test freed anything.
+            """
+            return max(0.0, self.raw_increase())
+
+        def is_measurable(self, value: float) -> bool:
+            """Whether a delta is large enough to mean anything."""
+            return value > self.noise_mb
+
         def report(self):
             """Print memory usage report."""
             current = self.current()
             if self.baseline:
                 increase = current - self.baseline
-                print(f"\nMemory: {self.baseline:.1f} MB → {current:.1f} MB (+{increase:.1f} MB)")
+                print(
+                    f"\nMemory: {self.baseline:.1f} MB → {current:.1f} MB "
+                    f"({increase:+.1f} MB, noise floor {self.noise_mb:.0f} MB)"
+                )
             else:
                 print(f"\nMemory: {current:.1f} MB")
-    
+
     return MemoryMonitor()
 
 

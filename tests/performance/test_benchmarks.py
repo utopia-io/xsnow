@@ -37,6 +37,20 @@ except ImportError:
 from xsnow import read
 
 
+def _chunked_vars(ds) -> set:
+    """
+    Names of the data variables still backed by Dask.
+
+    Whether a variable is chunked is a fact about the object, unlike an RSS
+    delta, so it answers "was this computed?" without a measurement.
+    """
+    return {
+        str(name)
+        for name, var in ds.data_vars.items()
+        if var.chunks is not None
+    }
+
+
 # ============================================================================
 # BENCHMARK FIXTURES
 # ============================================================================
@@ -283,41 +297,50 @@ class TestMemoryProfiling:
             print("    (Both under 0.1 MB - very efficient!)")    
             
             
-    def test_memory_lazy_no_accidental_computation(self, benchmark_data_medium):
-        """Verify lazy loading doesn't accidentally compute data."""
-        import gc
-        
-        gc.collect()
-        mem_before = psutil.Process().memory_info().rss / 1024 / 1024
-        
+    def test_memory_lazy_no_accidental_computation(self, benchmark_data_medium, memory_monitor):
+        """
+        Verify lazy loading doesn't accidentally compute data.
+
+        The memory ceiling below is an absolute one. This dataset's payload is
+        a couple of KB, orders of magnitude under RSS sampling noise, so the
+        previous check that computing raised memory *more than* metadata access
+        did was comparing two noise readings and failed whenever both landed on
+        zero. Whether the data is still Dask-backed answers the same question
+        exactly, so the direction of the effect is asserted structurally and
+        memory is kept only as a ceiling.
+        """
+        memory_monitor.start()
+
         # Load lazily
         ds = read(benchmark_data_medium, lazy=True)
-        
+
         # Access dataset metadata (shouldn't trigger computation)
         _ = ds.data.sizes
         _ = ds.data.coords
         _ = list(ds.data.data_vars)
-        
-        mem_after_access = psutil.Process().memory_info().rss / 1024 / 1024
-        mem_increase = mem_after_access - mem_before
-        
+
+        mem_increase = memory_monitor.increase()
         print(f"\nMemory increase after metadata access: {mem_increase:.2f} MB")
-        
+
         # Should be minimal (< 50 MB for metadata only)
         assert mem_increase < 50, \
             f"Accessing metadata triggered computation! Memory increased by {mem_increase:.2f} MB"
-        
+
+        # Reading metadata must leave every variable unevaluated.
+        assert _chunked_vars(ds.data), "lazy read produced no Dask-backed variables"
+        assert _chunked_vars(ds.data) == set(ds.data.data_vars), \
+            "accessing metadata materialized a variable"
+
         # Now explicitly compute
         ds_computed = ds.compute()
-        
-        mem_after_compute = psutil.Process().memory_info().rss / 1024 / 1024
-        mem_compute = mem_after_compute - mem_after_access
-        
-        print(f"Memory increase after explicit compute: {mem_compute:.2f} MB")
-        
-        # Computation should increase memory significantly
-        assert mem_compute > mem_increase, \
-            "Explicit compute should increase memory more than metadata access"
+
+        mem_after_compute = memory_monitor.increase()
+        print(f"Memory after explicit compute: {mem_after_compute:.2f} MB")
+
+        # Computing must materialize every variable it left lazy.
+        assert not _chunked_vars(ds_computed.data), \
+            "compute() left variables Dask-backed"
+        assert ds_computed.data.nbytes == ds.data.nbytes
     
     def test_memory_profile_detailed(self, benchmark_data_small):
         """Detailed memory profiling of read operation."""

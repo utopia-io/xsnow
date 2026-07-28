@@ -189,36 +189,79 @@ class TestMemoryUsage:
         memory_monitor.report()
     
     def test_memory_efficient_filtering(self, synthetic_pro, tmp_path, memory_monitor):
-        """Test that filtering doesn't cause memory bloat."""
+        """
+        Test that filtering doesn't cause memory bloat.
+
+        This asserts against an absolute ceiling rather than a fraction of the
+        memory the load itself used. That load is only tens of KB here, far
+        below RSS sampling noise, so a ratio of it was a ratio of noise: when
+        the baseline delta came back at or below zero the bound went negative
+        and the test failed for reasons unrelated to filtering.
+
+        Filtering narrows a dataset, so its overhead should be indistinguishable
+        from noise. Anything above the floor means a selection materialized a
+        copy, which is the regression worth catching.
+        """
         # Create dataset
         data_dir = synthetic_pro.multi_station(tmp_path, n_stations=20, n_profiles_each=50)
-        
+
         memory_monitor.start()
-        
+
         # Load full dataset
         ds_full = read(data_dir, lazy=False)
         mem_after_load = memory_monitor.increase()
-    
-        # Skip if no memory was tracked (monitoring might not work in all environments)
-        if mem_after_load == 0:
-            pytest.skip("Memory monitoring not available")
-        
+
         # Apply multiple filters
         ds_filtered = ds_full.isel(time=slice(0, 10))
         ds_filtered = ds_filtered.isel(location=slice(0, 5))
-        
+
         mem_after_filter = memory_monitor.increase()
-        mem_increase = mem_after_filter - mem_after_load
-        
+        overhead = mem_after_filter - mem_after_load
+
         print(f"\nMemory after load: {mem_after_load:.1f} MB")
         print(f"Memory after filtering: {mem_after_filter:.1f} MB")
-        print(f"Filtering overhead: {mem_increase:.1f} MB")
-        
-        # Filtering should not significantly increase memory
-        assert mem_increase < mem_after_load * 0.3, "Excessive memory during filtering"
-        
+        print(f"Filtering overhead: {overhead:+.1f} MB "
+              f"(noise floor {memory_monitor.noise_mb:.0f} MB)")
+
+        assert overhead < memory_monitor.noise_mb, (
+            f"Filtering added {overhead:.1f} MB, above the {memory_monitor.noise_mb:.0f} MB "
+            f"noise floor - a selection is materializing a copy"
+        )
+
+        # The narrowed result must actually be smaller than what it came from.
+        assert ds_filtered.data.nbytes < ds_full.data.nbytes
+
         memory_monitor.report()
     
+    def test_monitor_never_reports_negative_increase(self, memory_monitor):
+        """
+        increase() must floor at zero.
+
+        RSS can fall between two samples when the OS reclaims memory allocated
+        by earlier tests in the same session. That produced readings like
+        -48.4 MB, which flipped ratio-based assertions. A negative increase is
+        always a measurement artifact, never a fact about the code under test.
+
+        The drop is forced by raising the baseline rather than by hoping real
+        RSS falls during the test, which would make this pass vacuously on runs
+        where it happens not to.
+        """
+        memory_monitor.start()
+        memory_monitor.baseline += 500  # pretend the run started 500 MB higher
+
+        assert memory_monitor.raw_increase() < 0, "test did not force a drop"
+        assert memory_monitor.increase() == 0.0
+
+    def test_monitor_exposes_a_noise_floor(self, memory_monitor):
+        """Thresholds need a documented floor rather than a magic number."""
+        assert memory_monitor.noise_mb > 0
+        assert not memory_monitor.is_measurable(memory_monitor.noise_mb)
+        assert memory_monitor.is_measurable(memory_monitor.noise_mb + 1)
+
+    def test_monitor_requires_start_before_increase(self, memory_monitor):
+        with pytest.raises(RuntimeError, match="start"):
+            memory_monitor.increase()
+
     def test_memory_garbage_collection(self, synthetic_pro, tmp_path, memory_monitor):
         """Test that memory is properly released."""
         import gc
