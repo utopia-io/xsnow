@@ -130,9 +130,13 @@ def read(
             available memory; a size string (`'8GB'`, `'512MiB'`) or a byte
             count sets an absolute cap; None disables the guard. The check is
             applied after selectors narrow the dataset, so it sees the subset
-            actually being read. On a machine with no memory cgroup limit,
-            detected "available" memory includes reclaimable page cache, so
-            prefer an explicit cap where evicting that cache is itself harmful.
+            actually being read. A container or scheduled HPC job may have a
+            cgroup limit or scheduler setting that caps its assigned memory,
+            but xsnow's current detection does not read that limit directly.
+            Detected "available" memory may instead describe the host or whole
+            compute node, and can include reclaimable file-system cache shared
+            with other work. Do not rely on `'auto'` in these environments, but instead
+            prefer an explicit cap based on the assigned memory.
         lazy_threshold: Number of files above which lazy loading is enabled
             for PRO/SMET collections when ``lazy=None``. Default: 30 files.
         parallel_lazy_creation: If True (default), parallelize the creation of lazy

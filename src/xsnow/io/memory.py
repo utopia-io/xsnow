@@ -95,11 +95,13 @@ def available_memory_bytes() -> Optional[int]:
     than guess.
 
     Note:
-        On a machine with no memory cgroup limit, "available" includes
-        reclaimable page cache. A read sized against that number can still
-        evict the cache and degrade the whole box even though it never
-        technically runs out of RAM. Deployments that care about this should
-        pass an explicit absolute cap instead of relying on ``'auto'``.
+        A container or scheduled HPC job may have a cgroup limit or scheduler
+        setting that caps its assigned memory, but this function does not read
+        that limit directly. The detected value may instead describe the host
+        or whole compute node, and can include reclaimable file-system cache
+        shared with other work. Do not rely on ``'auto'`` in these environments
+        unless you have verified what it detects; pass an explicit cap based on
+        the assigned memory.
     """
     try:
         import psutil
