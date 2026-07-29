@@ -332,44 +332,66 @@ def normalize_slope_coords(
             is_consistent = True  # Track consistency
             
             if verify_consistency and ds.sizes['location'] > 1:
-                reference = coord.isel(location=0)
-                
-                for loc_idx in range(1, ds.sizes['location']):
-                    comparison = coord.isel(location=loc_idx)
-                    if not np.allclose(
-                        comparison.values,
-                        reference.values,
-                        rtol=1e-9,
-                        atol=1e-9,
-                        equal_nan=True
-                    ):
-                        is_consistent = False  # Mark as inconsistent
-                        
-                        # If we allow per-location slopes, skip normalization
-                        if allow_per_location:
-                            logger.info(
-                                f"Slope coordinate '{coord_name}' varies by location. "
-                                f"Preserving (location, slope) dimensions as allow_per_location=True."
-                            )
-                            # Don't add to coords_to_update - keep original dimensions
-                            break
-                        
-                        # Otherwise, raise error as before
-                        # Find which slopes differ
+                # Materialize this small coordinate once. Calling ``.values``
+                # for every location separately creates one Dask computation
+                # (and potentially one remote archive read) per comparison.
+                coord_values = coord.values
+                location_axis = coord.dims.index('location')
+                reference_values = np.take(coord_values, 0, axis=location_axis)
+                reference_broadcast = np.expand_dims(
+                    reference_values,
+                    axis=location_axis,
+                )
+                matches_reference = np.isclose(
+                    coord_values,
+                    reference_broadcast,
+                    rtol=1e-9,
+                    atol=1e-9,
+                    equal_nan=True,
+                )
+                comparison_axes = tuple(
+                    axis
+                    for axis in range(matches_reference.ndim)
+                    if axis != location_axis
+                )
+                locations_match = np.all(
+                    matches_reference,
+                    axis=comparison_axes,
+                )
+                differing_locations = np.flatnonzero(~locations_match)
+
+                if differing_locations.size:
+                    is_consistent = False
+
+                    # If we allow per-location slopes, skip normalization
+                    if allow_per_location:
+                        logger.info(
+                            f"Slope coordinate '{coord_name}' varies by location. "
+                            f"Preserving (location, slope) dimensions as allow_per_location=True."
+                        )
+                    else:
+                        # Preserve the existing error contract by reporting the
+                        # first location that differs from location 0.
+                        loc_idx = int(differing_locations[0])
+                        comparison_values = np.take(
+                            coord_values,
+                            loc_idx,
+                            axis=location_axis,
+                        )
                         diff_mask = ~np.isclose(
-                            comparison.values,
-                            reference.values,
+                            comparison_values,
+                            reference_values,
                             rtol=1e-9,
                             atol=1e-9,
-                            equal_nan=True
+                            equal_nan=True,
                         )
                         diff_indices = np.where(diff_mask)[0]
-                        
+
                         raise ValueError(
                             f"Slope coordinate '{coord_name}' is inconsistent across locations.\n"
                             f"Location 0 vs Location {loc_idx} differ at slope indices: {diff_indices}\n"
-                            f"Location 0 values: {reference.values[diff_indices]}\n"
-                            f"Location {loc_idx} values: {comparison.values[diff_indices]}\n"
+                            f"Location 0 values: {reference_values[diff_indices]}\n"
+                            f"Location {loc_idx} values: {comparison_values[diff_indices]}\n"
                             f"Slope coordinates must be identical across all locations.\n"
                             f"Set verify_consistency=False to use first location's values anyway, "
                             f"or allow_per_location=True to preserve per-location slopes."

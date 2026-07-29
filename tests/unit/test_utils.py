@@ -1,9 +1,14 @@
 import logging
 import uuid
 
+import dask
+import dask.array as da
+import numpy as np
 import pytest
+import xarray as xr
+from dask.callbacks import Callback
 
-from xsnow.utils import get_logger
+from xsnow.utils import get_logger, normalize_slope_coords
 
 
 def _cleanup_logger(log: logging.Logger) -> None:
@@ -107,3 +112,104 @@ def test_get_logger_uses_level_prefixes(capsys):
     captured = capsys.readouterr().err
     assert "[i]" in captured
     assert "[w]" in captured
+
+
+def _slope_dataset(values, *, lazy=False):
+    values = np.asarray(values, dtype=float)
+    coord_values = (
+        da.from_array(values, chunks=(1, values.shape[1]))
+        if lazy
+        else values
+    )
+    marker_values = (
+        da.ones(values.shape, chunks=(1, values.shape[1]))
+        if lazy
+        else np.ones(values.shape)
+    )
+    return xr.Dataset(
+        {"marker": (("location", "slope"), marker_values)},
+        coords={
+            "location": np.arange(values.shape[0]),
+            "slope": np.arange(values.shape[1]),
+            "inclination": (("location", "slope"), coord_values),
+        },
+    )
+
+
+def test_normalize_slope_coords_collapses_consistent_values():
+    ds = _slope_dataset(
+        [
+            [0.0, 35.0],
+            [0.0, 35.0],
+            [0.0, 35.0],
+        ]
+    )
+
+    normalized = normalize_slope_coords(
+        ds,
+        slope_coord_names=["inclination"],
+        allow_per_location=True,
+    )
+
+    assert normalized["inclination"].dims == ("slope",)
+    np.testing.assert_allclose(normalized["inclination"], [0.0, 35.0])
+
+
+def test_normalize_slope_coords_preserves_inconsistent_values_when_allowed():
+    values = np.array(
+        [
+            [0.0, 35.0],
+            [0.0, 40.0],
+        ]
+    )
+    ds = _slope_dataset(values)
+
+    normalized = normalize_slope_coords(
+        ds,
+        slope_coord_names=["inclination"],
+        allow_per_location=True,
+    )
+
+    assert normalized["inclination"].dims == ("location", "slope")
+    np.testing.assert_allclose(normalized["inclination"], values)
+
+
+def test_normalize_slope_coords_reports_first_inconsistent_location():
+    ds = _slope_dataset(
+        [
+            [0.0, 35.0],
+            [0.0, 35.0],
+            [0.0, 40.0],
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"Location 0 vs Location 2 differ at slope indices: \[1\]",
+    ):
+        normalize_slope_coords(
+            ds,
+            slope_coord_names=["inclination"],
+        )
+
+
+def test_normalize_slope_coords_computes_lazy_coordinate_once():
+    ds = _slope_dataset(
+        np.tile([0.0, 35.0], (100, 1)),
+        lazy=True,
+    )
+    computations = []
+
+    with dask.config.set(scheduler="synchronous"), Callback(
+        start=lambda dask_graph: computations.append(dask_graph)
+    ):
+        normalized = normalize_slope_coords(
+            ds,
+            slope_coord_names=["inclination"],
+            allow_per_location=True,
+        )
+
+    assert len(computations) == 1
+    assert normalized["inclination"].dims == ("slope",)
+    assert isinstance(normalized["inclination"].data, da.Array)
+    assert isinstance(normalized["marker"].data, da.Array)
