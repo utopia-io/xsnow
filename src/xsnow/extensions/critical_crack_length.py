@@ -1,13 +1,20 @@
 """
 Analytical parametrizations for the critical crack length
 
-This module implements the parametrization by Richter et al (2019) for the critical crack length
-(flat terrain). It allows computation on CPU or GPU depending on user environment and install.
+This module implements the parametrization by Richter et al (2019) for the
+critical crack length, in two formulations: flat terrain (the default) and
+a virtual slope. The slope formulation is part of the sk38_ccl index; it
+adds the slope-parallel load and uses the weak layer's own modulus with an
+equivalent slab thickness. Computation runs on CPU or GPU depending on
+user environment and install.
 
 Other parametrizations are welcome to be added.
 
 """
 import contextlib
+import math
+from typing import Optional
+
 import numpy as np
 import xarray as xr
 
@@ -27,6 +34,14 @@ A_RICHTER = 4.6e-9       # Richter et al. (2019) parameter "a"
 B_RICHTER = -2.0         # Richter et al. (2019) parameter "b"
 E0 = 5.07e9              # Pa, modulus prefactor in Richter et al. (2019)
 E_EXP = 5.13             # exponent on (rho_slab / rho_ice)
+
+
+def _errstate(xp, **kwargs):
+    """Floating-point error-state context; a no-op on backends without
+    one (CuPy does not implement ``errstate``)."""
+    if hasattr(xp, 'errstate'):
+        return xp.errstate(**kwargs)
+    return contextlib.nullcontext()
 
 
 def compute_rho_slab(density, thickness, xp):
@@ -86,7 +101,7 @@ def compute_rho_slab(density, thickness, xp):
     thick_cum_from_top = xp.cumsum(thickness_clean[..., ::-1], axis=-1)
 
     # Mean density of (layer >= current in reversed coords)
-    with xp.errstate(divide='ignore', invalid='ignore'):
+    with _errstate(xp, divide='ignore', invalid='ignore'):
         rho_rev = mass_cum_from_top / thick_cum_from_top  # (..., L), reversed axis
 
     # Flip back to bottom->top ordering
@@ -101,6 +116,90 @@ def compute_rho_slab(density, thickness, xp):
     )
 
     return rho_strict_above
+
+
+def slab_weighted_mean(values, thickness, xp):
+    """
+    Thickness-weighted mean of ``values`` over all valid layers strictly
+    above each layer (towards the surface). The surface layer and padded
+    layers yield NaN. The layer axis is last; layer 0 is the deepest.
+    """
+    valid = xp.isfinite(thickness) & (thickness > 0) & xp.isfinite(values)
+    weights = xp.where(valid, thickness, 0.0)
+    weighted = xp.where(valid, values * thickness, 0.0)
+
+    sum_from_top = xp.cumsum(weighted[..., ::-1], axis=-1)[..., ::-1]
+    weight_from_top = xp.cumsum(weights[..., ::-1], axis=-1)[..., ::-1]
+
+    with _errstate(xp, divide='ignore', invalid='ignore'):
+        mean_incl = sum_from_top / weight_from_top
+
+    # shift so that layer i only sees layers strictly above itself
+    tail_nan = xp.full_like(mean_incl[..., :1], xp.nan)
+    return xp.concatenate([mean_incl[..., 1:], tail_nan], axis=-1)
+
+
+def strength_correction(grain_type, sigma_n, shear_strength, xp):
+    """
+    Additional shear strength from the slope-normal load [Pa].
+
+    """
+    f1 = xp.floor(grain_type / 100.0)
+    tau_add_other = sigma_n * (8.0e-5 * shear_strength + 0.224)
+    tau_add_pp = sigma_n * (
+        8.0e-5 * shear_strength + 2.2e-5 * sigma_n + 0.056
+    )
+    tau_add = xp.where(f1 == 1, tau_add_pp, tau_add_other)
+    return xp.where(f1 == 6, 0.0, tau_add)
+
+
+def compute_slab_mechanics(density, thickness_vertical, height, grain_type,
+                           shear_strength, inclination, xp):
+    """
+    Slab quantities above each layer on a virtual slope, as a dict of
+    backend arrays (slope-normal geometry, layer axis last).
+    """
+    theta = math.radians(inclination)
+    density = xp.asarray(density)
+    thick_vert = xp.asarray(thickness_vertical)
+    height = xp.asarray(height)
+    grain_type = xp.asarray(grain_type)
+    shear = xp.asarray(shear_strength)
+
+    valid = xp.isfinite(thick_vert) & (thick_vert > 0)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+    height_n = xp.where(valid, height * cos_t, xp.nan)
+    thick_n = xp.where(valid, thick_vert * cos_t, xp.nan)
+    surface_n = xp.nanmax(xp.where(valid, height_n, -xp.inf), axis=-1)
+    surface_n = xp.where(xp.isfinite(surface_n), surface_n, xp.nan)
+    d_slab = surface_n[..., None] - height_n
+
+    rho_slab = compute_rho_slab(density, thick_n, xp)
+    e_layer = E0 * (density / RHO_ICE) ** E_EXP
+    e_slab = slab_weighted_mean(e_layer ** (1.0 / 3.0), thick_n, xp) ** 3
+    with _errstate(xp, divide='ignore', invalid='ignore'):
+        h_equiv = d_slab * (e_slab / e_layer) ** (1.0 / 3.0)
+
+    tau_g = rho_slab * G * d_slab * sin_t
+    sigma_n = rho_slab * G * d_slab * cos_t
+    tau_p = shear + strength_correction(grain_type, sigma_n, shear, xp)
+
+    return {
+        'valid': valid,
+        'density': density,
+        'height_n': height_n,
+        'thick_n': thick_n,
+        'surface_n': surface_n,
+        'd_slab': d_slab,
+        'rho_slab': rho_slab,
+        'e_layer': e_layer,
+        'e_slab': e_slab,
+        'h_equiv': h_equiv,
+        'tau_g': tau_g,
+        'sigma_n': sigma_n,
+        'tau_p': tau_p,
+    }
 
 
 def compute_rc_flat_richter2019(
@@ -152,7 +251,7 @@ def compute_rc_flat_richter2019(
     xsnow's internal unit convention.
 
     No slope angle correction is applied here; this is for flat terrain
-    (normal loading only), like the original xsnow rc_flat calculation.
+    (normal loading only).
     """
     # E' (effective modulus)
     eprime = (
@@ -171,7 +270,7 @@ def compute_rc_flat_richter2019(
 
     term2_under = 2.0 * shear_strength_pa * eprime * dsl_over_sigman
 
-    with xp.errstate(invalid='ignore'):
+    with _errstate(xp, invalid='ignore'):
         term1 = xp.sqrt(xp.where(term1_under > 0, term1_under, xp.nan))
         term2 = xp.sqrt(xp.where(term2_under > 0, term2_under, xp.nan))
 
@@ -183,18 +282,54 @@ def compute_rc_flat_richter2019(
     return rc_flat
 
 
-@register_xsnowDataset_method
-def compute_critical_crack_length(ds: 'xsnowDataset') -> 'xsnowDataset':
+def compute_rc_slope_richter2019(
+    rho_layer,
+    grain_size_m,
+    shear_strength_pa,
+    tau_g,
+    sigma_n,
+    h_equiv,
+    xp,
+):
     """
-    Compute and attach the variable `rc_flat` (critical crack length on flat
-    terrain, in meters) to this xsnowDataset.
+    Compute critical crack length rc_slope [m] on a virtual slope.
 
-    This wraps the physics in `compute_rho_slab()` and
-    `compute_rc_flat_richter2019()` and handles:
-    - pulling data out of the xarray-backed dataset
-    - computing layer thickness from cumulative height
-    - dispatching to NumPy or CuPy depending on backend
-    - wrapping the result back into xarray with metadata
+    Notes
+    -----
+    ``rc = sqrt(F_wl) sqrt(h_equiv E_wl') (-tau_g + sqrt(tau_g^2 +
+    2 sigma_n (tau_p - tau_g))) / sigma_n`` (Richter et al. 2019).
+    Unlike rc_flat, rc_slope includes the slope-parallel load and uses
+    the weak layer's own modulus; the two formulations do not converge
+    into each other for vanishing slope angles.
+    """
+    with _errstate(xp, divide='ignore', invalid='ignore'):
+        f_wl = A_RICHTER * (
+            rho_layer / RHO_ICE * grain_size_m / GS_0
+        ) ** B_RICHTER
+        e_wl = E0 * (rho_layer / RHO_ICE) ** E_EXP
+        eprime_wl = e_wl / (1.0 - POISSON ** 2)
+        excess = (
+            tau_g ** 2 + 2.0 * sigma_n * (shear_strength_pa - tau_g)
+        )
+        rc = (
+            xp.sqrt(f_wl)
+            * xp.sqrt(h_equiv * eprime_wl)
+            * (-tau_g + xp.sqrt(excess))
+            / sigma_n
+        )
+    return rc
+
+
+@register_xsnowDataset_method
+def compute_critical_crack_length(
+    ds: 'xsnowDataset',
+    inclination: Optional[float] = None,
+) -> 'xsnowDataset':
+    """
+    Compute and attach the critical crack length to this xsnowDataset:
+    `rc_flat` [m] for flat terrain (`inclination=None`, the default,
+    `compute_rc_flat_richter2019()`), or `rc_slope` [m] on a virtual
+    slope of the given angle (`compute_rc_slope_richter2019()`).
 
     Requirements
     ------------
@@ -203,30 +338,37 @@ def compute_critical_crack_length(ds: 'xsnowDataset') -> 'xsnowDataset':
       - `grain_size`         [m]
       - `shear_strength`     [Pa]
       - `height`             [m], cumulative height from ground upward
+      - `grain_type`         (Swiss Code F1F2F3), slope formulation only
 
     We assume:
       - Dimension `layer` exists and indexes from ground (layer=0) upward.
       - `height` is monotonically increasing along `layer`.
       - Layers above the true snow surface are padded with NaN thickness.
 
-    Slope angle / aspect:
-      - Slope angle (`inclination`) and aspect (`azimuth`) are NOT used here.
-        This is a flat-terrain formulation (same as in earlier xsnow versions).
+    Parameters
+    ----------
+    inclination : float, optional
+        Virtual slope angle in degrees. None (default) selects the
+        flat-terrain formulation.
 
     Returns
     -------
     new_ds : xsnowDataset
-        A new xsnowDataset with a new data variable `rc_flat` [m].
+        A new xsnowDataset with a new data variable `rc_flat` [m] or
+        `rc_slope` [m].
     """
 
     if ds.data is None:
         raise ValueError("Cannot compute on an empty dataset.")
 
     required = ['density', 'grain_size', 'shear_strength', 'height']
+    if inclination is not None:
+        required.append('grain_type')
     for v in required:
         if v not in ds.data:
             raise ValueError(
-                f"Missing required variable for rc_flat calculation: '{v}'"
+                f"Missing required variable for critical crack length "
+                f"calculation: '{v}'"
             )
 
     # Pick NumPy or CuPy depending on where ds.data lives
@@ -242,49 +384,66 @@ def compute_critical_crack_length(ds: 'xsnowDataset') -> 'xsnowDataset':
     height_bottom = height_da.shift(layer=1, fill_value=0)
     thick_da = height_da - height_bottom  # [m]
 
-    # Move data to backend arrays (xp.ndarray or cupy.ndarray)
-    rho_layer_arr = xp.asarray(density_da.data)
-    gsize_arr = xp.asarray(gsize_da.data)
-    shear_arr = xp.asarray(shear_da.data)
-    thick_arr = xp.asarray(thick_da.data)
+    if inclination is None:
+        # Move data to backend arrays (NumPy or CuPy)
+        rho_layer_arr = xp.asarray(density_da.data)
+        gsize_arr = xp.asarray(gsize_da.data)
+        shear_arr = xp.asarray(shear_da.data)
+        thick_arr = xp.asarray(thick_da.data)
 
-    # Compute density of slab above each layer
-    rho_slab_arr = compute_rho_slab(
-        density=rho_layer_arr,
-        thickness=thick_arr,
-        xp=xp,
-    )
+        # Compute density of slab above each layer
+        rho_slab_arr = compute_rho_slab(
+            density=rho_layer_arr,
+            thickness=thick_arr,
+            xp=xp,
+        )
 
-    # Physics core: Richter et al. (2019) flat-terrain rc
-    rc_flat_arr = compute_rc_flat_richter2019(
-        rho_layer=rho_layer_arr,
-        grain_size_m=gsize_arr,
-        shear_strength_pa=shear_arr,
-        rho_slab=rho_slab_arr,
-        xp=xp,
-    )
+        # Richter et al. (2019) flat-terrain rc
+        rc_arr = compute_rc_flat_richter2019(
+            rho_layer=rho_layer_arr,
+            grain_size_m=gsize_arr,
+            shear_strength_pa=shear_arr,
+            rho_slab=rho_slab_arr,
+            xp=xp,
+        )
+        out_name = 'rc_flat'
+        default_long_name = 'critical crack length on flat terrain'
+    else:
+        mech = compute_slab_mechanics(
+            density_da.data, thick_da.data, height_da.data,
+            ds.data['grain_type'].data, shear_da.data, inclination, xp,
+        )
+        rc_arr = compute_rc_slope_richter2019(
+            rho_layer=mech['density'],
+            grain_size_m=xp.asarray(gsize_da.data),
+            shear_strength_pa=mech['tau_p'],
+            tau_g=mech['tau_g'],
+            sigma_n=mech['sigma_n'],
+            h_equiv=mech['h_equiv'],
+            xp=xp,
+        )
+        out_name = 'rc_slope'
+        default_long_name = 'critical crack length on the slope'
 
-    # Wrap result back into xarray using same dims/coords as height
-    rc_flat_da = xr.DataArray(
-        rc_flat_arr,
+    rc_da = xr.DataArray(
+        rc_arr,
         dims=height_da.dims,
         coords=height_da.coords,
     )
 
-    # Attach registry metadata if available
-    if 'rc_flat' in registry:
-        reg_entry = registry['rc_flat']
-        rc_flat_da.attrs = {
-            'long_name': reg_entry.get('long_name', 'critical crack length (flat terrain)'),
+    if out_name in registry:
+        reg_entry = registry[out_name]
+        rc_da.attrs = {
+            'long_name': reg_entry.get('long_name', default_long_name),
             'units': reg_entry.get('xsnow_units', 'm'),
-            'standard_name': reg_entry.get('standard_name', 'rc_flat'),
+            'standard_name': reg_entry.get('standard_name', out_name),
         }
     else:
-        rc_flat_da.attrs = {
-            'long_name': 'critical crack length on flat terrain',
+        rc_da.attrs = {
+            'long_name': default_long_name,
             'units': 'm',
-            'standard_name': 'rc_flat',
+            'standard_name': out_name,
         }
 
-    new_xr = ds.data.assign(rc_flat=rc_flat_da)
+    new_xr = ds.data.assign(**{out_name: rc_da})
     return ds.__class__(new_xr)
