@@ -65,13 +65,14 @@ def _read_zarr(
         lazy: If True, return Dask-backed data backed by the open archive; the
             caller must close the returned dataset. If False, load and close
             the archive before returning. If None (default), load selected data
-            below the automatic archive-size threshold eagerly.
+            below the adaptive threshold derived from ``memory_limit`` eagerly.
         chunks: Dask chunk sizes forwarded to ``xarray.open_zarr`` when
             ``lazy`` is not False. None uses xarray/Dask automatic chunking;
             ``{}`` requests the Zarr archive's native chunks.
         memory_limit: Pre-flight budget for an eager load. `'auto'` (default)
             uses a fraction of detected available memory; a size string or byte
-            count sets an absolute cap; None disables the guard.
+            count sets an absolute cap; None disables the guard. In automatic
+            mode, half this budget, capped at 4 GiB, is the eager threshold.
 
     Returns:
         xsnowDataset with the loaded data, or None if loading fails
@@ -136,7 +137,11 @@ def _read_zarr(
         if realization_sel:
             ds_raw = realization_sel.apply(ds_raw)
 
-        resolved_lazy = _resolve_archive_lazy(ds_raw, lazy)
+        resolved_lazy = _resolve_archive_lazy(
+            ds_raw,
+            lazy,
+            memory_budget_bytes=budget_bytes,
+        )
         if lazy is None:
             logger.debug(
                 f"Auto-detected archive lazy={resolved_lazy} from decoded size"

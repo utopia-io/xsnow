@@ -117,26 +117,21 @@ def read(
         location: A `LocationSelector` object for filtering by station ID.
         slope: A `SlopeSelector` for filtering by slope angle.
         realization: A `RealizationSelector` for filtering by model realization.
-        lazy: If True, return Dask-backed data variables. If False, load data
-            eagerly into memory. If None (default), NetCDF and Zarr sources are
-            loaded eagerly when their selected decoded data is estimated below
-            1 GiB, while larger archives remain lazy. PRO/SMET collections
-            choose based on ``lazy_threshold``.
+        lazy: Loading policy. None (default) makes a conservative adaptive
+            choice for NetCDF and Zarr, while PRO/SMET collections use
+            ``lazy_threshold``. True always returns Dask-backed data and is the
+            recommended archive mode for large datasets.
+            False explicitly requests in-memory data; eager NetCDF and Zarr
+            reads remain protected by ``memory_limit``.
         memory_limit: Pre-flight memory budget for eager NetCDF and Zarr reads.
-            Because a kernel OOM kill sends an uncatchable SIGKILL, the size of
-            the selected data is compared against this budget *before* the
-            eager load is issued, and `MemoryLimitExceeded` is raised instead
-            of risking the process. `'auto'` (default) uses 70% of detected
-            available memory; a size string (`'8GB'`, `'512MiB'`) or a byte
-            count sets an absolute cap; None disables the guard. The check is
-            applied after selectors narrow the dataset, so it sees the subset
-            actually being read. A container or scheduled HPC job may have a
-            cgroup limit or scheduler setting that caps its assigned memory,
-            but xsnow's current detection does not read that limit directly.
-            Detected "available" memory may instead describe the host or whole
-            compute node, and can include reclaimable file-system cache shared
-            with other work. Do not rely on `'auto'` in these environments, but instead
-            prefer an explicit cap based on the assigned memory.
+            The selected decoded size is checked before eager data loading, and
+            `MemoryLimitExceeded` is raised when it is too large. `'auto'`
+            (default) uses 70% of detected available memory; a size string
+            (`'8GB'`, `'512MiB'`) or byte count sets an absolute cap, and None
+            disables the guard. Selectors are applied before this check. For
+            containers and scheduled HPC jobs, prefer an explicit cap based on
+            assigned memory, because automatic detection may report the host or
+            whole node rather than the cgroup or scheduler limit.
         lazy_threshold: Number of files above which lazy loading is enabled
             for PRO/SMET collections when ``lazy=None``. Default: 30 files.
         parallel_lazy_creation: If True (default), parallelize the creation of lazy
@@ -218,7 +213,7 @@ def read(
         archive reads are loaded and closed before ``read()`` returns.
 
     Examples:
-        >>> # Small archives load eagerly; text collections use lazy_threshold
+        >>> # Let xsnow choose a conservative loading mode
         >>> ds = read("archive.nc")
         
         >>> # Force lazy loading for large datasets

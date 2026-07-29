@@ -75,7 +75,8 @@ def _read_xsnow_netcdf(
         lazy: If True, return Dask-backed data backed by the open source file;
             the caller must close the returned dataset. If False, load and
             close the file before returning. If None (default), load selected
-            data below the automatic archive-size threshold eagerly.
+            data below the adaptive threshold derived from ``memory_limit``
+            eagerly.
         chunks: Dask chunk sizes forwarded to ``xarray.open_dataset`` when
             ``lazy`` is not False. None uses xarray/Dask automatic chunking;
             ``{}`` requests the NetCDF backend's preferred chunks.
@@ -90,7 +91,8 @@ def _read_xsnow_netcdf(
             aggregate chunk-cache memory on datasets with many variables.
         memory_limit: Pre-flight budget for an eager load. `'auto'` (default)
             uses a fraction of detected available memory; a size string or byte
-            count sets an absolute cap; None disables the guard.
+            count sets an absolute cap; None disables the guard. In automatic
+            mode, half this budget, capped at 4 GiB, is the eager threshold.
 
     Returns:
         An xsnowDataset instance, or None if reading fails.
@@ -143,7 +145,11 @@ def _read_xsnow_netcdf(
         if realization_sel:
             ds = realization_sel.apply(ds)
 
-        resolved_lazy = _resolve_archive_lazy(ds, lazy)
+        resolved_lazy = _resolve_archive_lazy(
+            ds,
+            lazy,
+            memory_budget_bytes=budget_bytes,
+        )
         if lazy is None:
             logger.debug(
                 f"Auto-detected archive lazy={resolved_lazy} from decoded size"

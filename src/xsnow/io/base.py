@@ -29,11 +29,31 @@ from ..utils import get_logger
 from .memory import estimate_decoded_nbytes
 
 
-_ARCHIVE_AUTO_EAGER_MAX_BYTES = 1024**3
+_ARCHIVE_AUTO_EAGER_BUDGET_FRACTION = 0.5
+_ARCHIVE_AUTO_EAGER_CAP_BYTES = 4 * 1024**3
+_ARCHIVE_AUTO_EAGER_FALLBACK_BYTES = 1024**3
 
 
-def _resolve_archive_lazy(ds: Any, lazy: Optional[bool]) -> bool:
-    """Resolve archive auto mode from the selected dataset's decoded size."""
+def _resolve_archive_auto_eager_max_bytes(
+    memory_budget_bytes: Optional[int],
+) -> int:
+    """Return the adaptive decoded-size ceiling for automatic eager reads."""
+    if memory_budget_bytes is None:
+        return _ARCHIVE_AUTO_EAGER_FALLBACK_BYTES
+
+    budget_based_limit = max(
+        1,
+        int(memory_budget_bytes * _ARCHIVE_AUTO_EAGER_BUDGET_FRACTION),
+    )
+    return min(budget_based_limit, _ARCHIVE_AUTO_EAGER_CAP_BYTES)
+
+
+def _resolve_archive_lazy(
+    ds: Any,
+    lazy: Optional[bool],
+    memory_budget_bytes: Optional[int] = None,
+) -> bool:
+    """Resolve archive auto mode from decoded size and the memory budget."""
     if lazy is not None:
         return lazy
 
@@ -43,7 +63,11 @@ def _resolve_archive_lazy(ds: Any, lazy: Optional[bool]) -> bool:
     if estimated_nbytes is None:
         return True
 
-    return estimated_nbytes >= _ARCHIVE_AUTO_EAGER_MAX_BYTES
+    auto_eager_max_bytes = _resolve_archive_auto_eager_max_bytes(
+        memory_budget_bytes
+    )
+    return estimated_nbytes >= auto_eager_max_bytes
+
 
 # --- Dynamic Mapping from Registry ---
 CODE_TO_NAME_MAP: Dict[str, str] = {
