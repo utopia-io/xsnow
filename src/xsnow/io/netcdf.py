@@ -174,6 +174,7 @@ def _read_xsnow_netcdf(
             check_memory_budget(
                 ds,
                 budget_bytes,
+                raise_on_exceed=True,
                 source=f"NetCDF file {source}",
                 logger=logger,
             )

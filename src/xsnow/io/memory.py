@@ -24,6 +24,7 @@ import os
 import re
 from typing import Any, Optional, Union
 
+from ..plugin import register_xsnowDataset_method
 from ..utils import get_logger
 
 
@@ -192,31 +193,63 @@ def estimate_decoded_nbytes(ds: Any) -> Optional[int]:
         return None
 
 
+@register_xsnowDataset_method
 def check_memory_budget(
     ds: Any,
-    budget_bytes: Optional[int],
+    memory_limit: MemoryLimitLike = "auto",
     *,
+    raise_on_exceed: bool = False,
     source: str = "dataset",
     logger: Optional[logging.Logger] = None,
-) -> None:
+) -> bool:
     """
-    Raise before an eager load that would exceed the memory budget.
+    Report whether materializing a dataset would fit within a memory budget.
+
+    Useful before an explicit ``.compute()`` or ``.load()`` on a lazy dataset,
+    not only inside ``read()``: a kernel OOM kill is uncatchable, so the only
+    place to find out is before the allocation.
 
     Args:
-        ds: The (still lazy) dataset about to be loaded.
-        budget_bytes: Budget from :func:`resolve_memory_limit`. None skips
-            the check.
-        source: Human-readable description of what is being read, used in the
-            error message.
+        ds: The (still lazy) dataset about to be materialized.
+        memory_limit: Budget to check against. `'auto'` (default) uses a
+            fraction of detected available memory; a size string or byte count
+            sets an absolute cap; None disables the check.
+        raise_on_exceed: If True, raise ``MemoryLimitExceeded`` instead of
+            returning False. ``read()`` uses this; interactive callers
+            generally want the boolean.
+        source: Human-readable description used in the message.
         logger: Optional logger for diagnostics.
 
-    Raises:
-        MemoryLimitExceeded: If the estimated size exceeds the budget.
-    """
-    if budget_bytes is None:
-        return
+    Returns:
+        True if the dataset fits the budget, or if the check does not apply.
+        False if it would exceed the budget and ``raise_on_exceed`` is False.
 
+        **A dataset whose size cannot be determined returns True.** Object and
+        variable-length string arrays report only xarray's pointer-based
+        ``nbytes``, which does not represent the real payload, so there is no
+        trustworthy number to compare. True means "not known to exceed the
+        budget" rather than "known to fit"; returning False would make a
+        perfectly loadable dataset look refused.
+
+    Raises:
+        MemoryLimitExceeded: If the size exceeds the budget and
+            ``raise_on_exceed`` is True.
+
+    Examples:
+        >>> ds = xsnow.read("season.zarr", lazy=True)
+        >>> if ds.check_memory_budget("8GB"):
+        ...     ds = ds.compute()
+
+        >>> # Or let it raise, the way read() does
+        >>> ds.check_memory_budget(raise_on_exceed=True)
+        True
+    """
     log = get_logger(__name__, logger=logger)
+    budget_bytes = resolve_memory_limit(memory_limit, logger=log)
+
+    if budget_bytes is None:
+        return True
+
     estimated = estimate_decoded_nbytes(ds)
 
     if estimated is None:
@@ -224,22 +257,26 @@ def check_memory_budget(
             f"Memory guard skipped for {source}: decoded size could not be "
             f"estimated (object or variable-length string data)."
         )
-        return
+        return True
 
     if estimated <= budget_bytes:
         log.debug(
             f"Memory guard passed for {source}: "
             f"{_format_bytes(estimated)} within {_format_bytes(budget_bytes)}."
         )
-        return
+        return True
 
-    raise MemoryLimitExceeded(
-        f"Reading {source} eagerly would materialize about "
-        f"{_format_bytes(estimated)}, which exceeds the memory limit of "
-        f"{_format_bytes(budget_bytes)}.\n"
+    message = (
+        f"Materializing {source} would use about {_format_bytes(estimated)}, "
+        f"which exceeds the memory limit of {_format_bytes(budget_bytes)}.\n"
         f"Options:\n"
-        f"  - narrow the read with time/location/slope/realization selectors\n"
-        f"  - pass lazy=True to keep the data Dask-backed\n"
+        f"  - narrow the selection with time/location/slope/realization selectors\n"
+        f"  - keep the data Dask-backed instead of computing it\n"
         f"  - raise or disable the budget with memory_limit='32GB' or "
         f"memory_limit=None"
     )
+    if raise_on_exceed:
+        raise MemoryLimitExceeded(message)
+
+    log.warning(message)
+    return False

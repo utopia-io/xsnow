@@ -10,6 +10,7 @@ from xsnow.combiners import (
     overwrite_with as _overwrite_with,
     update as _update,
 )
+from xsnow.io.memory import check_memory_budget as _check_memory_budget
 from xsnow.io.netcdf import to_netcdf as _to_netcdf
 from xsnow.io.pro import to_pro as _to_pro
 from xsnow.io.smet import to_smet as _to_smet
@@ -113,6 +114,7 @@ class xsnowDataset:
     to_smet = _to_smet
     to_netcdf = _to_netcdf
     to_zarr = _to_zarr
+    check_memory_budget = _check_memory_budget
     fill_gaps_with = _fill_gaps_with
     overwrite_with = _overwrite_with
     update = _update

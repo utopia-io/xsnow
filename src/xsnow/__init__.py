@@ -4,7 +4,7 @@
 from .core import xsnowDataset, DatasetDecorator
 from .selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
 from .xsnow_io import read, append_latest, to_pro, to_smet, to_netcdf, to_zarr
-from .io.memory import MemoryLimitExceeded
+from .io.memory import MemoryLimitExceeded, check_memory_budget
 from .io.convert import ArchiveAppendError, build_archive
 from .plugin import register_xsnowDataset_method
 from .registry import registry
@@ -40,6 +40,7 @@ __all__ = [
     'reorder_dims',
     'cite',
     'build_archive',
+    'check_memory_budget',
     'MemoryLimitExceeded',
     'ArchiveAppendError',
 

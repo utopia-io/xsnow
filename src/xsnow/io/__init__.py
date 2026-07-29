@@ -43,6 +43,7 @@ from .base import (
 from .memory import (
     MemoryLimitExceeded,
     MemoryLimitLike,
+    check_memory_budget,
     resolve_memory_limit,
 )
 from .convert import ArchiveAppendError, build_archive
@@ -61,6 +62,7 @@ __all__ = [
     'to_netcdf',
     'to_zarr',
     'build_archive',
+    'check_memory_budget',
     'MemoryLimitExceeded',
     'ArchiveAppendError',
 ]

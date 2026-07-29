@@ -166,6 +166,7 @@ def _read_zarr(
             check_memory_budget(
                 ds_raw,
                 budget_bytes,
+                raise_on_exceed=True,
                 source=f"Zarr archive {path}",
                 logger=logger,
             )
