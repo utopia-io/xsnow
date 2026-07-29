@@ -6,8 +6,8 @@ import pandas as pd
 import xarray as xr
 
 from .core import xsnowDataset
+from .io.base import _promote_slope_metadata_coords
 from .plugin import register_xsnowDataset_method
-from .utils import _promote_slope_metadata_coords
 
 
 JoinMode = Literal["left", "right", "outer", "inner", "union"]

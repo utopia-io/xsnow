@@ -8,7 +8,11 @@ import pytest
 import xarray as xr
 from dask.callbacks import Callback
 
-from xsnow.utils import get_logger, normalize_slope_coords
+from xsnow.utils import (
+    detect_slope_coord_issues,
+    get_logger,
+    normalize_slope_coords,
+)
 
 
 def _cleanup_logger(log: logging.Logger) -> None:
@@ -147,7 +151,6 @@ def test_normalize_slope_coords_collapses_consistent_values():
 
     normalized = normalize_slope_coords(
         ds,
-        slope_coord_names=["inclination"],
         allow_per_location=True,
     )
 
@@ -213,3 +216,51 @@ def test_normalize_slope_coords_computes_lazy_coordinate_once():
     assert normalized["inclination"].dims == ("slope",)
     assert isinstance(normalized["inclination"].data, da.Array)
     assert isinstance(normalized["marker"].data, da.Array)
+
+
+def test_normalize_slope_coords_only_normalizes_recognized_metadata():
+    ds = _slope_dataset(
+        [
+            [0.0, 35.0],
+            [0.0, 35.0],
+        ]
+    ).assign_coords(
+        azimuth=(
+            ("location", "slope"),
+            [[0.0, 180.0], [0.0, 180.0]],
+        ),
+        z=(
+            ("location", "slope", "layer"),
+            [
+                [[0.1, 0.2], [0.3, 0.4]],
+                [[1.1, 1.2], [1.3, 1.4]],
+            ],
+        ),
+    )
+
+    diagnostics = detect_slope_coord_issues(ds)
+    normalized = normalize_slope_coords(ds, allow_per_location=True)
+
+    assert set(diagnostics["multidim_coords"]) == {"azimuth", "inclination"}
+    assert "z" not in diagnostics["multidim_coords"]
+    assert normalized["inclination"].dims == ("slope",)
+    assert normalized["azimuth"].dims == ("slope",)
+    assert normalized["z"].dims == ("location", "slope", "layer")
+    np.testing.assert_allclose(normalized["z"], ds["z"])
+
+
+def test_normalize_slope_coords_accepts_custom_metadata_names():
+    ds = _slope_dataset(
+        [
+            [0.0, 35.0],
+            [0.0, 35.0],
+        ]
+    ).rename(inclination="custom_slope_metadata")
+
+    normalized = normalize_slope_coords(
+        ds,
+        slope_coord_names=("custom_slope_metadata",),
+        allow_per_location=True,
+    )
+
+    assert normalized["custom_slope_metadata"].dims == ("slope",)

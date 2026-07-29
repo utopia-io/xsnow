@@ -21,9 +21,14 @@ import xarray as xr
 from ..core import xsnowDataset
 from ..registry import registry
 from ..selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
-from ..utils import get_logger, normalize_slope_coords
+from ..utils import get_logger
 
-from .base import _handle_duplicate_names, PRO_FILE_REGEX, SMET_FILE_REGEX
+from .base import (
+    _apply_norm_slopes,
+    _handle_duplicate_names,
+    PRO_FILE_REGEX,
+    SMET_FILE_REGEX,
+)
 
 
 _LOCATION_LEVEL_COORDS = ("latitude", "longitude", "altitude", "location")
@@ -783,33 +788,18 @@ def _merge_and_finalize(
                     final_xr_dataset[var_name].attrs['long_name'] = var_name.replace('_', ' ')
 
     # Normalize slope coordinates
-    if 'slope' in final_xr_dataset.dims:
-        try:
-            if norm_slopes is True:
-                final_xr_dataset = normalize_slope_coords(
-                    final_xr_dataset,
-                    verify_consistency=False,
-                    allow_per_location=False,
-                )
-            elif norm_slopes == 'auto':
-                final_xr_dataset = normalize_slope_coords(
-                    final_xr_dataset,
-                    verify_consistency=True,
-                    allow_per_location=True,
-                )
-            elif norm_slopes is False:
-                pass  # Explicitly skip normalization
-            else:
-                raise ValueError(
-                    f"Unsupported norm_slopes value: {norm_slopes!r}. "
-                    "Use True, False, or 'auto'."
-                )
-        except ValueError as e:
-            logger.error(
-                f"Failed to normalize slope coordinates: {e}\n"
-                f"This indicates a data structure issue that needs investigation."
-            )
-            raise
+    try:
+        final_xr_dataset = _apply_norm_slopes(
+            final_xr_dataset,
+            norm_slopes=norm_slopes,
+            logger=logger,
+        )
+    except ValueError as e:
+        logger.error(
+            f"Failed to normalize slope coordinates: {e}\n"
+            f"This indicates a data structure issue that needs investigation."
+        )
+        raise
     
     # Apply final filters using selectors
     if time:

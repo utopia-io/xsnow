@@ -243,6 +243,106 @@ def test_archive_reader_forwards_expected_chunks(
     assert received_chunks == [expected_chunks]
     loaded.close()
 
+
+def _archive_slope_dataset(*, consistent, legacy):
+    inclination = np.array([[0.0, 35.0], [0.0, 35.0]])
+    azimuth = np.array([[0.0, 180.0], [0.0, 180.0]])
+    if not consistent:
+        inclination[1, 1] = 40.0
+        azimuth[1, 1] = 90.0
+
+    ds = xr.Dataset(
+        {
+            "marker": (
+                ("location", "time", "slope"),
+                np.ones((2, 2, 2)),
+            ),
+        },
+        coords={
+            "location": ["A", "B"],
+            "time": [0, 1],
+            "slope": [0, 1],
+            "layer": [0, 1],
+            "z": (
+                ("location", "time", "slope", "layer"),
+                np.arange(16, dtype=float).reshape(2, 2, 2, 2),
+            ),
+        },
+    )
+    if legacy:
+        ds["inclination"] = (("location", "slope"), inclination)
+        ds["azimuth"] = (("location", "slope"), azimuth)
+        return ds
+
+    return ds.assign_coords(
+        inclination=(("location", "slope"), inclination),
+        azimuth=(("location", "slope"), azimuth),
+    )
+
+
+@pytest.mark.parametrize(
+    "archive_kind,opener_name",
+    (("netcdf", "open_dataset"), ("zarr", "open_zarr")),
+)
+@pytest.mark.parametrize("legacy", (False, True))
+@pytest.mark.parametrize(
+    "norm_slopes,consistent,expected_dims",
+    (
+        (False, True, ("location", "slope")),
+        ("auto", True, ("slope",)),
+        ("auto", False, ("location", "slope")),
+        (True, False, ("slope",)),
+    ),
+)
+def test_archive_readers_share_slope_normalization_policy(
+    tmp_path,
+    monkeypatch,
+    archive_kind,
+    opener_name,
+    legacy,
+    norm_slopes,
+    consistent,
+    expected_dims,
+):
+    """NetCDF and Zarr apply the same policy to modern and legacy layouts."""
+    source = tmp_path / (
+        "slopes.nc" if archive_kind == "netcdf" else "slopes.zarr"
+    )
+    if archive_kind == "zarr":
+        source.mkdir()
+        (source / "zarr.json").write_text("{}")
+
+    source_ds = _archive_slope_dataset(
+        consistent=consistent,
+        legacy=legacy,
+    )
+    monkeypatch.setattr(
+        xr,
+        opener_name,
+        lambda path, **kwargs: source_ds.copy(),
+    )
+
+    loaded = read(
+        source,
+        lazy=False,
+        memory_limit=None,
+        norm_slopes=norm_slopes,
+    )
+
+    assert loaded is not None
+    for coord_name in ("inclination", "azimuth"):
+        assert coord_name in loaded.coords
+        assert coord_name not in loaded.data_vars
+        assert loaded[coord_name].dims == expected_dims
+    assert loaded["z"].dims == ("location", "time", "slope", "layer")
+    np.testing.assert_allclose(loaded["z"], source_ds["z"])
+
+
+def test_read_rejects_invalid_norm_slopes_before_opening(tmp_path):
+    with pytest.raises(ValueError, match="Unsupported norm_slopes value"):
+        read(tmp_path / "missing.nc", norm_slopes="sometimes")
+
+
 @pytest.mark.real_data
 def test_eager_vs_lazy_same_results(real_file_subset, compare_datasets):
     """

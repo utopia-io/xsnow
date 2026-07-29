@@ -5,7 +5,13 @@ Focus: Core coordinate functionality independent of I/O.
 """
 import pytest
 import numpy as np
-from xsnow.io.base import _handle_duplicate_names, _sanitize_station_name
+import xarray as xr
+
+from xsnow.io.base import (
+    _handle_duplicate_names,
+    _promote_slope_metadata_coords,
+    _sanitize_station_name,
+)
 
 
 class TestStationNameSanitization:
@@ -49,3 +55,24 @@ class TestDuplicateNameHandling:
         names = ['A', 'A', 'A', 'B']
         result = _handle_duplicate_names(names)
         assert result == ['A_0', 'A_1', 'A_2', 'B']
+
+
+def test_promote_slope_metadata_coords_does_not_normalize_dimensions():
+    legacy = xr.Dataset(
+        {
+            "inclination": (
+                ("location", "slope"),
+                [[0.0, 35.0], [0.0, 35.0]],
+            ),
+        },
+        coords={
+            "location": ["A", "B"],
+            "slope": [0, 1],
+        },
+    )
+
+    promoted = _promote_slope_metadata_coords(legacy)
+
+    assert "inclination" in promoted.coords
+    assert "inclination" not in promoted.data_vars
+    assert promoted["inclination"].dims == ("location", "slope")

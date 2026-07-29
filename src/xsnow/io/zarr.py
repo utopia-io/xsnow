@@ -21,9 +21,13 @@ from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
 from ..units import UnitValidationError, validate_xsnow_unit_attrs
-from ..utils import get_logger, _promote_slope_metadata_coords
+from ..utils import get_logger
 
-from .base import _resolve_archive_lazy
+from .base import (
+    _apply_norm_slopes,
+    _promote_slope_metadata_coords,
+    _resolve_archive_lazy,
+)
 from .memory import (
     MemoryLimitExceeded,
     MemoryLimitLike,
@@ -46,6 +50,7 @@ def _read_zarr(
     lazy: Optional[bool] = None,
     chunks: Optional[Dict[str, int]] = None,
     memory_limit: MemoryLimitLike = "auto",
+    norm_slopes: Union[bool, Literal["auto"]] = "auto",
 ) -> Optional[xsnowDataset]:
     """
     Internal function to read a Zarr archive.
@@ -73,6 +78,9 @@ def _read_zarr(
             uses a fraction of detected available memory; a size string or byte
             count sets an absolute cap; None disables the guard. In automatic
             mode, half this budget, capped at 4 GiB, is the eager threshold.
+        norm_slopes: Slope-coordinate normalization policy. `'auto'` collapses
+            recognized slope metadata when it is consistent across locations,
+            True forces collapse, and False preserves per-location dimensions.
 
     Returns:
         xsnowDataset with the loaded data, or None if loading fails
@@ -114,6 +122,11 @@ def _read_zarr(
         opened = xr.open_zarr(path, chunks=open_chunks)
         ds_raw = opened
         ds_raw = _promote_slope_metadata_coords(ds_raw)
+        ds_raw = _apply_norm_slopes(
+            ds_raw,
+            norm_slopes=norm_slopes,
+            logger=logger,
+        )
         validate_xsnow_unit_attrs(
             ds_raw,
             unit_validation=unit_validation,

@@ -41,6 +41,7 @@ from .io.base import (
     _coerce_location,
     _coerce_slope,
     _coerce_realization,
+    _promote_slope_metadata_coords,
 )
 
 from .io.pro import (
@@ -128,7 +129,7 @@ import xarray as xr
 from .core import xsnowDataset
 from .plugin import register_xsnowDataset_method
 from .combiners import concat as xsnow_concat
-from .utils import get_logger, _promote_slope_metadata_coords
+from .utils import get_logger
 
 
 @register_xsnowDataset_method

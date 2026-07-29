@@ -219,7 +219,7 @@ def print(*values: Any, force_details: bool = False, **kwargs: Any) -> None:
 
 def normalize_slope_coords(
     ds: xr.Dataset,
-    slope_coord_names: Optional[List[str]] = None,
+    slope_coord_names: Sequence[str] = ("azimuth", "inclination"),
     verify_consistency: bool = True,
     allow_per_location: bool = False,
     logger: Optional[logging.Logger]=None,
@@ -239,10 +239,10 @@ def normalize_slope_coords(
     ----------
     ds : xr.Dataset
         Input dataset potentially with multi-dimensional slope coords
-    slope_coord_names : list of str, optional
-        Explicit list of coordinate names to normalize. If None, will
-        auto-detect coordinates with 'slope' dimension that also have
-        other dimensions.
+    slope_coord_names : sequence of str, default ("azimuth", "inclination")
+        Coordinate names eligible for normalization. Names absent from the
+        dataset are ignored. Pass another sequence to support additional
+        recognized slope metadata coordinates.
     verify_consistency : bool, default True
         If True, verify that slope coordinate values are identical across
         all locations before reducing dimensions. Raises ValueError if
@@ -287,15 +287,6 @@ def normalize_slope_coords(
         # No slope dimension, nothing to normalize
         return ds
     
-    # Auto-detect slope coordinates if not specified
-    if slope_coord_names is None:
-        slope_coord_names = []
-        for coord_name in ds.coords:
-            coord = ds.coords[coord_name]
-            # Look for coords with slope + other dims
-            if 'slope' in coord.dims and len(coord.dims) > 1:
-                slope_coord_names.append(coord_name)
-    
     if not slope_coord_names:
         # Nothing to normalize
         return ds
@@ -304,10 +295,6 @@ def normalize_slope_coords(
     coords_to_update = {}
     for coord_name in slope_coord_names:
         if coord_name not in ds.coords:
-            warnings.warn(
-                f"Coordinate '{coord_name}' not found in dataset, skipping",
-                UserWarning
-            )
             continue
             
         coord = ds.coords[coord_name]
@@ -443,45 +430,10 @@ def normalize_slope_coords(
     return ds
 
 
-def _promote_slope_metadata_coords(
+def detect_slope_coord_issues(
     ds: xr.Dataset,
     slope_coord_names: Sequence[str] = ("azimuth", "inclination"),
-    normalize: bool = True,
-    logger: Optional[logging.Logger] = None,
-) -> xr.Dataset:
-    """
-    Promote legacy slope metadata data variables back to coordinates.
-
-    This preserves backwards compatibility with files written while
-    ``azimuth`` or ``inclination`` were saved as data variables. Only
-    variables carrying a ``slope`` dimension are promoted.
-    """
-    to_promote = [
-        name
-        for name in slope_coord_names
-        if name in ds.data_vars and "slope" in ds[name].dims
-    ]
-    if not to_promote:
-        return ds
-
-    promoted = ds.set_coords(to_promote)
-    if not normalize:
-        return promoted
-
-    coords_to_normalize = [
-        name
-        for name in slope_coord_names
-        if name in promoted.coords and "slope" in promoted[name].dims
-    ]
-    return normalize_slope_coords(
-        promoted,
-        slope_coord_names=list(coords_to_normalize),
-        allow_per_location=True,
-        logger=logger,
-    )
-
-
-def detect_slope_coord_issues(ds: xr.Dataset) -> dict:
+) -> dict:
     """
     Detect potential issues with slope coordinate dimensions.
     
@@ -491,6 +443,9 @@ def detect_slope_coord_issues(ds: xr.Dataset) -> dict:
     ----------
     ds : xr.Dataset
         Dataset to check
+    slope_coord_names : sequence of str, default ("azimuth", "inclination")
+        Recognized slope metadata coordinates to inspect. Names absent from the
+        dataset are ignored.
         
     Returns
     -------
@@ -511,8 +466,10 @@ def detect_slope_coord_issues(ds: xr.Dataset) -> dict:
     if 'slope' not in ds.dims:
         return diagnostics
     
-    # Check each coordinate
-    for coord_name in ds.coords:
+    # Check each recognized slope metadata coordinate
+    for coord_name in slope_coord_names:
+        if coord_name not in ds.coords:
+            continue
         coord = ds.coords[coord_name]
         
         # Check for multi-dimensional slope coords

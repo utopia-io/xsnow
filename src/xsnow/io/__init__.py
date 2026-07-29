@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import xarray as xr
 
@@ -38,6 +38,7 @@ from .base import (
     _round_coord,
     _sanitize_station_name,
     _handle_duplicate_names,
+    _validate_norm_slopes,
 )
 from .memory import (
     MemoryLimitExceeded,
@@ -80,6 +81,7 @@ def read(
     logger: Optional[logging.Logger] = None,
     chunks: Optional[Dict[str, int]] = None,
     memory_limit: MemoryLimitLike = "auto",
+    norm_slopes: Union[bool, Literal["auto"]] = "auto",
     **parser_kwargs: Any
 ) -> Optional[xsnowDataset]:
     """
@@ -146,6 +148,11 @@ def read(
             while ``{}`` requests backend-preferred/native chunks. Ignored when
             ``lazy=False``. PRO/SMET sources default to
             ``{'time': 100, 'layer': -1}``.
+        norm_slopes: Controls slope-coordinate normalization for every source
+            format. `'auto'` (default) normalizes recognized slope metadata
+            when it is consistent across locations and preserves per-location
+            dimensions otherwise. True forces normalization to `(slope,)`;
+            False preserves the existing slope-coordinate dimensions.
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions:
             - `max_layers`: Max layer dimension. `'auto'` (default) uses the
@@ -187,15 +194,6 @@ def read(
               collectively consume gigabytes. Set a smaller value (e.g. 1 MiB:
               `1024**2`, or `1_048_576` bytes) to limit aggregate chunk-cache
               memory. Smaller caches may reduce I/O performance.
-            - `norm_slopes`: Controls slope coordinate normalization during
-              final merging:
-                * `'auto'` (default): normalize when slopes are consistent
-                  across locations; preserve per-location slopes when they
-                  differ.
-                * True: force normalization to `(slope,)`, even if slope
-                  metadata varies by location.
-                * False: skip `normalize_slope_coords` entirely.
-
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
         or `None` if no valid data files are found.
@@ -248,6 +246,7 @@ def read(
     """
     # --- Step 1: Setup ---
     logger = get_logger(__name__, logger=logger)
+    _validate_norm_slopes(norm_slopes)
 
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
@@ -281,6 +280,7 @@ def read(
                 slope_sel=slope_sel,
                 realization_sel=realization_sel,
                 memory_limit=budget_bytes,
+                norm_slopes=norm_slopes,
                 **netcdf_kwargs,
             )
         except (UnitValidationError, MemoryLimitExceeded):
@@ -308,6 +308,7 @@ def read(
                 lazy=lazy,
                 chunks=chunks,
                 memory_limit=budget_bytes,
+                norm_slopes=norm_slopes,
             )
         except (UnitValidationError, MemoryLimitExceeded):
             # See the NetCDF branch: refusals must not degrade to None.
@@ -373,7 +374,7 @@ def read(
         slope_sel,
         realization_sel,
         logger=logger,
-        norm_slopes=parser_kwargs.get('norm_slopes', 'auto'),
+        norm_slopes=norm_slopes,
     )
 
     # Keep the public lazy contract consistent for every text-source result.

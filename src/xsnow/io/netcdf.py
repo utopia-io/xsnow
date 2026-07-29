@@ -12,7 +12,7 @@ import json
 import logging
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, Literal, Optional, Union
 
 import netCDF4
 import numpy as np
@@ -21,9 +21,17 @@ import xarray as xr
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..units import validate_xsnow_unit_attrs
-from ..utils import get_logger, _promote_slope_metadata_coords, reorder_dims
+from ..utils import (
+    get_logger,
+    reorder_dims,
+)
 
-from .base import _resolve_archive_lazy, _round_coord
+from .base import (
+    _apply_norm_slopes,
+    _promote_slope_metadata_coords,
+    _resolve_archive_lazy,
+    _round_coord,
+)
 from .memory import MemoryLimitLike, check_memory_budget, resolve_memory_limit
 
 
@@ -60,6 +68,7 @@ def _read_xsnow_netcdf(
     realization_sel=None,
     chunk_cache_size: Optional[int] = None,
     memory_limit: MemoryLimitLike = "auto",
+    norm_slopes: Union[bool, Literal["auto"]] = "auto",
 ) -> Optional[xsnowDataset]:
     """
     Read xsnow's custom netcdf format.
@@ -93,6 +102,9 @@ def _read_xsnow_netcdf(
             uses a fraction of detected available memory; a size string or byte
             count sets an absolute cap; None disables the guard. In automatic
             mode, half this budget, capped at 4 GiB, is the eager threshold.
+        norm_slopes: Slope-coordinate normalization policy. `'auto'` collapses
+            recognized slope metadata when it is consistent across locations,
+            True forces collapse, and False preserves per-location dimensions.
 
     Returns:
         An xsnowDataset instance, or None if reading fails.
@@ -127,6 +139,7 @@ def _read_xsnow_netcdf(
         # Restore mapping attrs from JSON
         ds = _decode_mapping_attrs_from_netcdf(ds)
         ds = _promote_slope_metadata_coords(ds)
+        ds = _apply_norm_slopes(ds, norm_slopes=norm_slopes, logger=logger)
         validate_xsnow_unit_attrs(
             ds,
             unit_validation=unit_validation,

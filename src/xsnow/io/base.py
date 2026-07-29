@@ -13,18 +13,19 @@ import lzma
 import re
 import logging
 from pathlib import Path
-from typing import Dict, Any, IO, Optional, List, Union
+from typing import Dict, Any, IO, Literal, Optional, List, Sequence, Union
 from collections import Counter
 
 import numpy as np
 import pandas as pd
+import xarray as xr
 
 from ..registry import registry
 from ..selectors import (
     TimeSelector, LocationSelector, SlopeSelector, RealizationSelector,
     TimeLike, LocationLike, SlopeLike, RealizationLike
 )
-from ..utils import get_logger
+from ..utils import get_logger, normalize_slope_coords
 
 from .memory import estimate_decoded_nbytes
 
@@ -67,6 +68,75 @@ def _resolve_archive_lazy(
         memory_budget_bytes
     )
     return estimated_nbytes >= auto_eager_max_bytes
+
+
+def _promote_slope_metadata_coords(
+    ds: xr.Dataset,
+    slope_coord_names: Sequence[str] = ("azimuth", "inclination"),
+) -> xr.Dataset:
+    """
+    Promote legacy slope metadata data variables back to coordinates.
+
+    This preserves backwards compatibility with files written while
+    ``azimuth`` or ``inclination`` were saved as data variables. Only
+    variables carrying a ``slope`` dimension are promoted. Coordinate
+    dimensions are not normalized here; callers apply their requested
+    ``norm_slopes`` policy separately.
+    """
+    to_promote = [
+        name
+        for name in slope_coord_names
+        if name in ds.data_vars and "slope" in ds[name].dims
+    ]
+    if not to_promote:
+        return ds
+
+    return ds.set_coords(to_promote)
+
+
+def _apply_norm_slopes(
+    ds: xr.Dataset,
+    norm_slopes: Union[bool, Literal["auto"]] = "auto",
+    slope_coord_names: Sequence[str] = ("azimuth", "inclination"),
+    logger: Optional[logging.Logger] = None,
+) -> xr.Dataset:
+    """Apply the public ``norm_slopes`` read policy to recognized coordinates."""
+    _validate_norm_slopes(norm_slopes)
+
+    if norm_slopes is False or "slope" not in ds.dims:
+        return ds
+
+    if norm_slopes is True:
+        return normalize_slope_coords(
+            ds,
+            slope_coord_names=slope_coord_names,
+            verify_consistency=False,
+            allow_per_location=False,
+            logger=logger,
+        )
+
+    return normalize_slope_coords(
+        ds,
+        slope_coord_names=slope_coord_names,
+        verify_consistency=True,
+        allow_per_location=True,
+        logger=logger,
+    )
+
+
+def _validate_norm_slopes(
+    norm_slopes: Union[bool, Literal["auto"]],
+) -> None:
+    """Validate the public slope-normalization read mode."""
+    if (
+        norm_slopes is not True
+        and norm_slopes is not False
+        and norm_slopes != "auto"
+    ):
+        raise ValueError(
+            f"Unsupported norm_slopes value: {norm_slopes!r}. "
+            "Use True, False, or 'auto'."
+        )
 
 
 # --- Dynamic Mapping from Registry ---
