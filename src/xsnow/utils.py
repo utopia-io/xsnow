@@ -184,15 +184,17 @@ def get_backend(array_like: Union[xsnowDataset, xr.Dataset, xr.DataArray]) -> An
     else: # It's a DataArray
         array = data.data
 
-    # Check for the 'device' attribute, which is characteristic of a CuPy array
-    if hasattr(array, 'device'):
+    # CuPy arrays live in the 'cupy' package. (NumPy >= 2.0 arrays also
+    # expose a 'device' attribute, so the type's module is the reliable
+    # signal.)
+    if type(array).__module__.split('.')[0] == 'cupy':
         try:
             import cupy
             return cupy
         except ImportError:
             # This case is unlikely if a cupy array exists, but handled for safety
             return np
-            
+
     return np
 
 @register_xsnowDataset_method
