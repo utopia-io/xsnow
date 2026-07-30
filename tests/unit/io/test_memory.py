@@ -15,6 +15,7 @@ from xsnow import read
 from xsnow.io.memory import (
     DEFAULT_MEMORY_FRACTION,
     MemoryLimitExceeded,
+    MemorySizeUnknown,
     available_memory_bytes,
     check_memory_budget,
     estimate_decoded_nbytes,
@@ -142,17 +143,30 @@ class TestCheckMemoryBudget:
         with pytest.raises(MemoryLimitExceeded):
             check_memory_budget(ds, 16, raise_on_exceed=True)
 
-    def test_unknown_size_returns_true(self):
+    def test_unknown_size_returns_none(self):
         """
-        An unmeasurable size means "not known to exceed", not "refused".
+        An unmeasurable size is distinct from fitting or exceeding the budget.
 
         Object arrays report only xarray's pointer-based nbytes, so there is
-        no trustworthy number; returning False would make a perfectly
-        loadable dataset look rejected.
+        no trustworthy number to compare with the budget.
         """
         ds = xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
-        assert check_memory_budget(ds, 1) is True
-        assert check_memory_budget(ds, 1, raise_on_exceed=True) is True
+        assert check_memory_budget(ds, 1) is None
+        assert check_memory_budget(ds, 1, raise_on_exceed=True) is None
+
+    def test_unknown_size_raises_when_asked(self):
+        ds = xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
+        with pytest.raises(MemorySizeUnknown):
+            check_memory_budget(ds, 1, raise_on_unknown=True)
+
+    def test_unknown_size_is_catchable_as_memory_error(self):
+        ds = xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
+        with pytest.raises(MemoryError):
+            check_memory_budget(ds, 1, raise_on_unknown=True)
+
+    def test_disabled_guard_ignores_raise_on_unknown(self):
+        ds = xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
+        assert check_memory_budget(ds, None, raise_on_unknown=True) is True
 
     def test_accepts_size_strings_directly(self):
         """It resolves memory_limit itself rather than taking raw bytes."""
@@ -187,6 +201,7 @@ class TestCheckMemoryBudgetAsMethod:
 
     def test_exported_at_package_level(self):
         assert xsnow.check_memory_budget is check_memory_budget
+        assert xsnow.MemorySizeUnknown is MemorySizeUnknown
 
     def test_available_as_a_dataset_method(self, archive_paths):
         ds = read(archive_paths["nc"], lazy=True)
@@ -200,6 +215,12 @@ class TestCheckMemoryBudgetAsMethod:
         ds = read(archive_paths["nc"], lazy=True)
         with pytest.raises(MemoryLimitExceeded):
             ds.check_memory_budget(16, raise_on_exceed=True)
+
+    def test_method_returns_none_for_unknown_size(self):
+        ds = xsnow.xsnowDataset(
+            xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
+        )
+        assert ds.check_memory_budget(1) is None
 
     def test_method_checks_without_materializing(self, archive_paths):
         """The whole point: ask before computing, not after."""
@@ -242,6 +263,17 @@ class TestReadIntegration:
         """read() returns None for unreadable sources; a refusal must raise."""
         with pytest.raises(MemoryLimitExceeded):
             read(archive_paths[fmt], lazy=False, memory_limit=1)
+
+    def test_unknown_size_refusal_is_not_swallowed(
+        self, archive_paths, fmt, monkeypatch
+    ):
+        """read() refuses an eager load when its size cannot be verified."""
+        monkeypatch.setattr(
+            "xsnow.io.memory.estimate_decoded_nbytes",
+            lambda ds: None,
+        )
+        with pytest.raises(MemorySizeUnknown):
+            read(archive_paths[fmt], lazy=False, memory_limit="8GB")
 
     def test_malformed_budget_raises_valueerror(self, archive_paths, fmt):
         with pytest.raises(ValueError):

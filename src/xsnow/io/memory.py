@@ -54,6 +54,16 @@ class MemoryLimitExceeded(MemoryError):
     """
 
 
+class MemorySizeUnknown(MemoryError):
+    """
+    Raised when a dataset's decoded in-memory size cannot be estimated safely.
+
+    Object and variable-length string arrays expose only pointer-based
+    ``nbytes`` values, so their payload cannot be compared reliably with a
+    memory budget.
+    """
+
+
 def _format_bytes(num_bytes: float) -> str:
     """Render a byte count using binary units, for error messages."""
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
@@ -199,9 +209,10 @@ def check_memory_budget(
     memory_limit: MemoryLimitLike = "auto",
     *,
     raise_on_exceed: bool = False,
+    raise_on_unknown: bool = False,
     source: str = "dataset",
     logger: Optional[logging.Logger] = None,
-) -> bool:
+) -> bool | None:
     """
     Report whether materializing a dataset would fit within a memory budget.
 
@@ -217,31 +228,41 @@ def check_memory_budget(
         raise_on_exceed: If True, raise ``MemoryLimitExceeded`` instead of
             returning False. ``read()`` uses this; interactive callers
             generally want the boolean.
+        raise_on_unknown: If True, raise ``MemorySizeUnknown`` instead of
+            returning None when the decoded size cannot be estimated.
+            ``read()`` uses this to avoid an unchecked eager load.
         source: Human-readable description used in the message.
         logger: Optional logger for diagnostics.
 
     Returns:
-        True if the dataset fits the budget, or if the check does not apply.
+        True if the dataset fits the budget, or if the check does not apply
+        because the guard is disabled.
         False if it would exceed the budget and ``raise_on_exceed`` is False.
-
-        **A dataset whose size cannot be determined returns True.** Object and
-        variable-length string arrays report only xarray's pointer-based
-        ``nbytes``, which does not represent the real payload, so there is no
-        trustworthy number to compare. True means "not known to exceed the
-        budget" rather than "known to fit"; returning False would make a
-        perfectly loadable dataset look refused.
+        None if its decoded size cannot be estimated and ``raise_on_unknown``
+        is False. Object and variable-length string arrays report only
+        xarray's pointer-based ``nbytes``, which does not represent the real
+        payload.
 
     Raises:
         MemoryLimitExceeded: If the size exceeds the budget and
             ``raise_on_exceed`` is True.
+        MemorySizeUnknown: If the size cannot be estimated and
+            ``raise_on_unknown`` is True.
 
     Examples:
         >>> ds = xsnow.read("season.zarr", lazy=True)
         >>> if ds.check_memory_budget("8GB"):
         ...     ds = ds.compute()
 
+        >>> result = ds.check_memory_budget("8GB")
+        >>> if result is None:
+        ...     print("Decoded size is unknown; choose a context-specific policy")
+
         >>> # Or let it raise, the way read() does
-        >>> ds.check_memory_budget(raise_on_exceed=True)
+        >>> ds.check_memory_budget(
+        ...     raise_on_exceed=True,
+        ...     raise_on_unknown=True,
+        ... )
         True
     """
     log = get_logger(__name__, logger=logger)
@@ -253,11 +274,22 @@ def check_memory_budget(
     estimated = estimate_decoded_nbytes(ds)
 
     if estimated is None:
-        log.debug(
-            f"Memory guard skipped for {source}: decoded size could not be "
-            f"estimated (object or variable-length string data)."
+        message = (
+            f"Cannot determine the decoded memory size of {source}, so it "
+            f"cannot be compared with the memory limit of "
+            f"{_format_bytes(budget_bytes)}. Object and variable-length "
+            f"string data do not provide a trustworthy payload size.\n"
+            f"Options:\n"
+            f"  - keep the data Dask-backed instead of computing it\n"
+            f"  - convert object or variable-length strings to fixed-width data\n"
+            f"  - disable the guard with memory_limit=None if memory safety is "
+            f"managed elsewhere"
         )
-        return True
+        if raise_on_unknown:
+            raise MemorySizeUnknown(message)
+
+        log.debug(message)
+        return None
 
     if estimated <= budget_bytes:
         log.debug(

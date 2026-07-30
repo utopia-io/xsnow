@@ -43,6 +43,7 @@ from .base import (
 from .memory import (
     MemoryLimitExceeded,
     MemoryLimitLike,
+    MemorySizeUnknown,
     check_memory_budget,
     resolve_memory_limit,
 )
@@ -64,6 +65,7 @@ __all__ = [
     'build_archive',
     'check_memory_budget',
     'MemoryLimitExceeded',
+    'MemorySizeUnknown',
     'ArchiveAppendError',
 ]
 
@@ -129,13 +131,15 @@ def read(
             reads remain protected by ``memory_limit``.
         memory_limit: Pre-flight memory budget for eager NetCDF and Zarr reads.
             The selected decoded size is checked before eager data loading, and
-            `MemoryLimitExceeded` is raised when it is too large. `'auto'`
-            (default) uses 70% of detected available memory; a size string
-            (`'8GB'`, `'512MiB'`) or byte count sets an absolute cap, and None
-            disables the guard. Selectors are applied before this check. For
-            containers and scheduled HPC jobs, prefer an explicit cap based on
-            assigned memory, because automatic detection may report the host or
-            whole node rather than the cgroup or scheduler limit.
+            `MemoryLimitExceeded` is raised when it is too large.
+            `MemorySizeUnknown` is raised when an eager load cannot be checked
+            reliably. `'auto'` (default) uses 70% of detected available
+            memory; a size string (`'8GB'`, `'512MiB'`) or byte count sets an
+            absolute cap, and None disables the guard. Selectors are applied
+            before this check. For containers and scheduled HPC jobs, prefer
+            an explicit cap based on assigned memory, because automatic
+            detection may report the host or whole node rather than the cgroup
+            or scheduler limit.
         lazy_threshold: Number of files above which lazy loading is enabled
             for PRO/SMET collections when ``lazy=None``. Default: 30 files.
         parallel_lazy_creation: If True (default), parallelize the creation of lazy
@@ -204,6 +208,12 @@ def read(
     Returns:
         A unified `xsnowDataset` object containing the data from all sources,
         or `None` if no valid data files are found.
+
+    Raises:
+        MemoryLimitExceeded: If an eager NetCDF or Zarr load is known to
+            exceed ``memory_limit``.
+        MemorySizeUnknown: If an eager NetCDF or Zarr load's decoded size
+            cannot be estimated reliably.
 
     Notes:
         Automatic archive mode estimates decoded size after applying selectors;
@@ -290,7 +300,7 @@ def read(
                 norm_slopes=norm_slopes,
                 **netcdf_kwargs,
             )
-        except (UnitValidationError, MemoryLimitExceeded):
+        except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown):
             # Deliberate refusals, not read failures: a swallowed memory guard
             # would hand back None and leave the caller none the wiser.
             raise
@@ -317,7 +327,7 @@ def read(
                 memory_limit=budget_bytes,
                 norm_slopes=norm_slopes,
             )
-        except (UnitValidationError, MemoryLimitExceeded):
+        except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown):
             # See the NetCDF branch: refusals must not degrade to None.
             raise
         except Exception as e:

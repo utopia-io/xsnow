@@ -31,6 +31,7 @@ from .base import (
 from .memory import (
     MemoryLimitExceeded,
     MemoryLimitLike,
+    MemorySizeUnknown,
     check_memory_budget,
     resolve_memory_limit,
 )
@@ -88,6 +89,8 @@ def _read_zarr(
 
     Raises:
         MemoryLimitExceeded: If an eager load would exceed ``memory_limit``.
+        MemorySizeUnknown: If an eager load's decoded size cannot be estimated
+            reliably.
     """
     logger = get_logger(__name__, logger=logger)
     opened: Optional[xr.Dataset] = None
@@ -168,6 +171,7 @@ def _read_zarr(
                 ds_raw,
                 budget_bytes,
                 raise_on_exceed=True,
+                raise_on_unknown=True,
                 source=f"Zarr archive {path}",
                 logger=logger,
             )
@@ -177,7 +181,7 @@ def _read_zarr(
         # Wrap in xsnowDataset
         return xsnowDataset(ds_raw)
 
-    except (UnitValidationError, MemoryLimitExceeded):
+    except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown):
         # Deliberate refusals, not read failures: surface them to the caller
         # rather than degrading to the None "could not read" contract below.
         if opened is not None:

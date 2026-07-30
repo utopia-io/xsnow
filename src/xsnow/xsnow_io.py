@@ -73,6 +73,7 @@ from .io.zarr import (
 
 from .io.memory import (
     MemoryLimitExceeded,
+    MemorySizeUnknown,
     available_memory_bytes,
     check_memory_budget,
     estimate_decoded_nbytes,

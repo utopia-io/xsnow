@@ -32,7 +32,11 @@ from .base import (
     _resolve_archive_lazy,
     _round_coord,
 )
-from .memory import MemoryLimitLike, check_memory_budget, resolve_memory_limit
+from .memory import (
+    MemoryLimitLike,
+    check_memory_budget,
+    resolve_memory_limit,
+)
 
 
 @contextmanager
@@ -112,6 +116,8 @@ def _read_xsnow_netcdf(
 
     Raises:
         MemoryLimitExceeded: If an eager load would exceed ``memory_limit``.
+        MemorySizeUnknown: If an eager load's decoded size cannot be estimated
+            reliably.
     """
     logger = get_logger(__name__, logger=logger)
     budget_bytes = resolve_memory_limit(memory_limit, logger=logger)
@@ -176,6 +182,7 @@ def _read_xsnow_netcdf(
                 ds,
                 budget_bytes,
                 raise_on_exceed=True,
+                raise_on_unknown=True,
                 source=f"NetCDF file {source}",
                 logger=logger,
             )
