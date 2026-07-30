@@ -280,10 +280,15 @@ def _archive_slope_dataset(*, consistent, legacy):
     )
 
 
-@pytest.mark.parametrize(
-    "archive_kind,opener_name",
-    (("netcdf", "open_dataset"), ("zarr", "open_zarr")),
-)
+def _write_slope_archive(ds, path, archive_kind):
+    """Write a slope-policy fixture through the real archive backend."""
+    if archive_kind == "netcdf":
+        ds.to_netcdf(path)
+    else:
+        ds.to_zarr(path)
+
+
+@pytest.mark.parametrize("archive_kind", ("netcdf", "zarr"))
 @pytest.mark.parametrize("legacy", (False, True))
 @pytest.mark.parametrize(
     "norm_slopes,consistent,expected_dims",
@@ -296,9 +301,7 @@ def _archive_slope_dataset(*, consistent, legacy):
 )
 def test_archive_readers_share_slope_normalization_policy(
     tmp_path,
-    monkeypatch,
     archive_kind,
-    opener_name,
     legacy,
     norm_slopes,
     consistent,
@@ -308,19 +311,11 @@ def test_archive_readers_share_slope_normalization_policy(
     source = tmp_path / (
         "slopes.nc" if archive_kind == "netcdf" else "slopes.zarr"
     )
-    if archive_kind == "zarr":
-        source.mkdir()
-        (source / "zarr.json").write_text("{}")
-
     source_ds = _archive_slope_dataset(
         consistent=consistent,
         legacy=legacy,
     )
-    monkeypatch.setattr(
-        xr,
-        opener_name,
-        lambda path, **kwargs: source_ds.copy(),
-    )
+    _write_slope_archive(source_ds, source, archive_kind)
 
     loaded = read(
         source,
@@ -335,7 +330,124 @@ def test_archive_readers_share_slope_normalization_policy(
         assert coord_name not in loaded.data_vars
         assert loaded[coord_name].dims == expected_dims
     assert loaded["z"].dims == ("location", "time", "slope", "layer")
+    if norm_slopes is True and not consistent:
+        expected_z = np.full((2, 2, 3, 2), np.nan)
+        expected_z[0, :, :2, :] = source_ds["z"].values[0]
+        expected_z[1, :, 0, :] = source_ds["z"].values[1, :, 0, :]
+        expected_z[1, :, 2, :] = source_ds["z"].values[1, :, 1, :]
+        np.testing.assert_allclose(loaded["z"], expected_z, equal_nan=True)
+        np.testing.assert_allclose(loaded["inclination"], [0.0, 35.0, 40.0])
+        np.testing.assert_allclose(loaded["azimuth"], [0.0, 180.0, 90.0])
+    else:
+        np.testing.assert_allclose(loaded["z"], source_ds["z"])
+    loaded.close()
+
+
+@pytest.mark.parametrize("archive_kind", ("netcdf", "zarr"))
+@pytest.mark.parametrize("legacy", (False, True))
+def test_archive_auto_normalizes_compatible_slope_subset(
+    tmp_path,
+    archive_kind,
+    legacy,
+):
+    """Auto remaps local subsets when their union does not widen slope."""
+    source = tmp_path / (
+        "slope-subset.nc"
+        if archive_kind == "netcdf"
+        else "slope-subset.zarr"
+    )
+
+    inclination = np.array(
+        [[10.0, 20.0, 30.0], [20.0, np.nan, np.nan]]
+    )
+    azimuth = np.array(
+        [[0.0, 90.0, 180.0], [90.0, np.nan, np.nan]]
+    )
+    marker = np.array(
+        [[1.0, 2.0, 3.0], [20.0, np.nan, np.nan]]
+    )
+    source_ds = xr.Dataset(
+        {"marker": (("location", "time", "slope"), marker[:, np.newaxis, :])},
+        coords={
+            "location": ["A", "B"],
+            "time": [0],
+            "slope": [0, 1, 2],
+        },
+    )
+    if legacy:
+        source_ds["inclination"] = (
+            ("location", "slope"),
+            inclination,
+        )
+        source_ds["azimuth"] = (("location", "slope"), azimuth)
+    else:
+        source_ds = source_ds.assign_coords(
+            inclination=(("location", "slope"), inclination),
+            azimuth=(("location", "slope"), azimuth),
+        )
+
+    _write_slope_archive(source_ds, source, archive_kind)
+
+    loaded = read(
+        source,
+        lazy=False,
+        memory_limit=None,
+        norm_slopes="auto",
+    )
+
+    assert loaded is not None
+    assert loaded.sizes["slope"] == 3
+    assert loaded["inclination"].dims == ("slope",)
+    np.testing.assert_allclose(loaded["inclination"], [10.0, 20.0, 30.0])
+    np.testing.assert_allclose(loaded["azimuth"], [0.0, 90.0, 180.0])
+    np.testing.assert_allclose(
+        loaded["marker"].isel(time=0),
+        [[1.0, 2.0, 3.0], [np.nan, 20.0, np.nan]],
+        equal_nan=True,
+    )
+    loaded.close()
+
+
+@pytest.mark.parametrize("archive_kind", ("netcdf", "zarr"))
+@pytest.mark.parametrize("legacy", (False, True))
+@pytest.mark.parametrize("norm_slopes", ("auto", True))
+def test_archive_readers_preserve_unidentified_slopes(
+    tmp_path,
+    archive_kind,
+    legacy,
+    norm_slopes,
+):
+    """Readers warn and preserve slopes that have no usable metadata."""
+    source = tmp_path / (
+        "unidentified-slopes.nc"
+        if archive_kind == "netcdf"
+        else "unidentified-slopes.zarr"
+    )
+    source_ds = _archive_slope_dataset(consistent=True, legacy=legacy)
+    missing = np.full((2, 2), np.nan)
+    if legacy:
+        source_ds["inclination"] = (("location", "slope"), missing)
+        source_ds["azimuth"] = (("location", "slope"), missing)
+    else:
+        source_ds = source_ds.assign_coords(
+            inclination=(("location", "slope"), missing),
+            azimuth=(("location", "slope"), missing),
+        )
+    _write_slope_archive(source_ds, source, archive_kind)
+
+    with pytest.warns(UserWarning, match="contain no usable values"):
+        loaded = read(
+            source,
+            lazy=False,
+            memory_limit=None,
+            norm_slopes=norm_slopes,
+        )
+
+    assert loaded is not None
+    assert loaded["inclination"].dims == ("location", "slope")
+    assert loaded["azimuth"].dims == ("location", "slope")
     np.testing.assert_allclose(loaded["z"], source_ds["z"])
+    loaded.close()
 
 
 def test_read_rejects_invalid_norm_slopes_before_opening(tmp_path):

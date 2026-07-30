@@ -151,10 +151,15 @@ def read(
             ``lazy=False``. PRO/SMET sources default to
             ``{'time': 100, 'layer': -1}``.
         norm_slopes: Controls slope-coordinate normalization for every source
-            format. `'auto'` (default) normalizes recognized slope metadata
-            when it is consistent across locations and preserves per-location
-            dimensions otherwise. True forces normalization to `(slope,)`;
-            False preserves the existing slope-coordinate dimensions.
+            format. `'auto'` (default) normalizes slope coords (inclination and
+            azimuth) to dimensions `(slope,)` when they are consistent across
+            locations or a union of signatures does not widen the existing slope
+            dimension; otherwise it preserves per-location dimensions `(location, slope,)`,
+            which is identical to False. True builds the global union of slope
+            coordinate signatures and remaps all slope-bearing data onto it. The
+            resulting coords have dimensions `(slope,)`. If usable recognized
+            slope metadata is unavailable, normalization preserves the existing
+            layout. It warns for `True` or an ambiguous multi-slope layout.
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions:
             - `max_layers`: Max layer dimension. `'auto'` (default) uses the

@@ -491,19 +491,19 @@ def build_archive(
     if not pro_files and not smet_files:
         raise FileNotFoundError(f"No .pro or .smet files found in {source}")
 
-    # read()'s default norm_slopes='auto' decides whether slope coords collapse
-    # to ('slope',) or stay ('location', 'slope') based on whether the stations
-    # it happens to see share a slope. Across batches that is not stable: a
-    # batch of same-slope stations would produce a different structure from a
-    # batch of differing ones and fail to append. False keeps the general
-    # per-location form for every batch.
+    # read()'s default norm_slopes='auto' decides whether slope coords remap to
+    # a global ('slope',) metadata union or stay ('location', 'slope') based on
+    # the union found in the stations it happens to see. Across batches that is
+    # not stable: different batches may produce different dimensions or union
+    # values and fail to append. False keeps the general per-location form for
+    # every batch.
     if "norm_slopes" not in read_kwargs:
         read_kwargs["norm_slopes"] = False
     elif read_kwargs["norm_slopes"] is not False:
         log.warning(
             f"norm_slopes={read_kwargs['norm_slopes']!r} makes a batch's slope "
             f"coordinates depend on which stations it contains, which can make "
-            f"batches fail to append. norm_slopes=False is recommended."
+            f"batches fail to append. norm_slopes=False is strongly recommended."
         )
 
     target_bytes = resolve_memory_limit(batch_bytes, logger=log)

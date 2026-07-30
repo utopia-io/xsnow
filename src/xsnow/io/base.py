@@ -110,16 +110,14 @@ def _apply_norm_slopes(
         return normalize_slope_coords(
             ds,
             slope_coord_names=slope_coord_names,
-            verify_consistency=False,
-            allow_per_location=False,
+            strategy="union",
             logger=logger,
         )
 
     return normalize_slope_coords(
         ds,
         slope_coord_names=slope_coord_names,
-        verify_consistency=True,
-        allow_per_location=True,
+        strategy="auto",
         logger=logger,
     )
 

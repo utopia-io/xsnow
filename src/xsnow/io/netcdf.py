@@ -102,9 +102,10 @@ def _read_xsnow_netcdf(
             uses a fraction of detected available memory; a size string or byte
             count sets an absolute cap; None disables the guard. In automatic
             mode, half this budget, capped at 4 GiB, is the eager threshold.
-        norm_slopes: Slope-coordinate normalization policy. `'auto'` collapses
-            recognized slope metadata when it is consistent across locations,
-            True forces collapse, and False preserves per-location dimensions.
+        norm_slopes: Slope-coordinate normalization policy. True builds the
+            global union of recognized slope-metadata signatures. `'auto'`
+            remaps to that union only when it does not widen the slope
+            dimension. False preserves per-location dimensions.
 
     Returns:
         An xsnowDataset instance, or None if reading fails.

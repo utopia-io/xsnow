@@ -135,11 +135,11 @@ def test_read_smets_dir_snowobs(snowobs_smets_dir_nowcast):
 @pytest.mark.real_data
 def test_read_normalize_slope_dim_smet_dir(snowobs_smets_dir_nowcast):
     """
-    Test reading multiple SMET files and adjust slope normalization behavior
-    The difference to PRO files is, that SMET files have no inclination/azimuth info!
+    Missing SMET slope metadata is preserved rather than normalized by position.
     """
-    ds = read(snowobs_smets_dir_nowcast, norm_slopes=True)
-    assert ds.azimuth.dims == ('slope',) == ds.inclination.dims
+    with pytest.warns(UserWarning, match="contain no usable values"):
+        ds = read(snowobs_smets_dir_nowcast, norm_slopes=True)
+    assert ds.azimuth.dims == ('location', 'slope') == ds.inclination.dims
     assert ds.azimuth.isnull().all()
     assert ds.inclination.isnull().all()
     
@@ -149,7 +149,7 @@ def test_read_normalize_slope_dim_smet_dir(snowobs_smets_dir_nowcast):
     assert ds.inclination.isnull().all()
     
     ds = read(snowobs_smets_dir_nowcast, norm_slopes='auto')
-    assert ds.azimuth.dims == ('slope',) == ds.inclination.dims
+    assert ds.azimuth.dims == ('location', 'slope') == ds.inclination.dims
     assert ds.azimuth.isnull().all()
     assert ds.inclination.isnull().all()
 
