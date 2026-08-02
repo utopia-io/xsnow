@@ -602,10 +602,15 @@ def _merge_and_finalize(
         realization: A RealizationSelector for final realization-based filtering.
         logger: Logger instance.
         norm_slopes: Controls slope normalization:
-            - 'auto' (default): normalize when slopes are consistent across locations;
-              preserve per-location slopes when inconsistent.
-            - True: force normalization to `(slope,)` even if values differ by location.
+            - 'auto' (default): remap local slopes to their global metadata
+              union when doing so does not widen the slope dimension; otherwise
+              preserve per-location slope coordinates.
+            - True: always build the global slope-metadata union and remap all
+              slope-bearing data, accepting a wider, sparse slope dimension.
             - False: do not call `normalize_slope_coords`.
+            If recognized slope metadata cannot identify the local slope
+            positions, normalization preserves the existing layout. It warns
+            for True or an ambiguous multi-slope layout.
 
     Returns:
         A unified and filtered xsnowDataset, or None if no datasets were provided.

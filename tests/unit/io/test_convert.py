@@ -57,7 +57,7 @@ def _clone_stations(source_dir, dest_dir, indices):
 
     Every clone keeps the source's slope metadata, so the resulting batch is
     one where all stations share a slope -- the case that makes read()'s
-    norm_slopes='auto' collapse the slope coordinate.
+    norm_slopes='auto' normalize the slope coordinate.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     template = sorted(source_dir.glob("*.pro"))[0]
@@ -293,7 +293,7 @@ class TestBuildArchive:
         self, synthetic_pro, tmp_path
     ):
         """
-        Regression: read()'s norm_slopes='auto' collapses slope coords to
+        Regression: read()'s norm_slopes='auto' normalizes slope coords to
         ('slope',) when a batch's stations happen to share a slope, and keeps
         ('location', 'slope') when they differ. Batches must not change shape
         based on which stations they happen to contain.

@@ -15,6 +15,7 @@ from xsnow import read
 from xsnow.io.memory import (
     DEFAULT_MEMORY_FRACTION,
     MemoryLimitExceeded,
+    MemorySizeUnknown,
     available_memory_bytes,
     check_memory_budget,
     estimate_decoded_nbytes,
@@ -122,38 +123,113 @@ class TestCheckMemoryBudget:
 
     def test_none_budget_is_a_no_op(self):
         ds = xr.Dataset({"x": ("time", np.zeros(1000))})
-        check_memory_budget(ds, None)  # must not raise
+        assert check_memory_budget(ds, None) is True
 
-    def test_passes_when_within_budget(self):
+    def test_returns_true_when_within_budget(self):
         ds = xr.Dataset({"x": ("time", np.zeros(10))})
-        check_memory_budget(ds, 10 * 1024**2)  # must not raise
+        assert check_memory_budget(ds, 10 * 1024**2) is True
 
-    def test_raises_when_over_budget(self):
+    def test_returns_false_when_over_budget(self):
+        ds = xr.Dataset({"x": ("time", np.zeros(1000, dtype="float64"))})
+        assert check_memory_budget(ds, 16) is False
+
+    def test_does_not_raise_by_default(self):
+        """The bool is the default contract; raising is opt-in."""
+        ds = xr.Dataset({"x": ("time", np.zeros(1000, dtype="float64"))})
+        check_memory_budget(ds, 16)  # must not raise
+
+    def test_raises_when_asked(self):
         ds = xr.Dataset({"x": ("time", np.zeros(1000, dtype="float64"))})
         with pytest.raises(MemoryLimitExceeded):
-            check_memory_budget(ds, 16)
+            check_memory_budget(ds, 16, raise_on_exceed=True)
 
-    def test_skips_when_size_is_unknown(self):
+    def test_unknown_size_returns_none(self):
+        """
+        An unmeasurable size is distinct from fitting or exceeding the budget.
+
+        Object arrays report only xarray's pointer-based nbytes, so there is
+        no trustworthy number to compare with the budget.
+        """
         ds = xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
-        check_memory_budget(ds, 1)  # unknown size must not raise
+        assert check_memory_budget(ds, 1) is None
+        assert check_memory_budget(ds, 1, raise_on_exceed=True) is None
+
+    def test_unknown_size_raises_when_asked(self):
+        ds = xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
+        with pytest.raises(MemorySizeUnknown):
+            check_memory_budget(ds, 1, raise_on_unknown=True)
+
+    def test_unknown_size_is_catchable_as_memory_error(self):
+        ds = xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
+        with pytest.raises(MemoryError):
+            check_memory_budget(ds, 1, raise_on_unknown=True)
+
+    def test_disabled_guard_ignores_raise_on_unknown(self):
+        ds = xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
+        assert check_memory_budget(ds, None, raise_on_unknown=True) is True
+
+    def test_accepts_size_strings_directly(self):
+        """It resolves memory_limit itself rather than taking raw bytes."""
+        ds = xr.Dataset({"x": ("time", np.zeros(10, dtype="float64"))})
+        assert check_memory_budget(ds, "8GB") is True
+        assert check_memory_budget(ds, "1B") is False
+
+    def test_defaults_to_auto(self):
+        ds = xr.Dataset({"x": ("time", np.zeros(10, dtype="float64"))})
+        assert check_memory_budget(ds) is True
 
     def test_is_catchable_as_memory_error(self):
         ds = xr.Dataset({"x": ("time", np.zeros(1000, dtype="float64"))})
         with pytest.raises(MemoryError):
-            check_memory_budget(ds, 16)
+            check_memory_budget(ds, 16, raise_on_exceed=True)
 
     def test_message_is_actionable(self):
         ds = xr.Dataset({"x": ("time", np.zeros(1000, dtype="float64"))})
         with pytest.raises(MemoryLimitExceeded) as excinfo:
-            check_memory_budget(ds, 16, source="test archive")
+            check_memory_budget(ds, 16, source="test archive", raise_on_exceed=True)
         message = str(excinfo.value)
         assert "test archive" in message
-        assert "lazy=True" in message
         assert "memory_limit" in message
 
     def test_boundary_equal_to_budget_passes(self):
         ds = xr.Dataset({"x": ("time", np.zeros(10, dtype="float64"))})
-        check_memory_budget(ds, int(ds.nbytes))  # exactly at budget is allowed
+        assert check_memory_budget(ds, int(ds.nbytes)) is True
+
+
+class TestCheckMemoryBudgetAsMethod:
+    """Registered on xsnowDataset and exported at package level."""
+
+    def test_exported_at_package_level(self):
+        assert xsnow.check_memory_budget is check_memory_budget
+        assert xsnow.MemorySizeUnknown is MemorySizeUnknown
+
+    def test_available_as_a_dataset_method(self, archive_paths):
+        ds = read(archive_paths["nc"], lazy=True)
+        assert ds.check_memory_budget("8GB") is True
+
+    def test_method_returns_false_on_tight_budget(self, archive_paths):
+        ds = read(archive_paths["nc"], lazy=True)
+        assert ds.check_memory_budget(16) is False
+
+    def test_method_can_raise(self, archive_paths):
+        ds = read(archive_paths["nc"], lazy=True)
+        with pytest.raises(MemoryLimitExceeded):
+            ds.check_memory_budget(16, raise_on_exceed=True)
+
+    def test_method_returns_none_for_unknown_size(self):
+        ds = xsnow.xsnowDataset(
+            xr.Dataset({"x": ("time", np.array(["a", "bb"], dtype=object))})
+        )
+        assert ds.check_memory_budget(1) is None
+
+    def test_method_checks_without_materializing(self, archive_paths):
+        """The whole point: ask before computing, not after."""
+        opened = xr.open_dataset(archive_paths["nc"])
+        try:
+            check_memory_budget(opened, "8GB")
+            assert not any(var._in_memory for var in opened.data_vars.values())
+        finally:
+            opened.close()
 
 
 @pytest.mark.parametrize("fmt", ["nc", "zarr"])
@@ -187,6 +263,17 @@ class TestReadIntegration:
         """read() returns None for unreadable sources; a refusal must raise."""
         with pytest.raises(MemoryLimitExceeded):
             read(archive_paths[fmt], lazy=False, memory_limit=1)
+
+    def test_unknown_size_refusal_is_not_swallowed(
+        self, archive_paths, fmt, monkeypatch
+    ):
+        """read() refuses an eager load when its size cannot be verified."""
+        monkeypatch.setattr(
+            "xsnow.io.memory.estimate_decoded_nbytes",
+            lambda ds: None,
+        )
+        with pytest.raises(MemorySizeUnknown):
+            read(archive_paths[fmt], lazy=False, memory_limit="8GB")
 
     def test_malformed_budget_raises_valueerror(self, archive_paths, fmt):
         with pytest.raises(ValueError):

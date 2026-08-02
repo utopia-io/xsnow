@@ -32,7 +32,11 @@ from .base import (
     _resolve_archive_lazy,
     _round_coord,
 )
-from .memory import MemoryLimitLike, check_memory_budget, resolve_memory_limit
+from .memory import (
+    MemoryLimitLike,
+    check_memory_budget,
+    resolve_memory_limit,
+)
 
 
 @contextmanager
@@ -102,15 +106,18 @@ def _read_xsnow_netcdf(
             uses a fraction of detected available memory; a size string or byte
             count sets an absolute cap; None disables the guard. In automatic
             mode, half this budget, capped at 4 GiB, is the eager threshold.
-        norm_slopes: Slope-coordinate normalization policy. `'auto'` collapses
-            recognized slope metadata when it is consistent across locations,
-            True forces collapse, and False preserves per-location dimensions.
+        norm_slopes: Slope-coordinate normalization policy. True builds the
+            global union of recognized slope-metadata signatures. `'auto'`
+            remaps to that union only when it does not widen the slope
+            dimension. False preserves per-location dimensions.
 
     Returns:
         An xsnowDataset instance, or None if reading fails.
 
     Raises:
         MemoryLimitExceeded: If an eager load would exceed ``memory_limit``.
+        MemorySizeUnknown: If an eager load's decoded size cannot be estimated
+            reliably.
     """
     logger = get_logger(__name__, logger=logger)
     budget_bytes = resolve_memory_limit(memory_limit, logger=logger)
@@ -174,6 +181,8 @@ def _read_xsnow_netcdf(
             check_memory_budget(
                 ds,
                 budget_bytes,
+                raise_on_exceed=True,
+                raise_on_unknown=True,
                 source=f"NetCDF file {source}",
                 logger=logger,
             )

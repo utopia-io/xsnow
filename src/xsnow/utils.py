@@ -12,9 +12,10 @@ import os
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Union, Any, Optional, List, Sequence, overload
+from typing import Union, Any, Literal, Optional, List, Sequence, overload
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 import warnings
 
@@ -217,217 +218,425 @@ def print(*values: Any, force_details: bool = False, **kwargs: Any) -> None:
     builtins.print(*rendered, **kwargs)
 
 
+def _is_missing_slope_metadata(value: Any) -> bool:
+    """Return whether a scalar slope-metadata value is missing."""
+    if value is None or np.ma.is_masked(value):
+        return True
+    try:
+        missing = np.asarray(pd.isna(value))
+        return bool(missing) if missing.ndim == 0 else False
+    except (TypeError, ValueError):
+        return False
+
+
+def _slope_metadata_values_match(left: Any, right: Any) -> bool:
+    """Compare two scalar slope-metadata values with the consistency tolerance."""
+    left_missing = _is_missing_slope_metadata(left)
+    right_missing = _is_missing_slope_metadata(right)
+    if left_missing or right_missing:
+        return left_missing and right_missing
+
+    try:
+        return bool(
+            np.isclose(
+                left,
+                right,
+                rtol=1e-9,
+                atol=1e-9,
+                equal_nan=True,
+            )
+        )
+    except (TypeError, ValueError):
+        try:
+            return bool(left == right)
+        except (TypeError, ValueError):
+            return False
+
+
+def _present_slope_metadata_mask(values: np.ndarray) -> np.ndarray:
+    """Return a vectorized non-missing mask for slope metadata."""
+    values = np.asanyarray(values)
+    return (
+        np.asarray(pd.notna(np.ma.getdata(values)), dtype=bool)
+        & ~np.ma.getmaskarray(values)
+    )
+
+
+def _slope_signatures_match(left: tuple, right: tuple) -> bool:
+    """Return whether two composite slope-metadata signatures match."""
+    return all(
+        _slope_metadata_values_match(left_value, right_value)
+        for left_value, right_value in zip(left, right)
+    )
+
+
+def _slope_metadata_sort_key(value: Any) -> tuple:
+    """Return a deterministic sort key for one slope-metadata value."""
+    if _is_missing_slope_metadata(value):
+        return (2, 0.0, "")
+    try:
+        return (0, float(value), "")
+    except (TypeError, ValueError):
+        return (1, 0.0, str(value))
+
+
+def _slope_signature_sort_key(
+    signature: tuple,
+    slope_coord_names: Sequence[str],
+) -> tuple:
+    """Sort standard signatures by inclination then azimuth, then custom fields."""
+    preferred_order = {"inclination": 0, "azimuth": 1}
+    coord_positions = sorted(
+        range(len(slope_coord_names)),
+        key=lambda pos: (
+            preferred_order.get(slope_coord_names[pos], 2),
+            pos,
+        ),
+    )
+    return tuple(
+        _slope_metadata_sort_key(signature[pos])
+        for pos in coord_positions
+    )
+
+
 def normalize_slope_coords(
     ds: xr.Dataset,
     slope_coord_names: Sequence[str] = ("azimuth", "inclination"),
-    verify_consistency: bool = True,
-    allow_per_location: bool = False,
-    logger: Optional[logging.Logger]=None,
+    logger: Optional[logging.Logger] = None,
+    *,
+    strategy: Literal["union", "auto"] = "auto",
 ) -> xr.Dataset:
     """
-    Normalize slope coordinates to have only 'slope' dimension.
-    
-    When combining datasets from multiple locations, slope metadata like
-    'azimuth' and 'inclination' may end up with dimensions (location, slope)
-    instead of just (slope). This function fixes that by:
-    
-    1. Detecting coordinates that have both 'location' and 'slope' dimensions
-    2. Verifying values are consistent across locations (if requested)
-    3. Reducing to just the 'slope' dimension (or keeping per-location if allowed)
-    
+    Normalize local slope positions using slope-metadata signatures.
+
+    When datasets from multiple locations are combined, recognized slope
+    metadata such as ``azimuth`` and ``inclination`` may have dimensions
+    ``(location, slope)``. This function can construct a global catalogue of
+    their metadata signatures and remap every slope-bearing variable onto it.
+
     Parameters
     ----------
     ds : xr.Dataset
-        Input dataset potentially with multi-dimensional slope coords
+        Input dataset potentially containing per-location slope coordinates.
     slope_coord_names : sequence of str, default ("azimuth", "inclination")
-        Coordinate names eligible for normalization. Names absent from the
-        dataset are ignored. Pass another sequence to support additional
-        recognized slope metadata coordinates.
-    verify_consistency : bool, default True
-        If True, verify that slope coordinate values are identical across
-        all locations before reducing dimensions. Raises ValueError if
-        inconsistent and allow_per_location=False.
-    allow_per_location : bool, default False
-        If True, when slopes vary by location, preserve the (location, slope)
-        dimensions instead of forcing normalization. This is useful when
-        different locations legitimately have different slope angles.
+        Coordinate names used to identify slope configurations. Names absent
+        from the dataset are ignored. Pass another sequence to recognize
+        additional slope metadata coordinates.
     logger : logging.Logger, optional
-        Provide user configured logger, or create new one per default
-    
+        Provide user configured logger, or create new one per default.
+    strategy : {"union", "auto"}, default "auto"
+        ``"union"`` constructs the global union of recognized slope-metadata
+        signatures and remaps all slope-bearing data onto it. ``"auto"`` does
+        the same only when the union does not widen the existing slope
+        dimension; otherwise it preserves the existing layout.
+
     Returns
     -------
     xr.Dataset
-        Dataset with normalized slope coordinates
-        
+        Dataset with normalized slope coordinates, or the original dataset
+        when normalization is not possible or ``"auto"`` would widen it.
+
     Raises
     ------
     ValueError
-        If verify_consistency=True, allow_per_location=False, and slope 
-        coordinates vary across locations
-        
+        If a union cannot be constructed losslessly because recognized
+        metadata has unsupported dimensions or a location contains duplicate
+        slope signatures.
+
     Examples
     --------
     >>> ds = xsnow.read("data/pros/gridded/")
-    >>> # azimuth might have dims (location, slope)
+    >>> # Normalize compatible local slope subsets without widening the data
     >>> ds = normalize_slope_coords(ds)
-    >>> # Now azimuth has only (slope,)
-    
-    >>> # Allow per-location slopes to be preserved
-    >>> ds = normalize_slope_coords(ds, allow_per_location=True)
-    >>> # If slopes differ, keeps (location, slope) dimensions
-    
+
+    >>> # Always build a global slope catalogue
+    >>> ds = normalize_slope_coords(ds, strategy="union")
+
     Notes
     -----
-    This function modifies coordinate dimensions but preserves all data
-    variables unchanged. It's designed to be called after merging datasets
-    from multiple locations.
+    ``"union"`` may widen and sparsify slope-bearing variables. Both
+    strategies preserve data by remapping local slope positions to recognized
+    metadata signatures. Only the recognized metadata coordinates are
+    materialized; other slope-bearing data remain lazy. If signatures cannot
+    be identified, the dataset is returned unchanged. A ``UserWarning`` is
+    emitted for an explicit ``"union"`` request or an ambiguous layout with
+    multiple slope positions.
     """
     logger = logger or get_logger(__name__)
-    if 'slope' not in ds.dims:
-        # No slope dimension, nothing to normalize
+    if strategy not in {"union", "auto"}:
+        raise ValueError(
+            f"Unsupported slope normalization strategy: {strategy!r}. "
+            "Use 'union' or 'auto'."
+        )
+
+    if "location" not in ds.dims or "slope" not in ds.dims:
         return ds
-    
-    if not slope_coord_names:
-        # Nothing to normalize
+
+    location_size = ds.sizes["location"]
+    slope_size = ds.sizes["slope"]
+    if location_size == 0 or slope_size == 0 or not slope_coord_names:
         return ds
-    
-    # Process each coordinate
-    coords_to_update = {}
+
+    allow_slope_dimension_growth = strategy == "union"
+    metadata_arrays = {}
+    metadata_coords = {}
+    per_location_names = []
+
     for coord_name in slope_coord_names:
         if coord_name not in ds.coords:
             continue
-            
+
         coord = ds.coords[coord_name]
-        
-        if 'slope' not in coord.dims:
+        if "slope" not in coord.dims:
             warnings.warn(
                 f"Coordinate '{coord_name}' does not have 'slope' dimension, skipping",
-                UserWarning
+                UserWarning,
             )
             continue
-        
-        # Identify extra dimensions
-        extra_dims = [d for d in coord.dims if d != 'slope']
-        
-        if not extra_dims:
-            # Already normalized
-            continue
-        
-        # Handle the most common case: (location, slope) -> (slope)
-        if 'location' in extra_dims:
-            # Check consistency across locations if requested
-            is_consistent = True  # Track consistency
-            
-            if verify_consistency and ds.sizes['location'] > 1:
-                # Materialize this small coordinate once. Calling ``.values``
-                # for every location separately creates one Dask computation
-                # (and potentially one remote archive read) per comparison.
-                coord_values = coord.values
-                location_axis = coord.dims.index('location')
-                reference_values = np.take(coord_values, 0, axis=location_axis)
-                reference_broadcast = np.expand_dims(
-                    reference_values,
-                    axis=location_axis,
-                )
-                matches_reference = np.isclose(
-                    coord_values,
-                    reference_broadcast,
-                    rtol=1e-9,
-                    atol=1e-9,
-                    equal_nan=True,
-                )
-                comparison_axes = tuple(
-                    axis
-                    for axis in range(matches_reference.ndim)
-                    if axis != location_axis
-                )
-                locations_match = np.all(
-                    matches_reference,
-                    axis=comparison_axes,
-                )
-                differing_locations = np.flatnonzero(~locations_match)
 
-                if differing_locations.size:
-                    is_consistent = False
-
-                    # If we allow per-location slopes, skip normalization
-                    if allow_per_location:
-                        logger.info(
-                            f"Slope coordinate '{coord_name}' varies by location. "
-                            f"Preserving (location, slope) dimensions as allow_per_location=True."
-                        )
-                    else:
-                        # Preserve the existing error contract by reporting the
-                        # first location that differs from location 0.
-                        loc_idx = int(differing_locations[0])
-                        comparison_values = np.take(
-                            coord_values,
-                            loc_idx,
-                            axis=location_axis,
-                        )
-                        diff_mask = ~np.isclose(
-                            comparison_values,
-                            reference_values,
-                            rtol=1e-9,
-                            atol=1e-9,
-                            equal_nan=True,
-                        )
-                        diff_indices = np.where(diff_mask)[0]
-
-                        raise ValueError(
-                            f"Slope coordinate '{coord_name}' is inconsistent across locations.\n"
-                            f"Location 0 vs Location {loc_idx} differ at slope indices: {diff_indices}\n"
-                            f"Location 0 values: {reference_values[diff_indices]}\n"
-                            f"Location {loc_idx} values: {comparison_values[diff_indices]}\n"
-                            f"Slope coordinates must be identical across all locations.\n"
-                            f"Set verify_consistency=False to use first location's values anyway, "
-                            f"or allow_per_location=True to preserve per-location slopes."
-                        )
-            
-            # Only normalize if consistent or if we're not checking
-            if is_consistent or not verify_consistency:
-                # Take first location, drop its attached coords (lat/lon/alt), keep only slope dim
-                normalized = (
-                    coord
-                    .isel(location=0, drop=True)
-                    .reset_coords(drop=True)
-                )
-                coords_to_update[coord_name] = normalized
-            
-        else:
-            # For other dimension combinations, warn and take first index
-            warnings.warn(
-                f"Coordinate '{coord_name}' has unexpected dimensions {coord.dims}. "
-                f"Normalizing by taking first index along {extra_dims}.",
-                UserWarning
+        metadata_coords[coord_name] = coord
+        if coord.dims == ("slope",):
+            values = np.asarray(coord.values)
+            metadata_arrays[coord_name] = np.broadcast_to(
+                values[np.newaxis, :],
+                (location_size, slope_size),
             )
-            
-            # Iteratively reduce extra dimensions
-            normalized = coord
-            for dim in extra_dims:
-                normalized = normalized.isel({dim: 0})
-                # Drop the coordinate to avoid scalar dimension conflicts
-                normalized = normalized.drop_vars(dim, errors='ignore')
-            
-            # Remove any remaining non-dimension coords (e.g., latitude) before reassigning
-            normalized = normalized.reset_coords(drop=True)
-            coords_to_update[coord_name] = normalized
-    
-    # Apply updates if any
-    if coords_to_update:
-        # Drop the old coordinates first to avoid dimension conflicts
-        ds = ds.drop_vars(list(coords_to_update.keys()))
-        
-        # Now assign the new coordinates
-        ds = ds.assign_coords(coords_to_update)
-        
-        # Log what was done
-        coord_list = ", ".join(f"'{c}'" for c in coords_to_update.keys())
-        logger.debug(
-            f"Normalized slope coordinates {coord_list} to have only 'slope' dimension"
+            continue
+
+        if set(coord.dims) == {"location", "slope"} and len(coord.dims) == 2:
+            metadata_arrays[coord_name] = np.asarray(
+                coord.transpose("location", "slope").values
+            )
+            per_location_names.append(coord_name)
+            continue
+
+        raise ValueError(
+            f"Cannot normalize slope coordinate {coord_name!r} losslessly: "
+            f"expected dimensions ('slope',) or ('location', 'slope'), "
+            f"got {coord.dims!r}."
         )
 
-    return ds
+    if not metadata_arrays:
+        if allow_slope_dimension_growth or slope_size > 1:
+            warnings.warn(
+                "Slope normalization skipped: no recognized slope metadata "
+                f"coordinates {tuple(slope_coord_names)!r} with a 'slope' "
+                "dimension were found. Preserving the existing slope layout.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return ds
+
+    metadata_present = np.zeros((location_size, slope_size), dtype=bool)
+    for coord_name in metadata_arrays:
+        coord_values = metadata_arrays[coord_name]
+        metadata_present |= _present_slope_metadata_mask(coord_values)
+
+    if not metadata_present.any():
+        if allow_slope_dimension_growth or slope_size > 1:
+            warnings.warn(
+                "Slope normalization skipped: the recognized slope metadata "
+                f"coordinates {tuple(metadata_arrays)!r} contain no usable "
+                "values. Preserving the existing slope layout.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return ds
+
+    unidentified_locations = ~metadata_present.any(axis=1)
+    if unidentified_locations.any():
+        if allow_slope_dimension_growth or slope_size > 1:
+            warnings.warn(
+                "Slope normalization skipped: the recognized slope metadata "
+                f"coordinates {tuple(metadata_arrays)!r} do not identify any "
+                f"slope for {int(unidentified_locations.sum())} location(s). "
+                "Preserving the existing slope layout.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return ds
+
+    if not per_location_names:
+        return ds
+
+    # Missing cells in an otherwise identified location are outer-join
+    # padding, not additional slope configurations.
+    valid_source = metadata_present
+
+    metadata_names = tuple(metadata_arrays)
+    unique_signatures = []
+    target_by_source = np.full(
+        (location_size, slope_size),
+        -1,
+        dtype=np.int64,
+    )
+
+    for location_index in range(location_size):
+        targets_at_location = {}
+        for slope_index in np.flatnonzero(valid_source[location_index]):
+            signature = tuple(
+                metadata_arrays[coord_name][location_index, slope_index]
+                for coord_name in metadata_names
+            )
+            target_index = next(
+                (
+                    index
+                    for index, existing in enumerate(unique_signatures)
+                    if _slope_signatures_match(signature, existing)
+                ),
+                None,
+            )
+            if target_index is None:
+                target_index = len(unique_signatures)
+                unique_signatures.append(signature)
+                if (
+                    not allow_slope_dimension_growth
+                    and len(unique_signatures) > slope_size
+                ):
+                    logger.info(
+                        "Preserving per-location slope coordinates because "
+                        "their global union would grow the slope dimension "
+                        f"beyond its current size of {slope_size}."
+                    )
+                    return ds
+
+            if target_index in targets_at_location:
+                first_slope_index = targets_at_location[target_index]
+                location_value = ds["location"].values[location_index]
+                raise ValueError(
+                    f"Location {location_value!r} contains duplicate slope "
+                    f"metadata at local slope indices {first_slope_index} and "
+                    f"{slope_index}: {signature!r}."
+                )
+
+            targets_at_location[target_index] = int(slope_index)
+            target_by_source[location_index, slope_index] = target_index
+
+    # Canonical ordering makes the global slope index independent of location
+    # order while retaining the familiar inclination-then-azimuth ordering.
+    signature_order = sorted(
+        range(len(unique_signatures)),
+        key=lambda index: _slope_signature_sort_key(
+            unique_signatures[index],
+            metadata_names,
+        ),
+    )
+    old_to_new = {
+        old_index: new_index
+        for new_index, old_index in enumerate(signature_order)
+    }
+    unique_signatures = [
+        unique_signatures[old_index]
+        for old_index in signature_order
+    ]
+
+    remapped_targets = np.full_like(target_by_source, -1)
+    for old_index, new_index in old_to_new.items():
+        remapped_targets[target_by_source == old_index] = new_index
+    target_by_source = remapped_targets
+
+    union_size = len(unique_signatures)
+    source_by_target = np.zeros(
+        (location_size, union_size),
+        dtype=np.int64,
+    )
+    valid_target = np.zeros(
+        (location_size, union_size),
+        dtype=bool,
+    )
+    for location_index in range(location_size):
+        for slope_index in np.flatnonzero(target_by_source[location_index] >= 0):
+            target_index = target_by_source[location_index, slope_index]
+            source_by_target[location_index, target_index] = slope_index
+            valid_target[location_index, target_index] = True
+
+    normalized_dim = "_normalized_slope"
+    indexer_coords = {
+        "location": ds["location"],
+        normalized_dim: np.arange(union_size),
+    }
+    source_indexer = xr.DataArray(
+        source_by_target,
+        dims=("location", normalized_dim),
+        coords=indexer_coords,
+    )
+    valid_targets = xr.DataArray(
+        valid_target,
+        dims=("location", normalized_dim),
+        coords=indexer_coords,
+    )
+
+    normalized = ds.drop_vars(list(metadata_coords)).isel(
+        slope=source_indexer
+    )
+
+    # isel uses source index zero as a placeholder for absent signatures.
+    # Replace those selected values with the dtype-appropriate missing value,
+    # but do not broadcast the mask onto variables unrelated to slope.
+    has_missing_targets = not valid_target.all()
+    for var_name in list(normalized.data_vars):
+        if normalized_dim not in normalized[var_name].dims:
+            continue
+        if not has_missing_targets:
+            continue
+        if (
+            var_name == "profile_status"
+            and np.issubdtype(normalized[var_name].dtype, np.integer)
+        ):
+            normalized[var_name] = normalized[var_name].where(
+                valid_targets,
+                other=0,
+            )
+        else:
+            normalized[var_name] = normalized[var_name].where(valid_targets)
+
+    coord_updates = {}
+    for coord_name in normalized.coords:
+        if (
+            has_missing_targets
+            and coord_name not in normalized.dims
+            and coord_name != "slope"
+            and normalized_dim in normalized[coord_name].dims
+        ):
+            coord_updates[coord_name] = normalized[coord_name].where(
+                valid_targets
+            )
+    if coord_updates:
+        normalized = normalized.assign_coords(coord_updates)
+
+    if "slope" in normalized.coords:
+        normalized = normalized.drop_vars("slope")
+    normalized = normalized.rename({normalized_dim: "slope"})
+    normalized = normalized.assign_coords(
+        slope=xr.DataArray(
+            np.arange(union_size),
+            dims=("slope",),
+            attrs=ds["slope"].attrs,
+        )
+    )
+
+    signature_coords = {}
+    for coord_position, coord_name in enumerate(metadata_names):
+        values = [
+            (
+                np.nan
+                if _is_missing_slope_metadata(signature[coord_position])
+                else signature[coord_position]
+            )
+            for signature in unique_signatures
+        ]
+        signature_coords[coord_name] = xr.DataArray(
+            np.asarray(values),
+            dims=("slope",),
+            attrs=metadata_coords[coord_name].attrs,
+        )
+    normalized = normalized.assign_coords(signature_coords)
+
+    logger.debug(
+        "Normalized per-location slope coordinates onto a global union of "
+        f"{union_size} slope metadata signatures."
+    )
+    return normalized
 
 
 def detect_slope_coord_issues(

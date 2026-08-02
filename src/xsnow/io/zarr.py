@@ -31,6 +31,7 @@ from .base import (
 from .memory import (
     MemoryLimitExceeded,
     MemoryLimitLike,
+    MemorySizeUnknown,
     check_memory_budget,
     resolve_memory_limit,
 )
@@ -78,15 +79,18 @@ def _read_zarr(
             uses a fraction of detected available memory; a size string or byte
             count sets an absolute cap; None disables the guard. In automatic
             mode, half this budget, capped at 4 GiB, is the eager threshold.
-        norm_slopes: Slope-coordinate normalization policy. `'auto'` collapses
-            recognized slope metadata when it is consistent across locations,
-            True forces collapse, and False preserves per-location dimensions.
+        norm_slopes: Slope-coordinate normalization policy. True builds the
+            global union of recognized slope-metadata signatures. `'auto'`
+            remaps to that union only when it does not widen the slope
+            dimension. False preserves per-location dimensions.
 
     Returns:
         xsnowDataset with the loaded data, or None if loading fails
 
     Raises:
         MemoryLimitExceeded: If an eager load would exceed ``memory_limit``.
+        MemorySizeUnknown: If an eager load's decoded size cannot be estimated
+            reliably.
     """
     logger = get_logger(__name__, logger=logger)
     opened: Optional[xr.Dataset] = None
@@ -166,6 +170,8 @@ def _read_zarr(
             check_memory_budget(
                 ds_raw,
                 budget_bytes,
+                raise_on_exceed=True,
+                raise_on_unknown=True,
                 source=f"Zarr archive {path}",
                 logger=logger,
             )
@@ -175,7 +181,7 @@ def _read_zarr(
         # Wrap in xsnowDataset
         return xsnowDataset(ds_raw)
 
-    except (UnitValidationError, MemoryLimitExceeded):
+    except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown):
         # Deliberate refusals, not read failures: surface them to the caller
         # rather than degrading to the None "could not read" contract below.
         if opened is not None:

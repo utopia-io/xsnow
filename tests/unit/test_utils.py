@@ -140,7 +140,7 @@ def _slope_dataset(values, *, lazy=False):
     )
 
 
-def test_normalize_slope_coords_collapses_consistent_values():
+def test_normalize_slope_coords_default_auto_normalizes_consistent_values():
     ds = _slope_dataset(
         [
             [0.0, 35.0],
@@ -149,16 +149,13 @@ def test_normalize_slope_coords_collapses_consistent_values():
         ]
     )
 
-    normalized = normalize_slope_coords(
-        ds,
-        allow_per_location=True,
-    )
+    normalized = normalize_slope_coords(ds)
 
     assert normalized["inclination"].dims == ("slope",)
     np.testing.assert_allclose(normalized["inclination"], [0.0, 35.0])
 
 
-def test_normalize_slope_coords_preserves_inconsistent_values_when_allowed():
+def test_normalize_slope_coords_default_auto_preserves_union_that_would_grow():
     values = np.array(
         [
             [0.0, 35.0],
@@ -170,33 +167,13 @@ def test_normalize_slope_coords_preserves_inconsistent_values_when_allowed():
     normalized = normalize_slope_coords(
         ds,
         slope_coord_names=["inclination"],
-        allow_per_location=True,
     )
 
     assert normalized["inclination"].dims == ("location", "slope")
     np.testing.assert_allclose(normalized["inclination"], values)
 
 
-def test_normalize_slope_coords_reports_first_inconsistent_location():
-    ds = _slope_dataset(
-        [
-            [0.0, 35.0],
-            [0.0, 35.0],
-            [0.0, 40.0],
-        ]
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=r"Location 0 vs Location 2 differ at slope indices: \[1\]",
-    ):
-        normalize_slope_coords(
-            ds,
-            slope_coord_names=["inclination"],
-        )
-
-
-def test_normalize_slope_coords_computes_lazy_coordinate_once():
+def test_normalize_slope_coords_materializes_lazy_metadata_once():
     ds = _slope_dataset(
         np.tile([0.0, 35.0], (100, 1)),
         lazy=True,
@@ -209,12 +186,11 @@ def test_normalize_slope_coords_computes_lazy_coordinate_once():
         normalized = normalize_slope_coords(
             ds,
             slope_coord_names=["inclination"],
-            allow_per_location=True,
         )
 
     assert len(computations) == 1
     assert normalized["inclination"].dims == ("slope",)
-    assert isinstance(normalized["inclination"].data, da.Array)
+    assert isinstance(normalized["inclination"].data, np.ndarray)
     assert isinstance(normalized["marker"].data, da.Array)
 
 
@@ -239,7 +215,7 @@ def test_normalize_slope_coords_only_normalizes_recognized_metadata():
     )
 
     diagnostics = detect_slope_coord_issues(ds)
-    normalized = normalize_slope_coords(ds, allow_per_location=True)
+    normalized = normalize_slope_coords(ds)
 
     assert set(diagnostics["multidim_coords"]) == {"azimuth", "inclination"}
     assert "z" not in diagnostics["multidim_coords"]
@@ -260,7 +236,207 @@ def test_normalize_slope_coords_accepts_custom_metadata_names():
     normalized = normalize_slope_coords(
         ds,
         slope_coord_names=("custom_slope_metadata",),
-        allow_per_location=True,
     )
 
     assert normalized["custom_slope_metadata"].dims == ("slope",)
+
+
+def _slope_union_dataset(
+    inclination,
+    azimuth,
+    marker,
+    *,
+    lazy=False,
+):
+    inclination = np.asarray(inclination, dtype=float)
+    azimuth = np.asarray(azimuth, dtype=float)
+    marker = np.asarray(marker, dtype=float)
+    if lazy:
+        inclination = da.from_array(inclination, chunks=(1, inclination.shape[1]))
+        azimuth = da.from_array(azimuth, chunks=(1, azimuth.shape[1]))
+        marker = da.from_array(marker, chunks=(1, marker.shape[1]))
+
+    return xr.Dataset(
+        {
+            "marker": (("location", "slope"), marker),
+            "location_marker": ("location", np.arange(marker.shape[0])),
+        },
+        coords={
+            "location": [f"L{index}" for index in range(marker.shape[0])],
+            "slope": np.arange(marker.shape[1]),
+            "inclination": (("location", "slope"), inclination),
+            "azimuth": (("location", "slope"), azimuth),
+            "z": (("location", "slope"), marker + 0.5),
+        },
+    )
+
+
+def test_normalize_slope_coords_union_globalizes_distinct_local_slopes():
+    ds = _slope_union_dataset(
+        [[35.0], [20.0]],
+        [[180.0], [0.0]],
+        [[3.5], [2.0]],
+    )
+
+    normalized = normalize_slope_coords(ds, strategy="union")
+
+    assert normalized.sizes["slope"] == 2
+    assert normalized["inclination"].dims == ("slope",)
+    assert normalized["azimuth"].dims == ("slope",)
+    np.testing.assert_allclose(normalized["inclination"], [20.0, 35.0])
+    np.testing.assert_allclose(normalized["azimuth"], [0.0, 180.0])
+    np.testing.assert_allclose(
+        normalized["marker"],
+        [[np.nan, 3.5], [2.0, np.nan]],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        normalized["z"],
+        [[np.nan, 4.0], [2.5, np.nan]],
+        equal_nan=True,
+    )
+    assert normalized["location_marker"].dims == ("location",)
+
+
+def test_normalize_slope_coords_auto_remaps_compatible_subset():
+    ds = _slope_union_dataset(
+        [
+            [10.0, 20.0, 30.0],
+            [20.0, np.nan, np.nan],
+            [10.0, 20.0, 30.0],
+        ],
+        [
+            [0.0, 90.0, 180.0],
+            [90.0, np.nan, np.nan],
+            [0.0, 90.0, 180.0],
+        ],
+        [
+            [1.0, 2.0, 3.0],
+            [20.0, np.nan, np.nan],
+            [10.0, 20.0, 30.0],
+        ],
+    )
+
+    normalized = normalize_slope_coords(ds, strategy="auto")
+
+    assert normalized.sizes["slope"] == ds.sizes["slope"]
+    assert normalized["inclination"].dims == ("slope",)
+    np.testing.assert_allclose(normalized["inclination"], [10.0, 20.0, 30.0])
+    np.testing.assert_allclose(normalized["azimuth"], [0.0, 90.0, 180.0])
+    np.testing.assert_allclose(
+        normalized["marker"],
+        [
+            [1.0, 2.0, 3.0],
+            [np.nan, 20.0, np.nan],
+            [10.0, 20.0, 30.0],
+        ],
+        equal_nan=True,
+    )
+
+
+def test_normalize_slope_coords_auto_preserves_union_that_would_grow():
+    ds = _slope_union_dataset(
+        [[20.0], [35.0]],
+        [[0.0], [180.0]],
+        [[2.0], [3.5]],
+    )
+
+    normalized = normalize_slope_coords(ds, strategy="auto")
+
+    assert normalized is ds
+    assert normalized.sizes["slope"] == 1
+    assert normalized["inclination"].dims == ("location", "slope")
+
+
+def test_normalize_slope_coords_union_rejects_duplicate_local_signature():
+    ds = _slope_union_dataset(
+        [[20.0, 20.0]],
+        [[90.0, 90.0]],
+        [[1.0, 2.0]],
+    )
+
+    with pytest.raises(ValueError, match="duplicate slope metadata"):
+        normalize_slope_coords(ds, strategy="union")
+
+
+def test_normalize_slope_coords_union_keeps_profile_data_lazy():
+    ds = _slope_union_dataset(
+        [[20.0], [35.0]],
+        [[0.0], [180.0]],
+        [[2.0], [3.5]],
+        lazy=True,
+    )
+    computations = []
+
+    with dask.config.set(scheduler="synchronous"), Callback(
+        start=lambda dask_graph: computations.append(dask_graph)
+    ):
+        normalized = normalize_slope_coords(ds, strategy="union")
+
+    assert len(computations) == 2
+    assert isinstance(normalized["marker"].data, da.Array)
+    assert normalized.sizes["slope"] == 2
+
+
+def test_normalize_slope_coords_union_preserves_profile_status_semantics():
+    ds = _slope_union_dataset(
+        [[20.0], [35.0]],
+        [[0.0], [180.0]],
+        [[2.0], [3.5]],
+    ).assign(
+        profile_status=(
+            ("location", "slope"),
+            np.array([[1], [-1]], dtype="i1"),
+        )
+    )
+
+    normalized = normalize_slope_coords(ds, strategy="union")
+
+    assert normalized["profile_status"].dtype == np.dtype("i1")
+    np.testing.assert_array_equal(
+        normalized["profile_status"],
+        [[1, 0], [0, -1]],
+    )
+
+
+@pytest.mark.parametrize("strategy", ("auto", "union"))
+def test_normalize_slope_coords_preserves_all_missing_metadata(strategy):
+    ds = _slope_union_dataset(
+        [[np.nan, np.nan], [np.nan, np.nan]],
+        [[np.nan, np.nan], [np.nan, np.nan]],
+        [[2.0, 2.5], [3.5, 4.0]],
+    )
+
+    with pytest.warns(UserWarning, match="contain no usable values"):
+        normalized = normalize_slope_coords(ds, strategy=strategy)
+
+    assert normalized is ds
+    assert normalized["inclination"].dims == ("location", "slope")
+
+@pytest.mark.parametrize("strategy", ("auto", "union"))
+def test_normalize_slope_coords_preserves_absent_metadata(strategy):
+    ds = _slope_union_dataset(
+        [[10.0, 20.0], [10.0, 20.0]],
+        [[0.0, 90.0], [0.0, 90.0]],
+        [[1.0, 2.0], [3.0, 4.0]],
+    ).drop_vars(["inclination", "azimuth"])
+
+    with pytest.warns(UserWarning, match="no recognized slope metadata"):
+        normalized = normalize_slope_coords(ds, strategy=strategy)
+
+    assert normalized is ds
+
+
+@pytest.mark.parametrize("strategy", ("auto", "union"))
+def test_normalize_slope_coords_preserves_unidentified_location(strategy):
+    ds = _slope_union_dataset(
+        [[10.0, 20.0], [np.nan, np.nan]],
+        [[0.0, 90.0], [np.nan, np.nan]],
+        [[1.0, 2.0], [3.0, np.nan]],
+    )
+
+    with pytest.warns(UserWarning, match=r"do not identify any slope for 1 location"):
+        normalized = normalize_slope_coords(ds, strategy=strategy)
+
+    assert normalized is ds
+    assert normalized["inclination"].dims == ("location", "slope")

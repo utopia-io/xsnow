@@ -24,6 +24,7 @@ import os
 import re
 from typing import Any, Optional, Union
 
+from ..plugin import register_xsnowDataset_method
 from ..utils import get_logger
 
 
@@ -50,6 +51,16 @@ class MemoryLimitExceeded(MemoryError):
 
     Subclasses ``MemoryError`` so that callers already guarding against
     allocation failures catch this too.
+    """
+
+
+class MemorySizeUnknown(MemoryError):
+    """
+    Raised when a dataset's decoded in-memory size cannot be estimated safely.
+
+    Object and variable-length string arrays expose only pointer-based
+    ``nbytes`` values, so their payload cannot be compared reliably with a
+    memory budget.
     """
 
 
@@ -192,54 +203,112 @@ def estimate_decoded_nbytes(ds: Any) -> Optional[int]:
         return None
 
 
+@register_xsnowDataset_method
 def check_memory_budget(
     ds: Any,
-    budget_bytes: Optional[int],
+    memory_limit: MemoryLimitLike = "auto",
     *,
+    raise_on_exceed: bool = False,
+    raise_on_unknown: bool = False,
     source: str = "dataset",
     logger: Optional[logging.Logger] = None,
-) -> None:
+) -> bool | None:
     """
-    Raise before an eager load that would exceed the memory budget.
+    Report whether materializing a dataset would fit within a memory budget.
+
+    Useful before an explicit ``.compute()`` or ``.load()`` on a lazy dataset,
+    not only inside ``read()``: a kernel OOM kill is uncatchable, so the only
+    place to find out is before the allocation.
 
     Args:
-        ds: The (still lazy) dataset about to be loaded.
-        budget_bytes: Budget from :func:`resolve_memory_limit`. None skips
-            the check.
-        source: Human-readable description of what is being read, used in the
-            error message.
+        ds: The (still lazy) dataset about to be materialized.
+        memory_limit: Budget to check against. `'auto'` (default) uses a
+            fraction of detected available memory; a size string or byte count
+            sets an absolute cap; None disables the check.
+        raise_on_exceed: If True, raise ``MemoryLimitExceeded`` instead of
+            returning False. ``read()`` uses this; interactive callers
+            generally want the boolean.
+        raise_on_unknown: If True, raise ``MemorySizeUnknown`` instead of
+            returning None when the decoded size cannot be estimated.
+            ``read()`` uses this to avoid an unchecked eager load.
+        source: Human-readable description used in the message.
         logger: Optional logger for diagnostics.
 
-    Raises:
-        MemoryLimitExceeded: If the estimated size exceeds the budget.
-    """
-    if budget_bytes is None:
-        return
+    Returns:
+        True if the dataset fits the budget, or if the check does not apply
+        because the guard is disabled.
+        False if it would exceed the budget and ``raise_on_exceed`` is False.
+        None if its decoded size cannot be estimated and ``raise_on_unknown``
+        is False. Object and variable-length string arrays report only
+        xarray's pointer-based ``nbytes``, which does not represent the real
+        payload.
 
+    Raises:
+        MemoryLimitExceeded: If the size exceeds the budget and
+            ``raise_on_exceed`` is True.
+        MemorySizeUnknown: If the size cannot be estimated and
+            ``raise_on_unknown`` is True.
+
+    Examples:
+        >>> ds = xsnow.read("season.zarr", lazy=True)
+        >>> if ds.check_memory_budget("8GB"):
+        ...     ds = ds.compute()
+
+        >>> result = ds.check_memory_budget("8GB")
+        >>> if result is None:
+        ...     print("Decoded size is unknown; choose a context-specific policy")
+
+        >>> # Or let it raise, the way read() does
+        >>> ds.check_memory_budget(
+        ...     raise_on_exceed=True,
+        ...     raise_on_unknown=True,
+        ... )
+        True
+    """
     log = get_logger(__name__, logger=logger)
+    budget_bytes = resolve_memory_limit(memory_limit, logger=log)
+
+    if budget_bytes is None:
+        return True
+
     estimated = estimate_decoded_nbytes(ds)
 
     if estimated is None:
-        log.debug(
-            f"Memory guard skipped for {source}: decoded size could not be "
-            f"estimated (object or variable-length string data)."
+        message = (
+            f"Cannot determine the decoded memory size of {source}, so it "
+            f"cannot be compared with the memory limit of "
+            f"{_format_bytes(budget_bytes)}. Object and variable-length "
+            f"string data do not provide a trustworthy payload size.\n"
+            f"Options:\n"
+            f"  - keep the data Dask-backed instead of computing it\n"
+            f"  - convert object or variable-length strings to fixed-width data\n"
+            f"  - disable the guard with memory_limit=None if memory safety is "
+            f"managed elsewhere"
         )
-        return
+        if raise_on_unknown:
+            raise MemorySizeUnknown(message)
+
+        log.debug(message)
+        return None
 
     if estimated <= budget_bytes:
         log.debug(
             f"Memory guard passed for {source}: "
             f"{_format_bytes(estimated)} within {_format_bytes(budget_bytes)}."
         )
-        return
+        return True
 
-    raise MemoryLimitExceeded(
-        f"Reading {source} eagerly would materialize about "
-        f"{_format_bytes(estimated)}, which exceeds the memory limit of "
-        f"{_format_bytes(budget_bytes)}.\n"
+    message = (
+        f"Materializing {source} would use about {_format_bytes(estimated)}, "
+        f"which exceeds the memory limit of {_format_bytes(budget_bytes)}.\n"
         f"Options:\n"
-        f"  - narrow the read with time/location/slope/realization selectors\n"
-        f"  - pass lazy=True to keep the data Dask-backed\n"
+        f"  - narrow the selection with time/location/slope/realization selectors\n"
+        f"  - keep the data Dask-backed instead of computing it\n"
         f"  - raise or disable the budget with memory_limit='32GB' or "
         f"memory_limit=None"
     )
+    if raise_on_exceed:
+        raise MemoryLimitExceeded(message)
+
+    log.warning(message)
+    return False
