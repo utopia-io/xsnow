@@ -23,6 +23,7 @@ from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..utils import get_backend
 from .critical_crack_length import _errstate, compute_rc_slope_richter2019
+from .rta import compute_rta
 from .sk38 import (
     _prepare_skier_mechanics,
     _registry_attrs,
@@ -165,12 +166,12 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     Notes
     -----
     ``sk38_ccl`` where ``rta >= RTA_THRESHOLD``, ``INDEX_CAP`` where
-    below (NaN stays NaN).
+    below (NaN stays NaN). Uses the per-layer variable ``rta`` if
+    present, otherwise computes it via
+    :func:`xsnow.extensions.rta.compute_rta`.
     """
     if 'rta' not in ds.data:
-        raise ValueError(
-            "Variable 'rta' not found in the dataset."
-        )
+        ds = compute_rta(ds)
     rta_da = ds.data['rta']
 
     pure = compute_sk38_ccl(ds)

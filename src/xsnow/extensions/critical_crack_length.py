@@ -300,7 +300,9 @@ def compute_rc_slope_richter2019(
     2 sigma_n (tau_p - tau_g))) / sigma_n`` (Richter et al. 2019).
     Unlike rc_flat, rc_slope includes the slope-parallel load and uses
     the weak layer's own modulus; the two formulations do not converge
-    into each other for vanishing slope angles.
+    into each other for vanishing slope angles. Layers whose
+    slope-parallel load exceeds the (corrected) strength -- the
+    spontaneous failure regime -- are NaN.
     """
     with _errstate(xp, divide='ignore', invalid='ignore'):
         f_wl = A_RICHTER * (
@@ -317,6 +319,7 @@ def compute_rc_slope_richter2019(
             * (-tau_g + xp.sqrt(excess))
             / sigma_n
         )
+        rc = xp.where(shear_strength_pa >= tau_g, rc, xp.nan)
     return rc
 
 
