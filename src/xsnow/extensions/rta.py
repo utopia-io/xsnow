@@ -25,10 +25,11 @@ References
 - Monti, F., & Schweizer, J. (2013). A relative difference approach to
   detect potential weak layers within a snow profile. Proc. ISSW 2013.
 """
+import numpy as np
+
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..utils import get_backend
-from .critical_crack_length import _errstate
 from .sk38 import _registry_attrs, _wrap_like_height
 
 WEIBULL_SHAPE = 2.5          # shape of the depth weighting
@@ -49,7 +50,7 @@ def _population_sd(x, mean, valid, xp):
     """Population standard deviation over valid layers, floored at 1."""
     n = valid.sum(axis=-1)
     var = xp.where(valid, (x - mean[..., None]) ** 2, 0.0).sum(axis=-1)
-    with _errstate(xp, invalid='ignore', divide='ignore'):
+    with np.errstate(invalid='ignore', divide='ignore'):
         sd = xp.sqrt(xp.where(n > 0, var / xp.maximum(n, 1), xp.nan))
     return xp.maximum(sd, 1.0)
 
@@ -129,7 +130,7 @@ def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     iface_b = valid & xp.isfinite(dh_b)
 
     # crust-corrected Weibull depth weighting
-    with _errstate(xp, invalid='ignore'):
+    with np.errstate(invalid='ignore'):
         weibull = (
             (WEIBULL_SHAPE / WEIBULL_SCALE)
             * depth ** (WEIBULL_SHAPE - 1.0)
@@ -199,7 +200,7 @@ def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     sum_a = (lem_gt + s_h + s_g + _scale(z_dh_a, mn_dh, span_dh)
              + _scale(z_dg_a, mn_dg, span_dg) + s_w_above)
 
-    with _errstate(xp, invalid='ignore'):
+    with np.errstate(invalid='ignore'):
         rta = xp.fmax(sum_b, sum_a)
         rta = xp.where(valid, rta, xp.nan)
         rta_max = xp.max(

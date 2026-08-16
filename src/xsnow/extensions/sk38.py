@@ -17,6 +17,7 @@ References
 """
 import math
 
+import numpy as np
 import xarray as xr
 
 from ..core import xsnowDataset
@@ -24,7 +25,6 @@ from ..plugin import register_xsnowDataset_method
 from ..utils import get_backend, get_logger
 from ..registry import registry
 from .critical_crack_length import (
-    _errstate,
     compute_slab_mechanics,
     slab_weighted_mean,
 )
@@ -74,7 +74,7 @@ def compute_skier_penetration(
     )
     weights = xp.where(valid, weights, 0.0)
 
-    with _errstate(xp, divide='ignore', invalid='ignore'):
+    with np.errstate(divide='ignore', invalid='ignore'):
         rho_top = (
             xp.nansum(xp.where(valid, density, 0.0) * weights, axis=-1)
             / xp.sum(weights, axis=-1)
@@ -232,7 +232,7 @@ def _prepare_skier_mechanics(ds, penetrated_layer=PENETRATED_LAYER):
     e_slab_sk = (
         slab_weighted_mean(e_layer ** (1.0 / 3.0), thick_sk, xp) ** 3
     )
-    with _errstate(xp, divide='ignore', invalid='ignore'):
+    with np.errstate(divide='ignore', invalid='ignore'):
         h_equiv_sk = d_slab_sk * (e_slab_sk / e_layer) ** (1.0 / 3.0)
 
     # topmost valid layer (never evaluated)
@@ -303,7 +303,7 @@ def compute_sk38(ds: 'xsnowDataset') -> 'xsnowDataset':
     xp = mech['xp']
 
     alpha_star = alpha_max_skier_stress(mech['theta'])
-    with _errstate(xp, divide='ignore', invalid='ignore'):
+    with np.errstate(divide='ignore', invalid='ignore'):
         delta_tau_max = skier_delta_tau(
             xp.asarray(alpha_star), mech['h_equiv_sk'], mech['theta'],
             mech['line_load'], xp

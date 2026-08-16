@@ -19,10 +19,12 @@ References
 """
 import math
 
+import numpy as np
+
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..utils import get_backend
-from .critical_crack_length import _errstate, compute_rc_slope_richter2019
+from .critical_crack_length import compute_rc_slope_richter2019
 from .rta import compute_rta
 from .sk38 import (
     _prepare_skier_mechanics,
@@ -62,7 +64,7 @@ def compute_skier_crack_length(mech, xp):
             - strength_excess
         )
 
-    with _errstate(xp, divide='ignore', invalid='ignore'):
+    with np.errstate(divide='ignore', invalid='ignore'):
         crack_possible = stress_excess(xp.asarray(alpha_star)) > 0.0
 
         # bisection towards the lower and the upper crack-tip angle
@@ -129,7 +131,7 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
     )
     l_sk, crack_possible = compute_skier_crack_length(mech, xp)
 
-    with _errstate(xp, divide='ignore', invalid='ignore'):
+    with np.errstate(divide='ignore', invalid='ignore'):
         index = xp.minimum(ccl / l_sk, INDEX_CAP)
 
     # sentinel precedence: topmost layer, then spontaneous failure, then

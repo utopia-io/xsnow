@@ -11,7 +11,6 @@ user environment and install.
 Other parametrizations are welcome to be added.
 
 """
-import contextlib
 import math
 from typing import Optional
 
@@ -34,14 +33,6 @@ A_RICHTER = 4.6e-9       # Richter et al. (2019) parameter "a"
 B_RICHTER = -2.0         # Richter et al. (2019) parameter "b"
 E0 = 5.07e9              # Pa, modulus prefactor in Richter et al. (2019)
 E_EXP = 5.13             # exponent on (rho_slab / rho_ice)
-
-
-def _errstate(xp, **kwargs):
-    """Floating-point error-state context; a no-op on backends without
-    one (CuPy does not implement ``errstate``)."""
-    if hasattr(xp, 'errstate'):
-        return xp.errstate(**kwargs)
-    return contextlib.nullcontext()
 
 
 def compute_rho_slab(density, thickness, xp):
@@ -101,7 +92,7 @@ def compute_rho_slab(density, thickness, xp):
     thick_cum_from_top = xp.cumsum(thickness_clean[..., ::-1], axis=-1)
 
     # Mean density of (layer >= current in reversed coords)
-    with _errstate(xp, divide='ignore', invalid='ignore'):
+    with np.errstate(divide='ignore', invalid='ignore'):
         rho_rev = mass_cum_from_top / thick_cum_from_top  # (..., L), reversed axis
 
     # Flip back to bottom->top ordering
@@ -131,7 +122,7 @@ def slab_weighted_mean(values, thickness, xp):
     sum_from_top = xp.cumsum(weighted[..., ::-1], axis=-1)[..., ::-1]
     weight_from_top = xp.cumsum(weights[..., ::-1], axis=-1)[..., ::-1]
 
-    with _errstate(xp, divide='ignore', invalid='ignore'):
+    with np.errstate(divide='ignore', invalid='ignore'):
         mean_incl = sum_from_top / weight_from_top
 
     # shift so that layer i only sees layers strictly above itself
@@ -178,7 +169,7 @@ def compute_slab_mechanics(density, thickness_vertical, height, grain_type,
     rho_slab = compute_rho_slab(density, thick_n, xp)
     e_layer = E0 * (density / RHO_ICE) ** E_EXP
     e_slab = slab_weighted_mean(e_layer ** (1.0 / 3.0), thick_n, xp) ** 3
-    with _errstate(xp, divide='ignore', invalid='ignore'):
+    with np.errstate(divide='ignore', invalid='ignore'):
         h_equiv = d_slab * (e_slab / e_layer) ** (1.0 / 3.0)
 
     tau_g = rho_slab * G * d_slab * sin_t
@@ -270,7 +261,7 @@ def compute_rc_flat_richter2019(
 
     term2_under = 2.0 * shear_strength_pa * eprime * dsl_over_sigman
 
-    with _errstate(xp, invalid='ignore'):
+    with np.errstate(invalid='ignore'):
         term1 = xp.sqrt(xp.where(term1_under > 0, term1_under, xp.nan))
         term2 = xp.sqrt(xp.where(term2_under > 0, term2_under, xp.nan))
 
@@ -304,7 +295,7 @@ def compute_rc_slope_richter2019(
     slope-parallel load exceeds the (corrected) strength -- the
     spontaneous failure regime -- are NaN.
     """
-    with _errstate(xp, divide='ignore', invalid='ignore'):
+    with np.errstate(divide='ignore', invalid='ignore'):
         f_wl = A_RICHTER * (
             rho_layer / RHO_ICE * grain_size_m / GS_0
         ) ** B_RICHTER
