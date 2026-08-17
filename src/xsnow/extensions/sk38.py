@@ -63,10 +63,11 @@ def compute_skier_penetration(
     -----
     ``P = 34.6 / rho_top`` (Jamieson & Johnston 1998), with ``rho_top``
     the mean density of the top 30 cm of the snowpack (the boundary
-    layer enters with its partial thickness). With
-    ``use_crust_limit=True`` a supporting melt-freeze crust (grain type
-    772, density >= 500 kg m^-3, contiguous thickness >= 3 cm) caps the
-    depth at the top of that crust.
+    layer enters with its partial thickness; layers of unknown density
+    are excluded from the average). With ``use_crust_limit=True`` a
+    supporting melt-freeze crust (grain type 772, density >= 500
+    kg m^-3, contiguous thickness >= 3 cm) caps the depth at the top of
+    that crust.
     """
     valid = xp.isfinite(thickness_vertical) & (thickness_vertical > 0)
     thick = xp.where(valid, thickness_vertical, 0.0)
@@ -78,11 +79,12 @@ def compute_skier_penetration(
     weights = xp.clip(
         xp.minimum(thick, PEN_SLAB_DEPTH - cum_above), 0.0, None
     )
-    weights = xp.where(valid, weights, 0.0)
+    known = valid & xp.isfinite(density)
+    weights = xp.where(known, weights, 0.0)
 
     with np.errstate(divide='ignore', invalid='ignore'):
         rho_top = (
-            xp.nansum(xp.where(valid, density, 0.0) * weights, axis=-1)
+            xp.sum(xp.where(known, density, 0.0) * weights, axis=-1)
             / xp.sum(weights, axis=-1)
         )
         pen = SKIER_PEN_COEFF / rho_top
