@@ -29,8 +29,13 @@ import numpy as np
 
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
-from ..utils import get_backend
-from .sk38 import _registry_attrs, _wrap_like_height
+from ..utils import (
+    finite_max,
+    get_backend,
+    registry_attrs,
+    require_vars,
+    wrap_like,
+)
 
 WEIBULL_SHAPE = 2.5          # shape of the depth weighting
 WEIBULL_SCALE = 50.0         # cm, scale of the depth weighting
@@ -42,16 +47,19 @@ WEAK_GRAIN_CLASSES = (4.0, 5.0, 6.0, 9.0)   # FC, DH, SH, FCxr
 
 def _profile_mean(x, valid, xp):
     """Mean over the valid layers (layer axis last)."""
-    n = xp.maximum(valid.sum(axis=-1), 1)
+    n = xp.maximum(valid.sum(axis=-1), 1).astype(x.dtype)
     return xp.where(valid, x, 0.0).sum(axis=-1) / n
 
 
 def _population_sd(x, mean, valid, xp):
-    """Population standard deviation over valid layers, floored at 1."""
+    """Population standard deviation over valid layers, floored at 1;
+    NaN when the mask has no valid entries."""
     n = valid.sum(axis=-1)
     var = xp.where(valid, (x - mean[..., None]) ** 2, 0.0).sum(axis=-1)
     with np.errstate(invalid='ignore', divide='ignore'):
-        sd = xp.sqrt(xp.where(n > 0, var / xp.maximum(n, 1), xp.nan))
+        sd = xp.sqrt(xp.where(
+            n > 0, var / xp.maximum(n, 1).astype(x.dtype), xp.nan
+        ))
     return xp.maximum(sd, 1.0)
 
 
@@ -87,14 +95,15 @@ def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     upper-/lower-interface variants (per-layer maximum). The depth
     property is a Weibull weighting of the layer-top depth, reduced by
     the accumulated influence of overlying supporting crusts (hand
-    hardness >= 3, thicker than 1 cm).
+    hardness >= 3, thicker than 1 cm). A valid layer whose interface
+    differences are undefined on both sides (isolated between invalid
+    layers) is NaN as well; the single-layer zero applies only to
+    profiles with fewer than two valid layers.
     """
-    required = ['height', 'hand_hardness', 'grain_size', 'grain_type']
-    for var in required:
-        if var not in ds.data:
-            raise ValueError(
-                f"Missing required variable for rta calculation: '{var}'"
-            )
+    require_vars(
+        ds, ['height', 'hand_hardness', 'grain_size', 'grain_type'],
+        'rta calculation',
+    )
 
     xp = get_backend(ds)
     height_m = xp.asarray(ds.data['height'].data)
@@ -108,8 +117,7 @@ def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     h = xp.where(valid, hardness, xp.nan)
     g = xp.where(valid, gsize_m * 1000.0, xp.nan)            # mm
     height = xp.where(valid, height_m * 100.0, xp.nan)       # cm
-    surface = xp.nanmax(xp.where(valid, height, -xp.inf), axis=-1)
-    surface = xp.where(xp.isfinite(surface), surface, xp.nan)
+    surface = finite_max(height, xp)
     depth = surface[..., None] - height                      # layer top
     bottom = xp.concatenate(
         [xp.zeros_like(height[..., :1]), height[..., :-1]], axis=-1
@@ -145,8 +153,8 @@ def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     # profile statistics (differences: mean over all interfaces)
     hbar = _profile_mean(h, valid, xp)
     gbar = _profile_mean(g, valid, xp)
-    dhbar = _profile_mean(xp.where(iface_a, dh_a, 0.0), iface_a, xp)
-    dgbar = _profile_mean(xp.where(iface_a, dg_a, 0.0), iface_a, xp)
+    dhbar = _profile_mean(dh_a, iface_a, xp)
+    dgbar = _profile_mean(dg_a, iface_a, xp)
     wbar = _profile_mean(wadj, valid, xp)
 
     sd_h = _population_sd(h, hbar, valid, xp)
@@ -158,7 +166,7 @@ def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
 
     # standardized anomalies
     f1 = xp.floor(gtype / 100.0)
-    lem_gt = xp.isin(f1, xp.asarray(WEAK_GRAIN_CLASSES)).astype(float)
+    lem_gt = xp.isin(f1, xp.asarray(WEAK_GRAIN_CLASSES)).astype(f1.dtype)
     z_h = (h - hbar[..., None]) / sd_h[..., None]
     z_g = (g - gbar[..., None]) / sd_g[..., None]
 
@@ -203,19 +211,15 @@ def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     with np.errstate(invalid='ignore'):
         rta = xp.fmax(sum_b, sum_a)
         rta = xp.where(valid, rta, xp.nan)
-        rta_max = xp.max(
-            xp.where(xp.isfinite(rta), rta, -xp.inf), axis=-1
-        )
-        rta_max = xp.where(xp.isfinite(rta_max), rta_max, xp.nan)
-        rta = rta / rta_max[..., None]
+        rta = rta / finite_max(rta, xp)[..., None]
 
     single = valid.sum(axis=-1) < 2
     rta = xp.where(single[..., None] & valid, 0.0, rta)
 
-    attrs = _registry_attrs(
+    attrs = registry_attrs(
         'rta', 'Relative Threshold Sum Approach (RTA)', '1'
     )
     new_xr = ds.data.assign(
-        rta=_wrap_like_height(rta, ds.data['height'], attrs)
+        rta=wrap_like(rta, ds.data['height'], attrs)
     )
     return ds.__class__(new_xr)
