@@ -18,14 +18,20 @@ References
 import math
 
 import numpy as np
-import xarray as xr
 
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
-from ..utils import get_backend, get_logger
-from ..registry import registry
+from ..utils import (
+    finite_max,
+    get_backend,
+    get_logger,
+    registry_attrs,
+    require_vars,
+    wrap_like,
+)
 from .critical_crack_length import (
     compute_slab_mechanics,
+    layer_thickness,
     slab_weighted_mean,
 )
 
@@ -168,23 +174,17 @@ def _prepare_skier_mechanics(ds, penetrated_layer=PENETRATED_LAYER):
             "penetrated_layer must be 'full' or 'residual', got "
             f"{penetrated_layer!r}"
         )
-    if ds.data is None:
-        raise ValueError("Cannot compute on an empty dataset.")
-
-    required = ['density', 'shear_strength', 'height', 'grain_type']
-    for var in required:
-        if var not in ds.data:
-            raise ValueError(
-                f"Missing required variable for skier stability: '{var}'"
-            )
+    require_vars(
+        ds, ['density', 'shear_strength', 'height', 'grain_type'],
+        'skier stability',
+    )
 
     xp = get_backend(ds)
     theta = math.radians(DEFAULT_INCLINATION)
     cos_t = math.cos(theta)
 
     height_da = ds.data['height']
-    height_bottom = height_da.shift(layer=1, fill_value=0)
-    thick_vert_da = height_da - height_bottom
+    thick_vert_da = layer_thickness(height_da)
 
     mech = compute_slab_mechanics(
         ds.data['density'].data, thick_vert_da.data, height_da.data,
@@ -214,10 +214,7 @@ def _prepare_skier_mechanics(ds, penetrated_layer=PENETRATED_LAYER):
         in_slab = valid & (~penetrated | first_penetrated)
         thick_sk = xp.where(in_slab, thick_n, xp.nan)
         height_sk = xp.where(in_slab, height_n, -xp.inf)
-        surface_sk = xp.nanmax(
-            xp.where(xp.isfinite(height_sk), height_sk, -xp.inf), axis=-1
-        )
-        surface_sk = xp.where(xp.isfinite(surface_sk), surface_sk, xp.nan)
+        surface_sk = finite_max(height_sk, xp)
     else:
         bottom_n = height_n - thick_n
         residual = min_height_n[..., None] - bottom_n
@@ -254,29 +251,6 @@ def _prepare_skier_mechanics(ds, penetrated_layer=PENETRATED_LAYER):
     return mech
 
 
-def _wrap_like_height(arr, height_da, attrs):
-    """Wrap a backend array into a DataArray shaped like ``height``."""
-    da = xr.DataArray(arr, dims=height_da.dims, coords=height_da.coords)
-    da.attrs = attrs
-    return da
-
-
-def _registry_attrs(name, default_long_name, default_units):
-    """Variable attrs from the registry with a fallback."""
-    if name in registry:
-        entry = registry[name]
-        return {
-            'long_name': entry.get('long_name', default_long_name),
-            'units': entry.get('xsnow_units', default_units),
-            'standard_name': entry.get('standard_name', name),
-        }
-    return {
-        'long_name': default_long_name,
-        'units': default_units,
-        'standard_name': name,
-    }
-
-
 @register_xsnowDataset_method
 def compute_sk38(ds: 'xsnowDataset') -> 'xsnowDataset':
     """
@@ -305,8 +279,8 @@ def compute_sk38(ds: 'xsnowDataset') -> 'xsnowDataset':
     alpha_star = alpha_max_skier_stress(mech['theta'])
     with np.errstate(divide='ignore', invalid='ignore'):
         delta_tau_max = skier_delta_tau(
-            xp.asarray(alpha_star), mech['h_equiv_sk'], mech['theta'],
-            mech['line_load'], xp
+            xp.asarray(alpha_star, dtype=mech['h_equiv_sk'].dtype),
+            mech['h_equiv_sk'], mech['theta'], mech['line_load'], xp
         )
         sk38 = mech['tau_p'] / (mech['tau_g'] + delta_tau_max)
 
@@ -318,8 +292,8 @@ def compute_sk38(ds: 'xsnowDataset') -> 'xsnowDataset':
     if 'sk38' in ds.data:
         logger.info("Overwriting existing variable 'sk38'.")
 
-    attrs = _registry_attrs('sk38', 'skier stability index SK38', '1')
+    attrs = registry_attrs('sk38', 'skier stability index SK38', '1')
     result = ds.data.assign(
-        sk38=_wrap_like_height(sk38, mech['height_da'], attrs)
+        sk38=wrap_like(sk38, mech['height_da'], attrs)
     )
     return ds.__class__(result)

@@ -21,6 +21,7 @@ import warnings
 
 from .core import xsnowDataset
 from .plugin import register_xsnowDataset_method
+from .registry import registry
 
 LEVEL_PREFIX = {
     logging.DEBUG: "[d]",
@@ -196,6 +197,49 @@ def get_backend(array_like: Union[xsnowDataset, xr.Dataset, xr.DataArray]) -> An
             return np
 
     return np
+
+
+def require_vars(ds: xsnowDataset, names: Sequence[str], context: str) -> None:
+    """Raise ``ValueError`` if ``ds`` is empty or misses any of ``names``."""
+    if ds.data is None:
+        raise ValueError("Cannot compute on an empty dataset.")
+    for var in names:
+        if var not in ds.data:
+            raise ValueError(
+                f"Missing required variable for {context}: '{var}'"
+            )
+
+
+def registry_attrs(name: str, default_long_name: str,
+                   default_units: str) -> dict:
+    """Variable attrs from the registry with a fallback."""
+    if name in registry:
+        entry = registry[name]
+        return {
+            'long_name': entry.get('long_name', default_long_name),
+            'units': entry.get('xsnow_units', default_units),
+            'standard_name': entry.get('standard_name', name),
+        }
+    return {
+        'long_name': default_long_name,
+        'units': default_units,
+        'standard_name': name,
+    }
+
+
+def wrap_like(arr: Any, template_da: xr.DataArray,
+              attrs: dict) -> xr.DataArray:
+    """Wrap a backend array into a DataArray shaped like ``template_da``."""
+    da = xr.DataArray(arr, dims=template_da.dims, coords=template_da.coords)
+    da.attrs = attrs
+    return da
+
+
+def finite_max(a: Any, xp: Any, axis: int = -1) -> Any:
+    """Maximum over the finite entries of ``a``; NaN where there are none."""
+    m = xp.max(xp.where(xp.isfinite(a), a, -xp.inf), axis=axis)
+    return xp.where(xp.isfinite(m), m, xp.nan)
+
 
 @register_xsnowDataset_method
 def print(*values: Any, force_details: bool = False, **kwargs: Any) -> None:

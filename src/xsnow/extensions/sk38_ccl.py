@@ -23,13 +23,11 @@ import numpy as np
 
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
-from ..utils import get_backend
+from ..utils import get_backend, registry_attrs, require_vars, wrap_like
 from .critical_crack_length import compute_rc_slope_richter2019
 from .rta import compute_rta
 from .sk38 import (
     _prepare_skier_mechanics,
-    _registry_attrs,
-    _wrap_like_height,
     alpha_max_skier_stress,
     skier_delta_tau,
 )
@@ -108,13 +106,10 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
     ``grain_type`` and ``grain_size``.
     ``0`` = spontaneous failure expected (slab load exceeds strength);
     ``NaN`` = not computable (topmost layer, skier-penetrated layers,
-    padding).
+    padding, and layers whose slab mechanics are undefined because of
+    missing input data -- a missing value is never reported as stable).
     """
-    if 'grain_size' not in ds.data:
-        raise ValueError(
-            "Missing required variable for sk38_ccl calculation: "
-            "'grain_size'"
-        )
+    require_vars(ds, ['grain_size'], 'sk38_ccl calculation')
 
     mech = _prepare_skier_mechanics(ds)
     xp = mech['xp']
@@ -134,15 +129,22 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
     with np.errstate(divide='ignore', invalid='ignore'):
         index = xp.minimum(ccl / l_sk, INDEX_CAP)
 
-    # sentinel precedence: topmost layer, then spontaneous failure, then
-    # the skier-penetrated layers, then the actual (capped) index
+    # sentinel precedence: topmost layer, then undefined mechanics, then
+    # the skier-penetrated layers, then spontaneous failure, then the
+    # actual (capped) index. The spontaneous verdict needs only the
+    # strength excess; the crack computation additionally needs the
+    # equivalent slab thickness.
     spontaneous = mech['tau_p'] < mech['tau_g']
+    known = xp.isfinite(mech['tau_p'] - mech['tau_g']) & (
+        spontaneous | xp.isfinite(mech['h_equiv_sk'])
+    )
     result = xp.where(crack_possible, index, INDEX_CAP)
     result = xp.where(spontaneous, 0.0, result)
     result = xp.where(mech['penetrated'] & ~spontaneous, xp.nan, result)
+    result = xp.where(known, result, xp.nan)
     result = xp.where(mech['top_layer'] | ~mech['valid'], xp.nan, result)
 
-    attrs = _registry_attrs(
+    attrs = registry_attrs(
         'sk38_ccl',
         'stability index SK38-CCL '
         '(critical crack length / skier crack length)',
@@ -150,7 +152,7 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
     )
     attrs['index_cap'] = INDEX_CAP
     new_xr = ds.data.assign(
-        sk38_ccl=_wrap_like_height(result, mech['height_da'], attrs)
+        sk38_ccl=wrap_like(result, mech['height_da'], attrs)
     )
     return ds.__class__(new_xr)
 
@@ -168,10 +170,15 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     Notes
     -----
     ``sk38_ccl`` where ``rta >= RTA_THRESHOLD``, ``INDEX_CAP`` where
-    below (NaN stays NaN). Uses the per-layer variable ``rta`` if
-    present, otherwise computes it via
-    :func:`xsnow.extensions.rta.compute_rta`.
+    below (NaN stays NaN). Layers with a finite index but undefined
+    (NaN) ``rta`` are not gated and keep their ``sk38_ccl`` value, i.e.
+    they conservatively count as weak-layer candidates. Uses the
+    per-layer variable ``rta`` if present, otherwise computes it via
+    :func:`xsnow.extensions.rta.compute_rta`; a computed ``rta`` stays
+    attached to the returned dataset.
     """
+    if ds.data is None:
+        raise ValueError("Cannot compute on an empty dataset.")
     if 'rta' not in ds.data:
         ds = compute_rta(ds)
     rta_da = ds.data['rta']
@@ -187,7 +194,7 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
         INDEX_CAP, index,
     )
 
-    attrs = _registry_attrs(
+    attrs = registry_attrs(
         'sk38_ccl_rta',
         'RTA-gated stability index SK38-CCL',
         '1',
@@ -196,7 +203,7 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     attrs['rta_threshold'] = RTA_THRESHOLD
 
     new_xr = pure.data.assign(
-        sk38_ccl_rta=_wrap_like_height(gated, index_da, attrs)
+        sk38_ccl_rta=wrap_like(gated, index_da, attrs)
     )
     new_xr = new_xr.drop_vars('sk38_ccl')
     return ds.__class__(new_xr)

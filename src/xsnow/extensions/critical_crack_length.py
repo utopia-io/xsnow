@@ -15,12 +15,16 @@ import math
 from typing import Optional
 
 import numpy as np
-import xarray as xr
 
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
-from ..utils import get_backend
-from ..registry import registry
+from ..utils import (
+    finite_max,
+    get_backend,
+    registry_attrs,
+    require_vars,
+    wrap_like,
+)
 
 # ---------------------------------------------------------------------------
 # Physical constants for the Richter et al. (2019) crack length formulation
@@ -33,6 +37,29 @@ A_RICHTER = 4.6e-9       # Richter et al. (2019) parameter "a"
 B_RICHTER = -2.0         # Richter et al. (2019) parameter "b"
 E0 = 5.07e9              # Pa, modulus prefactor in Richter et al. (2019)
 E_EXP = 5.13             # exponent on (rho_slab / rho_ice)
+
+
+def layer_thickness(height_da):
+    """Per-layer vertical thickness [m] from the cumulative ``height``
+    (layer 0 = bottom)."""
+    return height_da - height_da.shift(layer=1, fill_value=0)
+
+
+def _mean_strictly_above(numer, denom, xp):
+    """
+    Cumulative ``sum(numer) / sum(denom)`` over all layers strictly above
+    each layer (towards the surface). The surface layer, with nothing
+    above it, yields NaN. The layer axis is last; layer 0 is the deepest.
+    """
+    numer_cum = xp.cumsum(numer[..., ::-1], axis=-1)[..., ::-1]
+    denom_cum = xp.cumsum(denom[..., ::-1], axis=-1)[..., ::-1]
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mean_incl = numer_cum / denom_cum
+
+    # shift so that layer i only sees layers strictly above itself
+    tail_nan = xp.full_like(mean_incl[..., :1], xp.nan)
+    return xp.concatenate([mean_incl[..., 1:], tail_nan], axis=-1)
 
 
 def compute_rho_slab(density, thickness, xp):
@@ -72,13 +99,10 @@ def compute_rho_slab(density, thickness, xp):
 
     Notes
     -----
-    - We mask out any padded layers (thickness <= 0 or NaN) so they don't
-      contaminate the cumulative sums.
-    - We reverse along the layer axis, do cumsums from the top down,
-      then reverse back. Finally, we shift so that layer i gets only the
-      slab *strictly above* i.
+    We mask out any padded layers (thickness <= 0 or NaN) so they don't
+    contaminate the cumulative sums; the slab mean itself is
+    ``sum(mass) / sum(thickness)`` over the layers strictly above.
     """
-
     # Identify physically valid layers
     valid = xp.isfinite(thickness) & (thickness > 0)
 
@@ -86,27 +110,7 @@ def compute_rho_slab(density, thickness, xp):
     thickness_clean = xp.where(valid, thickness, 0.0)          # (..., L)
     mass_per_area = xp.where(valid, density * thickness, 0.0)  # kg m^-2
 
-    # Accumulate "from surface downward":
-    # Reverse layer axis so index -1 is now bottom, then cumsum.
-    mass_cum_from_top = xp.cumsum(mass_per_area[..., ::-1], axis=-1)
-    thick_cum_from_top = xp.cumsum(thickness_clean[..., ::-1], axis=-1)
-
-    # Mean density of (layer >= current in reversed coords)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        rho_rev = mass_cum_from_top / thick_cum_from_top  # (..., L), reversed axis
-
-    # Flip back to bottom->top ordering
-    rho_above_inclusive = rho_rev[..., ::-1]  # (..., L)
-
-    # Shift by 1 so that layer i gets only layers ABOVE i (strictly above)
-    # After shifting, the last entry (true surface) becomes NaN.
-    tail_nan = xp.full_like(rho_above_inclusive[..., :1], xp.nan)
-    rho_strict_above = xp.concatenate(
-        [rho_above_inclusive[..., 1:], tail_nan],
-        axis=-1
-    )
-
-    return rho_strict_above
+    return _mean_strictly_above(mass_per_area, thickness_clean, xp)
 
 
 def slab_weighted_mean(values, thickness, xp):
@@ -119,21 +123,15 @@ def slab_weighted_mean(values, thickness, xp):
     weights = xp.where(valid, thickness, 0.0)
     weighted = xp.where(valid, values * thickness, 0.0)
 
-    sum_from_top = xp.cumsum(weighted[..., ::-1], axis=-1)[..., ::-1]
-    weight_from_top = xp.cumsum(weights[..., ::-1], axis=-1)[..., ::-1]
-
-    with np.errstate(divide='ignore', invalid='ignore'):
-        mean_incl = sum_from_top / weight_from_top
-
-    # shift so that layer i only sees layers strictly above itself
-    tail_nan = xp.full_like(mean_incl[..., :1], xp.nan)
-    return xp.concatenate([mean_incl[..., 1:], tail_nan], axis=-1)
+    return _mean_strictly_above(weighted, weights, xp)
 
 
 def strength_correction(grain_type, sigma_n, shear_strength, xp):
     """
     Additional shear strength from the slope-normal load [Pa].
 
+    An unknown (NaN) grain type yields NaN -- the correction depends on
+    the grain form, so a missing value cannot default to a form.
     """
     f1 = xp.floor(grain_type / 100.0)
     tau_add_other = sigma_n * (8.0e-5 * shear_strength + 0.224)
@@ -141,7 +139,8 @@ def strength_correction(grain_type, sigma_n, shear_strength, xp):
         8.0e-5 * shear_strength + 2.2e-5 * sigma_n + 0.056
     )
     tau_add = xp.where(f1 == 1, tau_add_pp, tau_add_other)
-    return xp.where(f1 == 6, 0.0, tau_add)
+    tau_add = xp.where(f1 == 6, 0.0, tau_add)
+    return xp.where(xp.isfinite(f1), tau_add, xp.nan)
 
 
 def compute_slab_mechanics(density, thickness_vertical, height, grain_type,
@@ -162,8 +161,7 @@ def compute_slab_mechanics(density, thickness_vertical, height, grain_type,
 
     height_n = xp.where(valid, height * cos_t, xp.nan)
     thick_n = xp.where(valid, thick_vert * cos_t, xp.nan)
-    surface_n = xp.nanmax(xp.where(valid, height_n, -xp.inf), axis=-1)
-    surface_n = xp.where(xp.isfinite(surface_n), surface_n, xp.nan)
+    surface_n = finite_max(height_n, xp)
     d_slab = surface_n[..., None] - height_n
 
     rho_slab = compute_rho_slab(density, thick_n, xp)
@@ -352,18 +350,10 @@ def compute_critical_crack_length(
         `rc_slope` [m].
     """
 
-    if ds.data is None:
-        raise ValueError("Cannot compute on an empty dataset.")
-
     required = ['density', 'grain_size', 'shear_strength', 'height']
     if inclination is not None:
         required.append('grain_type')
-    for v in required:
-        if v not in ds.data:
-            raise ValueError(
-                f"Missing required variable for critical crack length "
-                f"calculation: '{v}'"
-            )
+    require_vars(ds, required, 'critical crack length calculation')
 
     # Pick NumPy or CuPy depending on where ds.data lives
     xp = get_backend(ds)
@@ -373,10 +363,7 @@ def compute_critical_crack_length(
     shear_da = ds.data['shear_strength']
     height_da = ds.data['height']
 
-    # Derive per-layer thickness from cumulative height along 'layer'.
-    # layer=0 is bottom (height ~ 0), layer increases upward.
-    height_bottom = height_da.shift(layer=1, fill_value=0)
-    thick_da = height_da - height_bottom  # [m]
+    thick_da = layer_thickness(height_da)  # [m]
 
     if inclination is None:
         # Move data to backend arrays (NumPy or CuPy)
@@ -419,25 +406,8 @@ def compute_critical_crack_length(
         out_name = 'rc_slope'
         default_long_name = 'critical crack length on the slope'
 
-    rc_da = xr.DataArray(
-        rc_arr,
-        dims=height_da.dims,
-        coords=height_da.coords,
+    attrs = registry_attrs(out_name, default_long_name, 'm')
+    new_xr = ds.data.assign(
+        **{out_name: wrap_like(rc_arr, height_da, attrs)}
     )
-
-    if out_name in registry:
-        reg_entry = registry[out_name]
-        rc_da.attrs = {
-            'long_name': reg_entry.get('long_name', default_long_name),
-            'units': reg_entry.get('xsnow_units', 'm'),
-            'standard_name': reg_entry.get('standard_name', out_name),
-        }
-    else:
-        rc_da.attrs = {
-            'long_name': default_long_name,
-            'units': 'm',
-            'standard_name': out_name,
-        }
-
-    new_xr = ds.data.assign(**{out_name: rc_da})
     return ds.__class__(new_xr)
