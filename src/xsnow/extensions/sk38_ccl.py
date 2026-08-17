@@ -175,7 +175,9 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     they conservatively count as weak-layer candidates. Uses the
     per-layer variable ``rta`` if present, otherwise computes it via
     :func:`xsnow.extensions.rta.compute_rta`; a computed ``rta`` stays
-    attached to the returned dataset.
+    attached to the returned dataset. An existing ``sk38_ccl`` variable
+    is recomputed and retained; without one, the intermediate index is
+    not attached.
     """
     if ds.data is None:
         raise ValueError("Cannot compute on an empty dataset.")
@@ -205,5 +207,6 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     new_xr = pure.data.assign(
         sk38_ccl_rta=wrap_like(gated, index_da, attrs)
     )
-    new_xr = new_xr.drop_vars('sk38_ccl')
+    if 'sk38_ccl' not in ds.data:
+        new_xr = new_xr.drop_vars('sk38_ccl')
     return ds.__class__(new_xr)

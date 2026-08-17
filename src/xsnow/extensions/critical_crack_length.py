@@ -45,6 +45,25 @@ def layer_thickness(height_da):
     return height_da - height_da.shift(layer=1, fill_value=0)
 
 
+def _require_contiguous_layers(height, xp):
+    """Raise if a layer below the surface has an undefined (NaN)
+    height: the cumulative slab sums would silently skip its mass. The
+    check runs on the heights -- in the derived thicknesses such a gap
+    right under the surface is indistinguishable from legitimate
+    padding. Zero-thickness layers are fine (they carry no mass)."""
+    finite = xp.isfinite(height)
+    n_finite_above = (
+        xp.cumsum(finite[..., ::-1].astype(xp.int64), axis=-1)[..., ::-1]
+        - finite.astype(xp.int64)
+    )
+    if bool(xp.any(~finite & (n_finite_above > 0))):
+        raise ValueError(
+            "Profile contains an interior layer of undefined height "
+            "(non-finite height below the surface); layers must be "
+            "contiguous, with padding only above the surface."
+        )
+
+
 def _mean_strictly_above(numer, denom, xp):
     """
     Cumulative ``sum(numer) / sum(denom)`` over all layers strictly above
@@ -156,6 +175,7 @@ def compute_slab_mechanics(density, thickness_vertical, height, grain_type,
     grain_type = xp.asarray(grain_type)
     shear = xp.asarray(shear_strength)
 
+    _require_contiguous_layers(height, xp)
     valid = xp.isfinite(thick_vert) & (thick_vert > 0)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
 
@@ -252,7 +272,10 @@ def compute_rc_flat_richter2019(
     # D_sl / sigma_n  = 1 / (g * rho_slab)
     dsl_over_sigman = 1.0 / (G * rho_slab)
 
-    # Richter et al. parametrization
+    # Richter et al. parametrization. A layer with zero grain size or
+    # density (nonphysical fill values) makes this power infinite and
+    # rc_flat comes out +inf (with a numpy divide warning) --
+    # deliberately kept for now rather than masked to NaN.
     term1_under = A_RICHTER * (
         (rho_layer / RHO_ICE) * (grain_size_m / GS_0)
     ) ** B_RICHTER
@@ -371,6 +394,7 @@ def compute_critical_crack_length(
         gsize_arr = xp.asarray(gsize_da.data)
         shear_arr = xp.asarray(shear_da.data)
         thick_arr = xp.asarray(thick_da.data)
+        _require_contiguous_layers(xp.asarray(height_da.data), xp)
 
         # Compute density of slab above each layer
         rho_slab_arr = compute_rho_slab(

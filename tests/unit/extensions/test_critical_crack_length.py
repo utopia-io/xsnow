@@ -47,6 +47,12 @@ def test_compute_critical_crack_length(analysis_ds):
     assert np.nanmax(other_vals) < 100
     assert ds_with_rc_cpu['rc_flat'].attrs['units'] == 'm'
 
+    # values of the verified implementation (2026-08-17); NaN = topmost
+    expected = np.array([3.8425, 4.2956, 3.1305, np.nan])
+    np.testing.assert_allclose(
+        ds_with_rc_cpu['rc_flat'].values[0, 0], expected, atol=1e-3
+    )
+
 
 def test_compute_critical_crack_length_slope(analysis_ds):
     """Tests the slope formulation of the critical crack length."""
@@ -66,3 +72,39 @@ def test_compute_critical_crack_length_slope(analysis_ds):
     # the slope formulation additionally requires the grain type
     with pytest.raises(ValueError, match='grain_type'):
         analysis_ds.compute_critical_crack_length(inclination=38.0)
+
+    # without the strengthening the two lowest layers are in the
+    # spontaneous regime (slope-parallel load exceeds the corrected
+    # strength) and rc_slope is NaN there
+    weak = xsnowDataset(analysis_ds.data.assign(
+        grain_type=(analysis_ds.data['height'].dims,
+                    np.array([[[430.0, 330.0, 330.0, 330.0]]])),
+    ))
+    vals = weak.compute_critical_crack_length(
+        inclination=38.0)['rc_slope'].values[0, 0]
+    expected = np.array([np.nan, np.nan, 1.4774, np.nan])
+    np.testing.assert_allclose(vals, expected, atol=1e-3)
+
+
+def test_interior_nan_height_raises(analysis_ds):
+    """A NaN height below the surface breaks the layer contiguity the
+    slab sums rely on, so it is rejected; NaN at the top is padding.
+    Index 2 is the gap directly under the surface layer, whose derived
+    thicknesses look exactly like padding."""
+    grain_type = (analysis_ds.data['height'].dims,
+                  np.array([[[430.0, 330.0, 330.0, 330.0]]]))
+    for idx in (1, 2):
+        height = analysis_ds.data['height'].copy()
+        height[0, 0, idx] = np.nan
+        broken_xr = analysis_ds.data.assign(height=height)
+        with pytest.raises(ValueError, match='interior'):
+            xsnowDataset(broken_xr).compute_critical_crack_length()
+        # the slope path guards through the shared slab mechanics
+        with_gt = xsnowDataset(broken_xr.assign(grain_type=grain_type))
+        with pytest.raises(ValueError, match='interior'):
+            with_gt.compute_critical_crack_length(inclination=38.0)
+
+    padded = analysis_ds.data['height'].copy()
+    padded[0, 0, -1] = np.nan
+    ok = xsnowDataset(analysis_ds.data.assign(height=padded))
+    assert 'rc_flat' in ok.compute_critical_crack_length().data

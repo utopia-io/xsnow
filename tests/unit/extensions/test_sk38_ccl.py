@@ -200,6 +200,29 @@ def test_skier_penetration_crust_limit():
     assert pen_crust == pytest.approx(thick[4:].sum())     # 0.35 m
 
 
+def test_skier_penetration_excludes_unknown_density():
+    """A layer of unknown density does not enter the top-30 cm average."""
+    height = np.array([0.4, 0.5])
+    thick = np.diff(np.concatenate([[0.0], height]))
+    density = np.array([200.0, np.nan])
+    gtype = np.full(2, 330.0)
+    pen = compute_skier_penetration(
+        density[None, :], thick[None, :], gtype[None, :], np)[0]
+    assert pen == pytest.approx(34.6 / 200.0)
+
+
+def test_rta_gate_keeps_existing_sk38_ccl(analysis_ds):
+    """A pre-existing sk38_ccl survives the gate (recomputed); the
+    internally created intermediate is still dropped (see
+    test_compute_sk38_ccl_rta)."""
+    chained = analysis_ds.compute_sk38_ccl().compute_sk38_ccl_rta()
+    assert 'sk38_ccl' in chained.data
+    np.testing.assert_allclose(
+        chained['sk38_ccl'].values,
+        analysis_ds.compute_sk38_ccl()['sk38_ccl'].values,
+    )
+
+
 def test_missing_variable_raises(analysis_ds):
     broken = xsnowDataset(analysis_ds.data.drop_vars('shear_strength'))
     with pytest.raises(ValueError, match='shear_strength'):
@@ -380,5 +403,6 @@ def test_backend_stays_within_cupy_api(analysis_ds, monkeypatch):
     assert 'sk38' in analysis_ds.compute_sk38().data
     assert 'sk38_ccl_rta' in analysis_ds.compute_sk38_ccl_rta().data
     assert 'rta' in analysis_ds.compute_rta().data
+    assert 'rc_flat' in analysis_ds.compute_critical_crack_length().data
     assert 'rc_slope' in analysis_ds.compute_critical_crack_length(
         inclination=38.0).data
