@@ -293,13 +293,24 @@ registry = {
         "si_units": "1"
     },
     "date_of_birth": {
-        "param_code": "0540",
+        # SNOWPACK's 0505 is dual-use (ini key PROF_AGE_OR_DATE): the ISO date
+        # variant is parsed, the "element age (days)" variant is skipped.
+        "param_code": "0505",
         "aliases": ["element deposition date", "deposition date"],
         "standard_name": "deposition_date_of_snow_element",
         "xsnow_units": "ISO",
         "pro_units": "ISO",
         "plot_units": "ISO",
         "si_units": "ISO"
+    },
+    "bulk_salinity": {
+        "param_code": "0540",
+        "aliases": ["bulk salinity"],
+        "standard_name": "bulk_salinity_of_snow_element",
+        "xsnow_units": "g/kg",
+        "pro_units": "g/kg",
+        "plot_units": "g/kg",
+        "si_units": "g/kg"
     },
     "accumulated_temperature_gradient": {
         "param_code": "0607",

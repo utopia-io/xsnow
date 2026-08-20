@@ -273,6 +273,9 @@ def validate_xsnow_unit_attrs(
         expected_unit = reg_entry.get("xsnow_units")
         if expected_unit is None or isinstance(expected_unit, list):
             continue
+        if np.issubdtype(data_array.dtype, np.datetime64):
+            # datetime vars carry no units attr (CF encoding owns it)
+            continue
 
         stored_unit = data_array.attrs.get("units")
         if stored_unit is None:

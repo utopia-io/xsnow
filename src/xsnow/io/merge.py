@@ -774,10 +774,13 @@ def _merge_and_finalize(
                 'standard_name',
                 reg_entry.get('standard_name', 'unknown'),
             )
-            final_xr_dataset[var_name].attrs.setdefault(
-                'units',
-                reg_entry.get('xsnow_units', reg_entry.get('si_units', 'unknown')),
-            )
+            # no 'units' attr on datetime vars: CF encoding raises on conflict
+            var_dtype = final_xr_dataset[var_name].dtype
+            if not np.issubdtype(var_dtype, np.datetime64):
+                final_xr_dataset[var_name].attrs.setdefault(
+                    'units',
+                    reg_entry.get('xsnow_units', reg_entry.get('si_units', 'unknown')),
+                )
             final_xr_dataset[var_name].attrs.setdefault(
                 'long_name',
                 reg_entry.get('standard_name', var_name).replace('_', ' '),
