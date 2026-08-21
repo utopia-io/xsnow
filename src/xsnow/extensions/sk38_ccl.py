@@ -25,7 +25,7 @@ from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..utils import get_backend, registry_attrs, require_vars, wrap_like
 from .critical_crack_length import compute_rc_slope_richter2019
-from .rta import compute_rta
+from .rta import RTA_THRESHOLD, compute_rta
 from .sk38 import (
     _prepare_skier_mechanics,
     alpha_max_skier_stress,
@@ -33,7 +33,6 @@ from .sk38 import (
 )
 
 INDEX_CAP = 5.0
-RTA_THRESHOLD = 0.8       # weak-layer candidate threshold
 _BISECT_ITERATIONS = 60   # bisection depth for the crack-tip angles
 
 
