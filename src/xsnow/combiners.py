@@ -124,7 +124,8 @@ def _compute_target_coords_for_two(
 
 def _nan_like(ref: xr.DataArray) -> xr.DataArray:
     """Return a NaN array with the same shape/coords as ref."""
-    arr = xr.zeros_like(ref, dtype="float64")
+    dtype = ref.dtype if ref.dtype.kind == "f" else "float64"
+    arr = xr.zeros_like(ref, dtype=dtype)
     return arr * np.nan
 
 

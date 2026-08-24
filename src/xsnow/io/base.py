@@ -137,6 +137,63 @@ def _validate_norm_slopes(
         )
 
 
+FloatDtypeLike = Union[str, np.dtype, None]
+
+# Kept at source precision: station merging compares these at tolerances
+# below float32 resolution (see _snap_station_coords, _values_equal).
+GEO_COORD_NAMES = ("latitude", "longitude", "altitude")
+
+
+def _validate_float_dtype(float_dtype: FloatDtypeLike) -> Optional[np.dtype]:
+    """Validate the public ``float_dtype`` read policy value."""
+    if float_dtype is None:
+        return None
+    try:
+        target = np.dtype(float_dtype)
+    except TypeError:
+        target = None
+    if target is None or target.kind != "f":
+        raise ValueError(
+            f"Unsupported float_dtype value: {float_dtype!r}. "
+            "Use a floating-point dtype such as 'float32', 'float64', or None."
+        )
+    return target
+
+
+def _apply_float_dtype(
+    ds: xr.Dataset,
+    float_dtype: FloatDtypeLike,
+) -> xr.Dataset:
+    """Cast float variables and coordinates (except geographic ones) to
+    ``float_dtype``. ``None`` preserves source dtypes. Dask-backed arrays
+    stay lazy."""
+    target = _validate_float_dtype(float_dtype)
+    if target is None:
+        return ds
+
+    data_casts = {
+        name: ds[name].astype(target)
+        for name, var in ds.data_vars.items()
+        if var.dtype.kind == "f" and var.dtype != target
+    }
+    coord_casts = {
+        name: ds[name].astype(target)
+        for name, var in ds.coords.items()
+        if name not in GEO_COORD_NAMES
+        and var.dtype.kind == "f"
+        and var.dtype != target
+    }
+    if not data_casts and not coord_casts:
+        return ds
+
+    ds = ds.copy()
+    for name, cast in data_casts.items():
+        ds[name] = cast
+    if coord_casts:
+        ds = ds.assign_coords(coord_casts)
+    return ds
+
+
 # --- Dynamic Mapping from Registry ---
 CODE_TO_NAME_MAP: Dict[str, str] = {
     details['param_code']: name
