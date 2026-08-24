@@ -589,9 +589,10 @@ class HazardChart(DatasetDecorator):
                     mdates.ConciseDateFormatter(locator)
                 )
 
-            ax_ts.yaxis.tick_right()
-            # sharey hides the second panel's tick labels; re-enable right
-            ax_ts.tick_params(axis='y', labelright=True, labelleft=False)
+            # tick marks on both sides, labels only on the right
+            # (sharey hides them by default)
+            ax_ts.tick_params(axis='y', which='both', left=True, right=True,
+                              labelleft=False, labelright=True)
             ax_ts.yaxis.set_label_position('right')
             ax_ts.set_ylabel(_index_label(index))
             cfg = _STABILITY_INDEX_INFO.get(index, {})
