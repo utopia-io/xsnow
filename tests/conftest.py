@@ -902,19 +902,6 @@ def compare_datasets():
                     rtol=rtol,
                     err_msg=f"Variable {var} differs"
                 )
-                                         
-        # Compare data variables
-        for var in ds1.data.data_vars:
-            assert var in ds2.data.data_vars, \
-                f"Variable {var} not found in second dataset"
-            
-            # Now both are numpy arrays, safe to compare
-            np.testing.assert_allclose(
-                ds1.data[var].values,
-                ds2.data[var].values,
-                rtol=rtol,
-                err_msg=f"Variable {var} differs"
-            )
     
     return _compare
 

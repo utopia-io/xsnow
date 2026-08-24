@@ -9,6 +9,7 @@ import pytest
 from xsnow import read
 from xsnow.io.smet import infer_smet_storage_unit, parse_smet_unit_specs, read_smet
 from xsnow.registry import registry
+from xsnow.units import UnitConversionError
 
 
 @pytest.mark.real_data
@@ -301,3 +302,36 @@ def test_infer_smet_storage_unit(plot_unit, multiplier, offset, expected, ambigu
 
     assert storage_unit == expected
     assert is_ambiguous is ambiguous
+
+
+@pytest.mark.synthetic
+class TestIncompatibleDeclaredUnits:
+    SMET = (
+        "SMET 1.1 ASCII\n"
+        "[HEADER]\n"
+        "station_id = TST\n"
+        "latitude = 47.0\n"
+        "longitude = 11.0\n"
+        "altitude = 2000\n"
+        "nodata = -999\n"
+        "tz = 0\n"
+        "fields = timestamp dIntEnergySnow HS_mod\n"
+        "plot_unit = - kJ/m2 m\n"
+        "units_multiplier = 1 1 1\n"
+        "[DATA]\n"
+        "2026-01-01T00:00:00 5.0 1.5\n"
+    )
+
+    def test_light_keeps_declared_units(self, tmp_path):
+        path = tmp_path / 'TST.smet'
+        path.write_text(self.SMET)
+        ds = read(path, unit_validation='light')
+        assert ds.data['dIntEnergySnow'].attrs['units'] == 'kJ/m2'
+        assert float(ds.data['dIntEnergySnow'].max()) == 5.0
+        assert float(ds.data['HS_mod'].max()) == 1.5
+
+    def test_strict_raises(self, tmp_path):
+        path = tmp_path / 'TST.smet'
+        path.write_text(self.SMET)
+        with pytest.raises(UnitConversionError):
+            read(path, unit_validation='strict')

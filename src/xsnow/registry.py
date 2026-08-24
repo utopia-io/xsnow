@@ -292,12 +292,21 @@ registry = {
         "plot_units": "1",
         "si_units": "1"
     },
-    "date_of_birth": {
+    "deposition_date": {
         # SNOWPACK's 0505 is dual-use (ini key PROF_AGE_OR_DATE): the ISO date
         # variant is parsed, the "element age (days)" variant is skipped.
         "param_code": "0505",
         "aliases": ["element deposition date", "deposition date"],
         "standard_name": "deposition_date_of_snow_element",
+        "xsnow_units": "ISO",
+        "pro_units": "ISO",
+        "plot_units": "ISO",
+        "si_units": "ISO"
+    },
+    "datetag": {
+        "param_code": None,
+        "aliases": [],
+        "standard_name": "deposition_datetag",
         "xsnow_units": "ISO",
         "pro_units": "ISO",
         "plot_units": "ISO",

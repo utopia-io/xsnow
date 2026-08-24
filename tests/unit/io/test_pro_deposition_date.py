@@ -1,5 +1,5 @@
 """
-Tests for the element deposition date (PRO code 0505, variable date_of_birth).
+Tests for the element deposition date (PRO code 0505).
 """
 import numpy as np
 import pandas as pd
@@ -10,13 +10,13 @@ from xsnow.io.base import CODE_TO_NAME_MAP
 
 
 def _layer_dates(ds, time):
-    da = ds.data['date_of_birth'].sel(time=time)
+    da = ds.data['deposition_date'].sel(time=time)
     return da.isel(location=0, slope=0, realization=0).values
 
 
 class TestCodeMapping:
     def test_registry_codes(self):
-        assert CODE_TO_NAME_MAP['0505'] == 'date_of_birth'
+        assert CODE_TO_NAME_MAP['0505'] == 'deposition_date'
         assert CODE_TO_NAME_MAP['0540'] == 'bulk_salinity'
 
 
@@ -24,7 +24,7 @@ class TestCodeMapping:
 class TestReadDepositionDates:
     def test_eager_golden_values(self, sample_pro_file):
         ds = read(sample_pro_file, lazy=False)
-        da = ds.data['date_of_birth']
+        da = ds.data['deposition_date']
 
         assert da.dtype == np.dtype('datetime64[ns]')
         # CF encoding owns 'units' for datetime vars; attrs must not carry one
@@ -39,7 +39,8 @@ class TestReadDepositionDates:
 
     def test_dates_nondecreasing_with_height(self, sample_pro_file):
         ds = read(sample_pro_file, lazy=False)
-        da = ds.data['date_of_birth'].isel(location=0, slope=0, realization=0)
+        da = ds.data['deposition_date'].isel(
+            location=0, slope=0, realization=0)
         for t in [-1, len(da.time) // 2]:
             dates = da.isel(time=t).values
             valid = dates[~pd.isna(dates)]
@@ -47,8 +48,9 @@ class TestReadDepositionDates:
             assert (np.diff(valid.astype('int64')) >= 0).all()
 
     def test_lazy_matches_eager(self, sample_pro_file):
-        eager = read(sample_pro_file, lazy=False).data['date_of_birth'].values
-        lazy_da = read(sample_pro_file, lazy=True).data['date_of_birth']
+        eager_da = read(sample_pro_file, lazy=False).data['deposition_date']
+        eager = eager_da.values
+        lazy_da = read(sample_pro_file, lazy=True).data['deposition_date']
         lazy = lazy_da.compute().values
         assert np.array_equal(pd.isna(eager), pd.isna(lazy))
         assert np.array_equal(eager[~pd.isna(eager)], lazy[~pd.isna(lazy)])
@@ -84,7 +86,7 @@ class TestAgeVariant:
             "0513,2,772,772\n"
         )
         ds = read(pro, lazy=False)
-        assert 'date_of_birth' not in ds.data.data_vars
+        assert 'deposition_date' not in ds.data.data_vars
         assert 'density' in ds.data.data_vars
 
 
@@ -102,8 +104,8 @@ class TestRoundTrips:
         assert lines[0] == '0505,nElems,element deposition date (ISO)'
 
         back = read(out, lazy=False)
-        a = back.data['date_of_birth'].values
-        b = ds.data['date_of_birth'].values
+        a = back.data['deposition_date'].values
+        b = ds.data['deposition_date'].values
         n = min(a.shape[-1], b.shape[-1])
         a, b = a[..., :n], b[..., :n]
         assert np.array_equal(pd.isna(a), pd.isna(b))
@@ -114,7 +116,7 @@ class TestRoundTrips:
         out = tmp_path / 'rt.nc'
         ds.to_netcdf(out)
         back = read(out)
-        a = back.data['date_of_birth'].values
-        b = ds.data['date_of_birth'].values
+        a = back.data['deposition_date'].values
+        b = ds.data['deposition_date'].values
         assert np.array_equal(pd.isna(a), pd.isna(b))
         assert np.array_equal(a[~pd.isna(a)], b[~pd.isna(b)])

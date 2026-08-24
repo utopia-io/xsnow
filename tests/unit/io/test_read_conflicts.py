@@ -186,3 +186,55 @@ def test_merge_and_finalize_raises_on_dataset_attribute_conflicts():
             realization=None,
             logger=logging.getLogger(__name__),
         )
+
+
+@pytest.mark.synthetic
+class TestStationCoordPrecision:
+    """PRO and SMET headers can disagree in the 6th coordinate decimal."""
+
+    PRO = (
+        "[STATION_PARAMETERS]\n"
+        "StationName= SNAP\n"
+        "Latitude= 47.07318724\n"
+        "Longitude= 12.45937850\n"
+        "Altitude= 2000\n"
+        "SlopeAngle= 0.00\n"
+        "SlopeAzi= 0.00\n"
+        "\n"
+        "[HEADER]\n"
+        "0500,Date\n"
+        "0501,nElems,height [> 0: top, < 0: bottom of elem.] (cm)\n"
+        "0502,nElems,element density (kg m-3)\n"
+        "\n"
+        "[DATA]\n"
+        "0500,01.12.2024 12:00:00\n"
+        "0501,1,10.0\n"
+        "0502,1,150.0\n"
+    )
+    SMET = (
+        "SMET 1.1 ASCII\n"
+        "[HEADER]\n"
+        "station_id = SNAP\n"
+        "station_name = SNAP\n"
+        "latitude = 47.073187\n"
+        "longitude = 12.459379\n"
+        "altitude = 2000.0\n"
+        "nodata = -999\n"
+        "tz = 0\n"
+        "slope_angle = 0\n"
+        "slope_azi = 0\n"
+        "fields = timestamp HS_mod\n"
+        "plot_unit = - m\n"
+        "units_multiplier = 1 1\n"
+        "[DATA]\n"
+        "2024-12-01T12:00:00 0.1\n"
+    )
+
+    def test_near_equal_coords_snap_to_profile(self, tmp_path):
+        (tmp_path / 'SNAP.pro').write_text(self.PRO)
+        (tmp_path / 'SNAP.smet').write_text(self.SMET)
+        ds = read([tmp_path / 'SNAP.pro', tmp_path / 'SNAP.smet'],
+                  unit_validation='light')
+        assert float(ds.data['longitude'].values[0]) == pytest.approx(
+            12.459378, abs=1e-9)
+        assert 'HS_mod' in ds.data

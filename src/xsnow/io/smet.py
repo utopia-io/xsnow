@@ -247,8 +247,17 @@ def _convert_smet_var_to_xsnow_units(
     reg_entry: Mapping[str, Any],
     filepath: Path,
     logger: logging.Logger,
+    unit_validation: str = "strict",
 ) -> xr.Dataset:
     """Validate and convert one SMET variable to xsnow units when possible."""
+
+    def _keep_declared(reason: str) -> xr.Dataset:
+        if unit_validation == "strict":
+            raise UnitConversionError(reason)
+        logger.warning("%s Keeping the values in %r.", reason, source_unit)
+        ds[var_name].attrs['units'] = str(source_unit)
+        return ds
+
     source_unit = spec.storage_unit if spec is not None else None
     assumed_from_registry = False
     if source_unit is None:
@@ -274,7 +283,7 @@ def _convert_smet_var_to_xsnow_units(
 
     expected_smet_units = reg_entry.get("smet_units")
     if expected_smet_units is not None and not _unit_allowed(source_unit, expected_smet_units):
-        raise UnitConversionError(
+        return _keep_declared(
             f"SMET variable {var_name!r} in {filepath.name} declares storage "
             f"unit {source_unit!r}, but xsnow expects {expected_smet_units!r}."
         )
@@ -290,11 +299,11 @@ def _convert_smet_var_to_xsnow_units(
 
     try:
         converted = convert_units(ds[var_name].values, source_unit, target_unit)
-    except UnitConversionError as exc:
-        raise UnitConversionError(
+    except UnitConversionError:
+        return _keep_declared(
             f"Cannot convert SMET variable {var_name!r} in {filepath.name} "
             f"from {source_unit!r} to xsnow unit {target_unit!r}."
-        ) from exc
+        )
 
     ds[var_name] = xr.DataArray(
         converted,
@@ -538,10 +547,9 @@ def read_smet(
             this time is dropped.
         logger: An optional, pre-configured logger instance. If None,
             the default module logger is used.
-        unit_validation: SMET unit validation mode. Both `'strict'` (default)
-            and `'light'` parse this file's unit metadata, warn when registered
-            variables have no usable unit metadata, and raise for incompatible
-            declared units.
+        unit_validation: SMET unit validation mode. `'strict'` (default)
+            raises for incompatible declared units; `'light'` warns and keeps
+            such variables in their declared units instead.
 
     Returns:
         An xarray.Dataset containing the SMET data, or None if the file
@@ -681,6 +689,7 @@ def read_smet(
                 reg_entry=reg_entry,
                 filepath=file_path,
                 logger=logger,
+                unit_validation=unit_validation,
             )
             ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', str(var_name))
             ds[var_name].attrs.setdefault('units', 'unknown')
