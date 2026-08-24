@@ -126,7 +126,8 @@ def _nan_like(ref: xr.DataArray) -> xr.DataArray:
     """Return an all-missing array with the same shape/coords as ref."""
     if np.issubdtype(ref.dtype, np.datetime64):
         return xr.full_like(ref, np.datetime64('NaT', 'ns'))
-    arr = xr.zeros_like(ref, dtype="float64")
+    dtype = ref.dtype if ref.dtype.kind == "f" else "float64"
+    arr = xr.zeros_like(ref, dtype=dtype)
     return arr * np.nan
 
 

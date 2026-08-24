@@ -25,8 +25,10 @@ from ..utils import get_logger
 
 from .base import (
     _apply_norm_slopes,
+    _apply_float_dtype,
     _promote_slope_metadata_coords,
     _resolve_archive_lazy,
+    FloatDtypeLike,
 )
 from .memory import (
     MemoryLimitExceeded,
@@ -52,6 +54,7 @@ def _read_zarr(
     chunks: Optional[Dict[str, int]] = None,
     memory_limit: MemoryLimitLike = "auto",
     norm_slopes: Union[bool, Literal["auto"]] = "auto",
+    float_dtype: FloatDtypeLike = "float32",
 ) -> Optional[xsnowDataset]:
     """
     Internal function to read a Zarr archive.
@@ -83,6 +86,10 @@ def _read_zarr(
             global union of recognized slope-metadata signatures. `'auto'`
             remaps to that union only when it does not widen the slope
             dimension. False preserves per-location dimensions.
+        float_dtype: Floating-point storage dtype; see `read()`. None
+            preserves stored dtypes. On Dask-backed opens the cast is lazy
+            and applied before the memory guard; with ``lazy=False`` it is
+            applied after loading.
 
     Returns:
         xsnowDataset with the loaded data, or None if loading fails
@@ -154,6 +161,11 @@ def _read_zarr(
         if realization_sel:
             ds_raw = realization_sel.apply(ds_raw)
 
+        # Lazy cast on Dask-backed opens, so the eager-mode resolution and
+        # memory guard below measure the post-cast size
+        if open_lazily:
+            ds_raw = _apply_float_dtype(ds_raw, float_dtype)
+
         resolved_lazy = _resolve_archive_lazy(
             ds_raw,
             lazy,
@@ -177,6 +189,11 @@ def _read_zarr(
             )
             ds_raw.load()
             opened.close()
+
+        # Non-Dask opens materialize on .astype(), so cast only after the
+        # guarded load
+        if not open_lazily:
+            ds_raw = _apply_float_dtype(ds_raw, float_dtype)
 
         # Wrap in xsnowDataset
         return xsnowDataset(ds_raw)

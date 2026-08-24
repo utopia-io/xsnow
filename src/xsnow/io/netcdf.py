@@ -28,9 +28,11 @@ from ..utils import (
 
 from .base import (
     _apply_norm_slopes,
+    _apply_float_dtype,
     _promote_slope_metadata_coords,
     _resolve_archive_lazy,
     _round_coord,
+    FloatDtypeLike,
 )
 from .memory import (
     MemoryLimitLike,
@@ -73,6 +75,7 @@ def _read_xsnow_netcdf(
     chunk_cache_size: Optional[int] = None,
     memory_limit: MemoryLimitLike = "auto",
     norm_slopes: Union[bool, Literal["auto"]] = "auto",
+    float_dtype: FloatDtypeLike = "float32",
 ) -> Optional[xsnowDataset]:
     """
     Read xsnow's custom netcdf format.
@@ -110,6 +113,10 @@ def _read_xsnow_netcdf(
             global union of recognized slope-metadata signatures. `'auto'`
             remaps to that union only when it does not widen the slope
             dimension. False preserves per-location dimensions.
+        float_dtype: Floating-point storage dtype; see `read()`. None
+            preserves stored dtypes. On Dask-backed opens the cast is lazy
+            and applied before the memory guard; with ``lazy=False`` it is
+            applied after loading.
 
     Returns:
         An xsnowDataset instance, or None if reading fails.
@@ -165,6 +172,11 @@ def _read_xsnow_netcdf(
         if realization_sel:
             ds = realization_sel.apply(ds)
 
+        # Lazy cast on Dask-backed opens, so the eager-mode resolution and
+        # memory guard below measure the post-cast size
+        if open_lazily:
+            ds = _apply_float_dtype(ds, float_dtype)
+
         resolved_lazy = _resolve_archive_lazy(
             ds,
             lazy,
@@ -188,6 +200,11 @@ def _read_xsnow_netcdf(
             )
             ds.load()
             opened.close()
+
+        # Non-Dask opens materialize on .astype(), so cast only after the
+        # guarded load
+        if not open_lazily:
+            ds = _apply_float_dtype(ds, float_dtype)
 
         return xsnowDataset(ds)
     except Exception:

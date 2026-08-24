@@ -22,7 +22,13 @@ from ..registry import registry
 from ..units import UnitConversionError, UnitLike, convert_units, normalize_unit
 from ..utils import get_logger
 
-from .base import _open_any_as_text, _round_coord, _sanitize_station_name
+from .base import (
+    _apply_float_dtype,
+    _open_any_as_text,
+    _round_coord,
+    _sanitize_station_name,
+    FloatDtypeLike,
+)
 
 
 @dataclass(frozen=True)
@@ -504,6 +510,9 @@ def _read_smet_files(
                 datetime_end,
                 logger=logger,
                 unit_validation=unit_validation,
+                # read()'s float_dtype policy is applied once, at the merge
+                # funnel
+                float_dtype=None,
             ):
                 smet_datasets.append(ds)
         except UnitConversionError:
@@ -519,6 +528,7 @@ def read_smet(
     datetime_end: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
     unit_validation: str = "strict",
+    float_dtype: FloatDtypeLike = "float32",
 ) -> Optional[xr.Dataset]:
     """
     Parses a single SMET file into an xarray.Dataset.
@@ -550,6 +560,8 @@ def read_smet(
         unit_validation: SMET unit validation mode. `'strict'` (default)
             raises for incompatible declared units; `'light'` warns and keeps
             such variables in their declared units instead.
+        float_dtype: Floating-point storage dtype; see `read()`. None
+            preserves parsed dtypes (float64).
 
     Returns:
         An xarray.Dataset containing the SMET data, or None if the file
@@ -708,7 +720,7 @@ def read_smet(
             if 'long_name' not in ds[var_name].attrs:
                 ds[var_name].attrs['long_name'] = str(var_name).replace('_', ' ')
 
-    return ds
+    return _apply_float_dtype(ds, float_dtype)
 
 
 def _require_single_smet_series(ds: xsnowDataset) -> None:
