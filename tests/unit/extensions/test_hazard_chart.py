@@ -254,3 +254,77 @@ class TestAxlim:
         from xsnow.extensions.hazard_chart import _STABILITY_INDEX_INFO
         assert 'rc_slope' not in _STABILITY_INDEX_INFO
         assert 'rc_flat' in _STABILITY_INDEX_INFO
+
+
+class TestTwoPanel:
+    def test_scatter_panel_is_inherited_and_ranges_match(self, reduced):
+        import matplotlib
+        matplotlib.use('Agg')
+        hc = HazardChart(reduced).compute_hazard_chart(indices=['punstable'])
+        ax_hc, ax_ts = hc.plot_hazard_chart_timeseries(hc_variant=0)
+        assert ax_hc.get_ylim() == (0.0, 1.0) == ax_ts.get_ylim()
+        assert ax_hc.get_ylabel() == 'Punstable / -' == ax_ts.get_ylabel()
+        assert ax_hc.get_title() == '' == ax_ts.get_title()
+        assert len(ax_ts.collections) == 2  # 10-90 % and 25-75 % bands
+        assert ax_ts.lines, 'median line missing'
+
+    def test_paper_layout(self, reduced):
+        import matplotlib
+        matplotlib.use('Agg')
+        hc = HazardChart(reduced).compute_hazard_chart(indices=['punstable'])
+        ax_hc, ax_ts = hc.plot_hazard_chart_timeseries(
+            hc_variant=0, time='2026-01-15',
+        )
+        # size-estimate ticks on the anchors, labelled 0-5
+        assert [t.get_text() for t in ax_hc.get_xticklabels()] == \
+            ['0', '1', '2', '3', '4', '5']
+        assert ax_ts.yaxis.get_label_position() == 'right'
+        assert [t.get_text() for t in ax_hc.texts] == ['a']
+        assert [t.get_text() for t in ax_ts.texts] == ['b']
+        assert ax_ts.get_xlabel() == ''
+        # dashed timestamp mark on the right, green diamond on the left
+        assert any(ln.get_linestyle() == '--' for ln in ax_ts.lines)
+        diamonds = [ln for ln in ax_hc.lines if ln.get_marker() == 'D']
+        assert diamonds and diamonds[0].get_color() == 'green'
+        # shared y-axis and class-boundary lines in GUI colours
+        assert ax_ts in ax_hc.get_shared_y_axes().get_siblings(ax_hc)
+        bounds = {ln.get_ydata()[0]: ln.get_color() for ln in ax_hc.lines
+                  if ln.get_linestyle() == '--' and len(ln.get_ydata()) == 2
+                  and ln.get_ydata()[0] == ln.get_ydata()[1]}
+        assert bounds == {0.5: '#ffffbf', 0.7: '#fdae61', 0.77: '#d7191c'}
+
+    def test_depth_ticks_on_top(self, reduced):
+        import matplotlib
+        matplotlib.use('Agg')
+        hc = HazardChart(reduced).compute_hazard_chart(indices=['punstable'])
+        ax = hc.plot_hazard_chart(hc_variant=0, size_estimate='Techel2023')
+        sec = [child for child in ax.get_children()
+               if 'Secondary' in type(child).__name__]
+        assert sec and sec[0].get_xlabel() == 'Depth / m'
+        assert [t.get_text() for t in sec[0].get_xticklabels()] == \
+            ['0.3', '0.4', '0.5', '0.8', '1']
+        with pytest.raises(ValueError, match='size estimator'):
+            hc.plot_hazard_chart(hc_variant=0, size_estimate='foo')
+
+    def test_precomputed_timeseries_is_used(self, reduced):
+        import matplotlib
+        matplotlib.use('Agg')
+        hc = HazardChart(reduced).compute_hazard_chart(indices=['punstable'])
+        stats = reduced.compute_hc_timeseries(indices=['punstable'])
+        _, ax_ts = hc.plot_hazard_chart_timeseries(hc_variant=0,
+                                                   timeseries=stats)
+        y = ax_ts.lines[0].get_ydata()
+        np.testing.assert_allclose(
+            y, stats.data['punstable_median'].values
+        )
+
+
+def test_points_coloured_by_grain_type(reduced):
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib.colors import to_hex
+    hc = HazardChart(reduced).compute_hazard_chart(indices=['punstable'])
+    ax = hc.plot_hazard_chart(hc_variant=0)
+    face = ax.collections[0].get_facecolor()
+    # one point per profile; its driving layer is the DH layer (550)
+    assert [to_hex(c) for c in face] == ['#0078ff']

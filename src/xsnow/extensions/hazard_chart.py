@@ -27,11 +27,6 @@ that adds a new dimension to the xsnowDataset class (**application scenario 2**
 of the extension framework): the class subclasses the xsnow
 ``DatasetDecorator``, which handles the class configuration entirely, while the
 module-level functions are attached with ``register_xsnowDataset_method``.
-
-Warnings
---------
-This extension is still work-in-progress. The computations above are in use,
-but the plotting side is minimal and not yet configurable per stability index.
 """
 # Author(s): Florian Herla
 # License: https://gitlab.com/avacollabra/postprocessing/xsnow/-/raw/main/LICENSE?ref_type=heads
@@ -48,13 +43,9 @@ import xarray as xr
 from xsnow import DatasetDecorator
 
 from ..core import xsnowDataset
+from ..graincode_converter import GRAIN_COLORS, slf_graincode_to_ICSSG_primary
 from ..plugin import register_xsnowDataset_method
-from ..utils import get_backend
-
-# TODO:
-#  * create axes limits per stability index
-#  * add timeseries plot
-
+from ..utils import get_backend, latex_style
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -78,6 +69,14 @@ _RC_CLASSES = [
 ]
 POOR_OR_WORSE = ("very poor", "poor")
 _SK38_AXLIM = (0.0, 1.5)
+# the albina admin-GUI class palette (RdYlGn)
+CLASS_COLORS = {
+    "very poor": "#d7191c",
+    "poor": "#fdae61",
+    "fair": "#ffffbf",
+    "rather stable": "#a6d96a",
+}
+
 _STABILITY_INDEX_INFO: dict[str, dict[str, Any]] = {
     "punstable": {
         "var": "punstable", "weak": "max",
@@ -88,6 +87,7 @@ _STABILITY_INDEX_INFO: dict[str, dict[str, Any]] = {
             ("very poor", np.inf),
         ],
         "axlim": (0.0, 1.0),
+        "label": "Punstable",
     },
     "rta": {"var": "rta", "weak": "max",
             "classes": [("rather stable", 0.8), ("poor", np.inf)],
@@ -449,45 +449,166 @@ class HazardChart(DatasetDecorator):
         group: int | str | None = None,
         time: Any | None = None,
         ax=None,
-        s: float = 18.0,
+        s: float = 7.0,
         alpha: float = 0.7,
+        size_estimate: str | None = None,
+        pooled: xsnowDataset | None = None,
     ):
         """
-        Scatter-plot for one variant, optionally for a single group and/or time.
-        X = hc_depth, Y = hc_instability.
+        Scatter-plot for one variant, optionally for a single group and/or
+        time. The points sit at the avalanche size their depth maps to, on
+        a linear 0-5 axis like the dashboard chart; the ticks on top name
+        the depths of sizes 1-5. ``size_estimate`` picks the anchor set
+        (``'McClung2009'``/``'Techel2023'``), defaulting to the variant's.
+        At a given ``time`` the pooled median and unstable depth are marked
+        with a green diamond (``pooled`` takes a precomputed timeseries,
+        e.g. a filtered one; without it the whole dataset is pooled).
         """
         import matplotlib.pyplot as plt
+
+        meta = self.list_hc_variants()[hc_variant]
+        index = meta.stability_index
+        cfg = _STABILITY_INDEX_INFO.get(index, {})
+        kind = size_estimate or meta.size_estimate
+        if kind not in AVA_SIZE_ANCHORS:
+            raise ValueError(f"Unknown avalanche size estimator: {kind!r}")
 
         sub = self.subset_hazard_points(hc_variant=hc_variant, group=group, time=time)
         x = _to_host(sub["hc_depth"].data).ravel()
         y = _to_host(sub["hc_instability"].data).ravel()
+        # colour each point by the driving layer's grain type, GUI-style
+        colors = "black"
+        if "hc_gcode" in sub:
+            grains = slf_graincode_to_ICSSG_primary(
+                _to_host(sub["hc_gcode"].data).ravel()
+            ).values
+            palette = GRAIN_COLORS["SARP"]  # the dashboard scheme
+            colors = [palette.get(g, "black") for g in grains]
 
-        if ax is None:
-            _, ax = plt.subplots()
+        with plt.style.context(latex_style()):
+            if ax is None:
+                _, ax = plt.subplots()
 
-        ax.scatter(x, y, s=s, alpha=alpha)
-        ax.set_xlabel("Depth")
-        ax.set_ylabel("Instability index (weakest)")
-
-        infos = self.list_hc_variants()
-        if hc_variant < len(infos):
-            cfg = _STABILITY_INDEX_INFO.get(infos[hc_variant].stability_index, {})
+            x = estimate_avalanche_size(x, kind)
+            ax.set_xticks(range(6))
+            ax.set_xlim(0, 5)
+            ax.set_xlabel("Size estimate / -")
+            # the top axis names the depths behind sizes 1-5
+            ax.tick_params(top=False, which="both")
+            sec = ax.secondary_xaxis("top")
+            sec.set_xticks(range(1, 6),
+                           labels=[f"{d:g}" for d in AVA_SIZE_ANCHORS[kind][1:]])
+            sec.set_xlabel("Depth / m")
+            ax.scatter(x, y, s=s, alpha=alpha, c=colors,
+                       edgecolors=(0, 0, 0, 0.3), linewidths=0.3)
+            ax.set_ylabel(_index_label(index))
             if "axlim" in cfg:
                 ax.set_ylim(*cfg["axlim"])
-        # Decide whether to invert axis depending on your depth convention
-        # ax.invert_xaxis()
+            ax.grid(True)
+            _draw_class_lines(ax, index)
 
-        # Title with basic info
-        title = f"Hazard chart (variant {hc_variant})"
-        if hc_variant < len(infos):
-            meta = infos[hc_variant]
-            title += f" — {meta.stability_index}"
-            if meta.groupby:
-                title += f" grouped by {','.join(meta.groupby)}"
             if time is not None:
-                title += f" @ time={_to_timestr(time)}"
-        ax.set_title(title)
+                stats = (pooled if pooled is not None
+                         else compute_hc_timeseries(xsnowDataset(self.data),
+                                                    indices=[index])).data
+                at = stats.sel(time=time)
+                mark_x = estimate_avalanche_size(
+                    float(at[f"{index}_depth"]), kind
+                )
+                ax.plot(float(mark_x), float(at[f"{index}_median"]),
+                        "D", color="green", mec="black", mew=0.6,
+                        ms=9, zorder=5)
+        # ax.figure.savefig('hazard_chart.pdf', dpi=300)
         return ax
+
+    def plot_hazard_chart_timeseries(
+        self,
+        *,
+        hc_variant: int,
+        group: int | str | None = None,
+        time: Any | None = None,
+        axes=None,
+        s: float = 7.0,
+        alpha: float = 0.7,
+        size_estimate: str | None = None,
+        timeseries: xsnowDataset | None = None,
+    ):
+        """
+        Two-panel figure: the hazard chart on the left (drawn by
+        ``plot_hazard_chart``, square) and the pooled timeseries of the
+        variant's index on the right, styled like the dashboard chart:
+        median line, 25-75 % band (darker), 10-90 % band (lighter), and a
+        dashed vertical mark at ``time``. The right panel keeps its y-axis
+        on the right so the panels sit close together.
+
+        The timeseries pools the whole dataset via ``compute_hc_timeseries``;
+        pass ``timeseries`` to show a precomputed (e.g. filtered) one
+        instead. ``group`` only subsets the scatter panel.
+        """
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+
+        index = self.list_hc_variants()[hc_variant].stability_index
+        stats = (timeseries if timeseries is not None
+                 else compute_hc_timeseries(xsnowDataset(self.data),
+                                            indices=[index])).data
+
+        with plt.style.context(latex_style()):
+            if axes is None:
+                fig, axes = plt.subplots(
+                    1, 2, figsize=(7.5, 3.4), layout="constrained",
+                    sharey=True,
+                    gridspec_kw={"width_ratios": [1.0, 1.3]},
+                )
+                # constrained layout ignores gridspec wspace; tighten the
+                # engine's inter-panel spacing instead
+                fig.get_layout_engine().set(wspace=0.0, w_pad=0.02)
+            ax_hc, ax_ts = axes
+            self.plot_hazard_chart(hc_variant=hc_variant, group=group,
+                                   time=time, ax=ax_hc, s=s, alpha=alpha,
+                                   size_estimate=size_estimate,
+                                   pooled=xsnowDataset(stats))
+
+            t = stats['time'].values
+            ax_ts.fill_between(t, stats[f'{index}_p10'].values,
+                               stats[f'{index}_p90'].values,
+                               color='#ddd', label='10-90 %')
+            ax_ts.fill_between(t, stats[f'{index}_p25'].values,
+                               stats[f'{index}_p75'].values,
+                               color='#bbb', label='25-75 %')
+            ax_ts.plot(t, stats[f'{index}_median'].values, color='green',
+                       label='median')
+            if time is not None:
+                ax_ts.axvline(self.data['time'].sel(time=time).values,
+                              color='k', lw=0.8, ls='--')
+            if len(t) > 1:
+                ax_ts.set_xlim(t[0], t[-1])
+                locator = mdates.AutoDateLocator(maxticks=6)
+                ax_ts.xaxis.set_major_locator(locator)
+                ax_ts.xaxis.set_major_formatter(
+                    mdates.ConciseDateFormatter(locator)
+                )
+
+            ax_ts.yaxis.tick_right()
+            # sharey hides the second panel's tick labels; re-enable right
+            ax_ts.tick_params(axis='y', labelright=True, labelleft=False)
+            ax_ts.yaxis.set_label_position('right')
+            ax_ts.set_ylabel(_index_label(index))
+            cfg = _STABILITY_INDEX_INFO.get(index, {})
+            if "axlim" in cfg:
+                ax_ts.set_ylim(*cfg["axlim"])
+            ax_ts.grid(True)
+            _draw_class_lines(ax_ts, index)
+            ax_ts.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                         ncols=3, frameon=False, fontsize="small",
+                         columnspacing=1.2, handlelength=1.6)
+            for panel, label, lx in ((ax_hc, "a", 0.95), (ax_ts, "b", 0.96)):
+                panel.text(lx, 0.95, label, transform=panel.transAxes,
+                           ha="right", va="top", fontweight="bold",
+                           bbox={"boxstyle": "circle", "facecolor": "white",
+                                 "edgecolor": "black", "linewidth": 0.8})
+        # ax_hc.figure.savefig('hazard_chart_timeseries.pdf', dpi=300)
+        return ax_hc, ax_ts
 
 
 # ---------------------------------------------------------------------
@@ -850,6 +971,23 @@ def _array_backend(values):
 def _to_host(values) -> np.ndarray:
     """Copy back to the CPU for string, pandas or numpy-only work."""
     return values.get() if hasattr(values, 'get') else np.asarray(values)
+
+
+def _draw_class_lines(ax, index: str) -> None:
+    """Dashed lines on the class boundaries, coloured like the more
+    unstable of the two classes each boundary separates."""
+    cfg = _STABILITY_INDEX_INFO.get(index, {})
+    classes = cfg.get("classes", [])
+    for i, (label, bound) in enumerate(classes[:-1]):
+        worse = classes[i + 1][0] if cfg["weak"] == "max" else label
+        ax.axhline(bound, ls="--", lw=1.2, zorder=1.5,
+                   color=CLASS_COLORS.get(worse, "grey"))
+
+
+def _index_label(index: str) -> str:
+    """Axis label of an index: its display name over the '-' unit."""
+    label = _STABILITY_INDEX_INFO.get(index, {}).get("label", index)
+    return f"{label} / -"
 
 
 def _argreduce_layer(values: np.ndarray, side: str):

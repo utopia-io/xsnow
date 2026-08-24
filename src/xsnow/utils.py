@@ -1166,3 +1166,10 @@ def _year_month(date_value: str | None) -> tuple[Optional[str], Optional[str]]:
         except ValueError:
             month = parts[1]
     return year, month
+
+
+def latex_style() -> str:
+    """Path of the packaged paper-ready matplotlib style."""
+    from importlib.resources import files
+
+    return str(files('xsnow') / 'resources' / 'latex.mplstyle')

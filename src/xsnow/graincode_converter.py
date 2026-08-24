@@ -42,6 +42,25 @@ def _build_static_map_SLF() -> Dict[str, Tuple[str, str, str]]:
 
 SLF_TO_ICSSG: Dict[str, Tuple[str, str, str]] = _build_static_map_SLF()
 
+# Grain-type color palettes: SARP, SARPGR, IACS2 (GREY for muted backgrounds).
+_GRAIN_LABELS = ('PP', 'DF', 'PPgp', 'SH', 'DH', 'FC',
+                 'FCxr', 'RG', 'MF', 'MFcr', 'IF')
+GRAIN_COLORS = {
+    'SARP': dict(zip(_GRAIN_LABELS, (
+        '#ffde00', '#f1f501', '#ffff33', '#ff0000', '#0078ff', '#b2edff',
+        '#dacef4', '#ffccd9', '#d5ebb5', '#addd8e', '#a3ddbb'))),
+    'IACS2': dict(zip(_GRAIN_LABELS, (
+        '#00FF00', '#228B22', '#696969', '#FF00FF', '#0000FF', '#ADD8E6',
+        '#ADD8E6', '#FFB6C1', '#FF0000', '#FF0000', '#00FFFF'))),
+    'SARPGR': dict(zip(_GRAIN_LABELS, (
+        '#ffde00', '#ffde00', '#ffde00', '#95258f', '#95258f', '#dacef4',
+        '#dacef4', '#dacef4', '#d5ebb5', '#d5ebb5', '#d5ebb5'))),
+    'GREY': dict(zip(_GRAIN_LABELS, (
+        '#dcdcdc', '#dcdcdc', '#dcdcdc', '#808080', '#808080', '#d3d3d3',
+        '#d3d3d3', '#d3d3d3', '#c0c0c0', '#c0c0c0', '#c0c0c0'))),
+}
+
+
 def _primary_labels_SLF(codes: np.ndarray) -> np.ndarray:
     """
     Vectorized primary ICSSG label computation from 1/2/3-digit SLF codes.

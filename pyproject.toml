@@ -105,7 +105,7 @@ where = ["src"]
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-xsnow = ["py.typed", "*.pyi"]
+xsnow = ["py.typed", "*.pyi", "resources/*.mplstyle"]
 
 [tool.setuptools_scm]
 write_to = "src/xsnow/_version.py"
