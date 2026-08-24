@@ -6,15 +6,16 @@ indices, ensuring they work correctly with the layer-based coordinate
 system and reproduce the verified reference values (implementation
 verified against the R/operational reference outputs, 2026-08-14).
 """
-import pytest
-import xarray as xr
 import numpy as np
 import pandas as pd
+import pytest
+import xarray as xr
 
 from xsnow import xsnowDataset
+from xsnow.extensions.sk38 import compute_skier_penetration
+
 # importing the module registers all methods on xsnowDataset
 from xsnow.extensions.sk38_ccl import INDEX_CAP
-from xsnow.extensions.sk38 import compute_skier_penetration
 
 
 @pytest.fixture
@@ -297,9 +298,9 @@ def _gess2_2023_11_03():
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0, 10000.0,
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0, 10000.0,
         10000.0])
-    inputs = dict(height=height, density=density,
-                  shear_strength=shear_strength, grain_size=grain_size,
-                  grain_type=grain_type, rta=rta)
+    inputs = {'height': height, 'density': density,
+              'shear_strength': shear_strength, 'grain_size': grain_size,
+              'grain_type': grain_type, 'rta': rta}
     return inputs, r_reference
 
 
@@ -355,9 +356,9 @@ def _gess2_2023_12_01():
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0, 2.221101,
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0, 10000.0,
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0])
-    inputs = dict(height=height, density=density,
-                  shear_strength=shear_strength, grain_size=grain_size,
-                  grain_type=grain_type, rta=rta)
+    inputs = {'height': height, 'density': density,
+              'shear_strength': shear_strength, 'grain_size': grain_size,
+              'grain_type': grain_type, 'rta': rta}
     return inputs, r_reference
 
 
@@ -395,8 +396,7 @@ def test_backend_stays_within_cupy_api(analysis_ds, monkeypatch):
                 raise AttributeError(f"cupy has no attribute {name!r}")
             return getattr(np, name)
 
-    from xsnow.extensions import (critical_crack_length, rta, sk38,
-                                  sk38_ccl)
+    from xsnow.extensions import critical_crack_length, rta, sk38, sk38_ccl
     for mod in (sk38, sk38_ccl, rta, critical_crack_length):
         monkeypatch.setattr(mod, 'get_backend', lambda ds: CupySurface())
 
@@ -406,3 +406,26 @@ def test_backend_stays_within_cupy_api(analysis_ds, monkeypatch):
     assert 'rc_flat' in analysis_ds.compute_critical_crack_length().data
     assert 'rc_slope' in analysis_ds.compute_critical_crack_length(
         inclination=38.0).data
+
+
+class TestSk38Rta:
+    def test_gate_and_sentinel(self):
+        n = 4
+        data = {
+            'sk38': (('location', 'time', 'layer'),
+                     np.array([[[0.5, 0.9, 2.0, np.nan]]])),
+            'rta': (('location', 'time', 'layer'),
+                    np.array([[[0.9, 0.3, np.nan, 0.9]]])),
+        }
+        coords = {'location': [0], 'time': [pd.to_datetime('2025-01-15')],
+                  'layer': np.arange(n)}
+        ds = xsnowDataset(xr.Dataset(data, coords))
+        out = ds.compute_sk38_rta().data['sk38_rta'].values[0, 0]
+        # gated (rta<0.8) -> 6.0; NaN rta ungated; NaN sk38 stays NaN
+        np.testing.assert_allclose(out, [0.5, 6.0, 2.0, np.nan])
+
+        strict = ds.compute_sk38_rta(rta_threshold=0.95)
+        np.testing.assert_allclose(
+            strict.data['sk38_rta'].values[0, 0], [6.0, 6.0, 2.0, np.nan]
+        )
+        assert strict.data['sk38_rta'].attrs['rta_threshold'] == 0.95

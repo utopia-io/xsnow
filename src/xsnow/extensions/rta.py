@@ -37,7 +37,6 @@ from ..utils import (
     wrap_like,
 )
 
-RTA_THRESHOLD = 0.8          # weak-layer candidate threshold
 WEIBULL_SHAPE = 2.5          # shape of the depth weighting
 WEIBULL_SCALE = 50.0         # cm, scale of the depth weighting
 CRUST_MIN_HARDNESS = 3.0     # hand hardness index of a supporting crust

@@ -5,10 +5,10 @@ This test suite verifies the functionality of the structural
 instability index, ensuring it works correctly with the layer-based
 coordinate system and reproduces the verified reference values.
 """
-import pytest
-import xarray as xr
 import numpy as np
 import pandas as pd
+import pytest
+import xarray as xr
 
 from xsnow import xsnowDataset
 from xsnow.extensions import rta  # noqa: F401 -- registers the methods

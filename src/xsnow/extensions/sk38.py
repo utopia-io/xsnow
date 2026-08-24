@@ -34,7 +34,7 @@ from .critical_crack_length import (
     layer_thickness,
     slab_weighted_mean,
 )
-from .rta import RTA_THRESHOLD, compute_rta  # noqa: F401 (registers rta)
+from .rta import compute_rta  # noqa: F401 (registers rta)
 
 DEFAULT_INCLINATION = 38.0   # deg, virtual slope angle of the index
 # N m^-1, effective skier line load (~85 kg, 1.7 m skis, dynamic factor 2.5)
@@ -306,10 +306,13 @@ STABLE_SK38 = 6.0   # SNOWPACK's SK38 cap, reported where the RTA gate closes
 
 
 @register_xsnowDataset_method
-def compute_sk38_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
+def compute_sk38_rta(
+    ds: 'xsnowDataset', rta_threshold: float = 0.8
+) -> 'xsnowDataset':
     """
     RTA-gated native SK38: layers that are no weak-layer candidates
-    (``rta`` < 0.8) report the stable cap 6.0 instead of their SK38.
+    (``rta`` < ``rta_threshold``) report the stable cap 6.0 instead of
+    their SK38.
 
     Requires ``sk38``; a missing ``rta`` is computed and kept. NaN rta
     leaves the SK38 value ungated.
@@ -324,11 +327,11 @@ def compute_sk38_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     index = xp.asarray(index_da.data)
     rta_arr = xp.asarray(rta_da.broadcast_like(index_da).data)
     gated = xp.where(
-        xp.isfinite(index) & (rta_arr < RTA_THRESHOLD),
+        xp.isfinite(index) & (rta_arr < rta_threshold),
         STABLE_SK38, index,
     )
 
     attrs = registry_attrs('sk38_rta', 'RTA-gated stability index SK38', '1')
-    attrs['rta_threshold'] = RTA_THRESHOLD
+    attrs['rta_threshold'] = rta_threshold
     new_xr = pure.data.assign(sk38_rta=wrap_like(gated, index_da, attrs))
     return ds.__class__(new_xr)
