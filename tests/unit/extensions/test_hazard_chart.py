@@ -232,3 +232,25 @@ def test_backend_stays_within_cupy_api(reduced, full, monkeypatch):
 
     stats = reduced.compute_hc_timeseries(indices=['punstable']).data
     assert np.isfinite(stats['punstable_median'].values).any()
+
+
+class TestAxlim:
+    def test_every_index_has_a_range(self):
+        from xsnow.extensions.hazard_chart import _STABILITY_INDEX_INFO
+        for name, cfg in _STABILITY_INDEX_INFO.items():
+            lo, hi = cfg['axlim']
+            assert lo < hi, name
+
+    def test_plot_applies_the_range(self, full):
+        import matplotlib
+        matplotlib.use('Agg')
+        hc = HazardChart(full).compute_hazard_chart(
+            stability_index='punstable', depth_var='z',
+        )
+        ax = hc.plot_hazard_chart(hc_variant=0)
+        assert ax.get_ylim() == (0.0, 1.0)
+
+    def test_rc_slope_stays_an_intermediate(self):
+        from xsnow.extensions.hazard_chart import _STABILITY_INDEX_INFO
+        assert 'rc_slope' not in _STABILITY_INDEX_INFO
+        assert 'rc_flat' in _STABILITY_INDEX_INFO

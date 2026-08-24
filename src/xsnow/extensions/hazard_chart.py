@@ -59,10 +59,11 @@ from ..utils import get_backend
 # ---------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------
-# per index: the weak side and the stability classes as ascending
-# (label, upper_bound] steps in xsnow units; the shared labels are
-# 'very poor' < 'poor' < 'fair' < 'rather stable' (single-threshold
-# indices use only 'poor' and 'rather stable')
+# per index: the weak side, the stability classes as ascending
+# (label, upper_bound] steps in xsnow units, and the hazard-chart y-axis
+# range axlim; the shared class labels are 'very poor' < 'poor' < 'fair'
+# < 'rather stable' (single-threshold indices use only 'poor' and
+# 'rather stable')
 _SK38_CLASSES = [
     ("very poor", 0.5),
     ("poor", 0.95),
@@ -76,6 +77,7 @@ _RC_CLASSES = [
     ("rather stable", np.inf),
 ]
 POOR_OR_WORSE = ("very poor", "poor")
+_SK38_AXLIM = (0.0, 1.5)
 _STABILITY_INDEX_INFO: dict[str, dict[str, Any]] = {
     "punstable": {
         "var": "punstable", "weak": "max",
@@ -85,18 +87,24 @@ _STABILITY_INDEX_INFO: dict[str, dict[str, Any]] = {
             ("poor", 0.77),
             ("very poor", np.inf),
         ],
+        "axlim": (0.0, 1.0),
     },
     "rta": {"var": "rta", "weak": "max",
-            "classes": [("rather stable", 0.8), ("poor", np.inf)]},
-    "sk38": {"var": "sk38", "weak": "min", "classes": _SK38_CLASSES},
-    "sk38_rta": {"var": "sk38_rta", "weak": "min", "classes": _SK38_CLASSES},
-    "sk38_ccl": {"var": "sk38_ccl", "weak": "min", "classes": _SK38_CLASSES},
+            "classes": [("rather stable", 0.8), ("poor", np.inf)],
+            "axlim": (0.0, 1.0)},
+    "sk38": {"var": "sk38", "weak": "min", "classes": _SK38_CLASSES,
+             "axlim": _SK38_AXLIM},
+    "sk38_rta": {"var": "sk38_rta", "weak": "min", "classes": _SK38_CLASSES,
+                 "axlim": _SK38_AXLIM},
+    "sk38_ccl": {"var": "sk38_ccl", "weak": "min", "classes": _SK38_CLASSES,
+                 "axlim": _SK38_AXLIM},
     "sk38_ccl_rta": {"var": "sk38_ccl_rta", "weak": "min",
-                     "classes": _SK38_CLASSES},
-    "rc_flat": {"var": "rc_flat", "weak": "min", "classes": _RC_CLASSES},
-    "rc_slope": {"var": "rc_slope", "weak": "min", "classes": _RC_CLASSES},
+                     "classes": _SK38_CLASSES, "axlim": _SK38_AXLIM},
+    "rc_flat": {"var": "rc_flat", "weak": "min", "classes": _RC_CLASSES,
+                "axlim": _SK38_AXLIM},
     "lwc": {"var": "lwc", "weak": "max",
-            "classes": [("rather stable", 0.03), ("poor", np.inf)]},
+            "classes": [("rather stable", 0.03), ("poor", np.inf)],
+            "axlim": (0.0, 0.1)},
 }
 
 
@@ -460,11 +468,16 @@ class HazardChart(DatasetDecorator):
         ax.scatter(x, y, s=s, alpha=alpha)
         ax.set_xlabel("Depth")
         ax.set_ylabel("Instability index (weakest)")
+
+        infos = self.list_hc_variants()
+        if hc_variant < len(infos):
+            cfg = _STABILITY_INDEX_INFO.get(infos[hc_variant].stability_index, {})
+            if "axlim" in cfg:
+                ax.set_ylim(*cfg["axlim"])
         # Decide whether to invert axis depending on your depth convention
         # ax.invert_xaxis()
 
         # Title with basic info
-        infos = self.list_hc_variants()
         title = f"Hazard chart (variant {hc_variant})"
         if hc_variant < len(infos):
             meta = infos[hc_variant]
