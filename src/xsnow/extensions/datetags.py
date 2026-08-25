@@ -6,6 +6,10 @@ with the first datetag at or after its deposition date, so a tag labels
 the snow that fell up to (and including) that storm. Datetag derivation
 from weather timelines will live in this module as well.
 
+Both routines run on blocks of complete profiles (see
+:mod:`xsnow.extensions.profile_block_computation`), so Dask-backed
+datasets stay lazy.
+
 References
 ----------
 - Herla, F., et al. (2023). A large-scale validation of snowpack
@@ -16,13 +20,15 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import dask.array
 import numpy as np
 import pandas as pd
+import xarray as xr
 
 from ..core import xsnowDataset
 from ..graincode_converter import slf_graincode_to_ICSSG_primary
 from ..plugin import register_xsnowDataset_method
-from ..utils import get_logger, require_vars, wrap_like
+from ..utils import get_logger, require_vars
 from .hazard_chart import (
     _STABILITY_INDEX_INFO,
     _select_weak_and_deep,
@@ -30,9 +36,14 @@ from .hazard_chart import (
     classify_poor_or_worse,
 )
 from .new_snow import NEW_SNOW_GRAINS
+from .profile_block_computation import apply_profile_block
 
 SHALLOW_OLD_SNOW = 'shallow_old_snow'
 NEW_SNOW = 'new_snow'
+#: ``datetag`` attribute listing every tag assigned to the dataset
+DATETAGS_ATTR = 'datetags'
+_NAT_DAY = np.datetime64('NaT', 'D')
+_NAT_INT = np.datetime64('NaT', 'D').astype('int64')
 
 
 def _as_day_tags(tags) -> np.ndarray:
@@ -81,6 +92,38 @@ def _tags_per_location(xs: xsnowDataset, datetags) -> list:
     return per_loc
 
 
+def _assign_datetags_block(deposition, tags):
+    """Tag one block of profiles.
+
+    ``deposition``: ``(..., layer)`` datetime64; ``tags``: ``(..., tag)``
+    int64 days, sorted, NaT-padded, with size-1 axes where the tag rows do
+    not vary (they only differ per location).
+    """
+    days = deposition.astype('datetime64[D]').astype('int64')
+    tags = np.broadcast_to(tags, days.shape[:-1] + tags.shape[-1:])
+    out = np.full(days.shape, _NAT_INT, dtype='int64')
+    flat_days = days.reshape(-1, days.shape[-1])
+    flat_tags = tags.reshape(-1, tags.shape[-1])
+    flat_out = out.reshape(-1, days.shape[-1])
+    rows, inverse = np.unique(flat_tags, axis=0, return_inverse=True)
+    for i, row in enumerate(rows):
+        valid = row[row != _NAT_INT]
+        if valid.size == 0:
+            continue
+        sel = inverse.reshape(-1) == i
+        d = flat_days[sel]
+        idx = np.searchsorted(valid, d.ravel(), side='left')
+        # an undated layer (NaT, the smallest int64) must stay NaT rather
+        # than take the first tag; a layer after the last tag stays NaT too
+        tagged = np.where(
+            (idx < valid.size) & (d.ravel() != _NAT_INT),
+            valid[np.minimum(idx, valid.size - 1)],
+            _NAT_INT,
+        )
+        flat_out[sel] = tagged.reshape(d.shape)
+    return out.astype('datetime64[D]').astype('datetime64[ns]')
+
+
 @register_xsnowDataset_method
 def assign_datetags(ds: 'xsnowDataset', datetags) -> 'xsnowDataset':
     """
@@ -99,43 +142,115 @@ def assign_datetags(ds: 'xsnowDataset', datetags) -> 'xsnowDataset':
     xsnowDataset
         New dataset with the ``datetag`` variable (an existing one is
         overwritten). Layers deposited after the last tag, layers without
-        a deposition date, and locations without tags are NaT.
+        a deposition date, and locations without tags are NaT. The
+        variable's ``datetags`` attribute lists every assigned tag, which
+        :func:`compute_simplified_stratigraphy` uses as its group list.
 
     Notes
     -----
-    Deposition dates are compared at day resolution.
+    Deposition dates are compared at day resolution. Dask-backed input
+    stays lazy.
     """
     logger = get_logger(__name__)
     xs = ds if isinstance(ds, xsnowDataset) else xsnowDataset(ds)
     require_vars(xs, ('deposition_date',), 'assign_datetags')
 
+    per_loc = _tags_per_location(xs, datetags)
+    width = max((t.size for t in per_loc), default=0)
+    table = np.full((len(per_loc), max(width, 1)), _NAT_INT, dtype='int64')
+    for i, tags in enumerate(per_loc):
+        table[i, :tags.size] = tags.astype('int64')
+    tags_da = xr.DataArray(
+        table, dims=('location', 'tag'),
+        coords={'location': xs.data['location']},
+    )
+    all_tags = np.unique(np.concatenate(per_loc)) if per_loc else \
+        np.array([], dtype='datetime64[D]')
+
     dep_da = xs.data['deposition_date']
-    loc_axis = dep_da.dims.index('location')
-    days = dep_da.values.astype('datetime64[D]')
-
-    out = np.full(days.shape, np.datetime64('NaT', 'ns'), 'datetime64[ns]')
-    for i, tags in enumerate(_tags_per_location(xs, datetags)):
-        if tags.size == 0:
-            continue
-        sel = [slice(None)] * days.ndim
-        sel[loc_axis] = i
-        sel = tuple(sel)
-        d = days[sel]
-        # NaT sorts last, so it lands out of range and stays NaT
-        idx = np.searchsorted(tags, d.ravel(), side='left')
-        tagged = np.where(
-            idx < tags.size, tags[np.minimum(idx, tags.size - 1)],
-            np.datetime64('NaT', 'D')
-        )
-        out[sel] = tagged.reshape(d.shape).astype('datetime64[ns]')
-
+    result = apply_profile_block(
+        _assign_datetags_block, dep_da, tags_da,
+        input_core_dims=[['layer'], ['tag']],
+        output_dtype=np.dtype('datetime64[ns]'),
+    )
+    result = result.transpose(*dep_da.dims)
+    result.attrs = {
+        'standard_name': 'deposition_datetag',
+        'long_name': 'deposition datetag',
+        DATETAGS_ATTR: [str(d) for d in all_tags],
+    }
     if 'datetag' in xs.data:
         logger.info("Overwriting existing variable 'datetag'.")
+    return xs.__class__(xs.data.assign(datetag=result))
 
-    attrs = {'standard_name': 'deposition_datetag',
-             'long_name': 'deposition datetag'}
-    result = xs.data.assign(datetag=wrap_like(out, dep_da, attrs))
-    return xs.__class__(result)
+
+def _tag_days(datetag_da: xr.DataArray, logger) -> np.ndarray:
+    """Sorted day tags present in the dataset, from the ``datetags``
+    attribute or, failing that, a scan of the variable."""
+    listed = datetag_da.attrs.get(DATETAGS_ATTR)
+    if listed is not None:
+        return _as_day_tags(list(listed))
+    logger.info(
+        "Variable 'datetag' carries no 'datetags' attribute; scanning it "
+        "for the group list (assign_datetags records the list)."
+    )
+    values = datetag_da.data
+    if isinstance(values, dask.array.Array):
+        values = dask.array.unique(values).compute()
+    values = np.asarray(values).ravel()
+    return np.unique(values[~np.isnat(values)]).astype('datetime64[D]')
+
+
+def _simplified_stratigraphy_block(
+    height, hs, datetag, grain_code, is_new, *values, tag_ints, cfg,
+):
+    """Reduce one block of profiles to one entry per datetag group."""
+    depth = hs[..., None] - height
+    tags = datetag.astype('datetime64[D]').astype('int64')
+    untagged = tags == _NAT_INT
+    is_new = np.broadcast_to(is_new, height.shape)
+    valid = ~np.isnan(height)
+    n_groups = len(tag_ints) + 2
+
+    def group_mask(gi):
+        """One group at a time; holding them all is the memory peak."""
+        if gi < len(tag_ints):
+            return tags == tag_ints[gi]
+        if gi == len(tag_ints):
+            return untagged & valid & ~is_new
+        return is_new & valid
+
+    base_shape = height.shape[:-1] + (n_groups,)
+    count = np.zeros(base_shape, dtype='int16')
+    outs = [np.full(base_shape, np.nan, dtype='float32')
+            for _ in range(4 * len(values))]
+    # a layer's stability class does not depend on its datetag group, so
+    # both are resolved once per index instead of once per index and group
+    prepared = [
+        (vals, side, classify_poor_or_worse(vals, cls_steps))
+        for vals, (side, cls_steps) in zip(values, cfg)
+    ]
+    for gi in range(n_groups):
+        mask = group_mask(gi)
+        count[..., gi] = mask.sum(-1)
+        for i, (vals, side, poor) in enumerate(prepared):
+            stab = np.where(mask, vals, np.nan)
+            w_idx, w_valid, pick = _select_weak_and_deep(
+                stab, side, None, poor=poor & mask
+            )
+            outs[4 * i][..., gi] = np.where(
+                w_valid, _take_layer(stab, w_idx), np.nan
+            )
+            outs[4 * i + 1][..., gi] = np.where(
+                w_valid, _take_layer(depth, pick), np.nan
+            )
+            outs[4 * i + 2][..., gi] = np.where(
+                w_valid, _take_layer(grain_code, w_idx), np.nan
+            )
+            outs[4 * i + 3][..., gi] = np.where(
+                w_valid, _take_layer(grain_code, pick), np.nan
+            )
+    return (count, *outs)
 
 
 @register_xsnowDataset_method
@@ -171,7 +286,15 @@ def compute_simplified_stratigraphy(
         coordinate ``datetag``. Per index: ``<idx>``, ``<idx>_depth``
         (m below surface), ``<idx>_gcode_weak``, ``<idx>_gcode_deep``,
         plus ``datetag_layer_count`` (0 = group absent, values NaN).
+
+    Notes
+    -----
+    The group list comes from the ``datetags`` attribute that
+    ``assign_datetags`` records on ``datetag`` (so every assigned tag is a
+    group, present or not); without it the variable is scanned for the
+    tags present. Dask-backed input stays lazy.
     """
+    logger = get_logger(__name__)
     xs = ds if isinstance(ds, xsnowDataset) else xsnowDataset(ds)
     require_vars(
         xs, ('datetag', 'height', 'HS', 'grain_type'),
@@ -189,88 +312,49 @@ def compute_simplified_stratigraphy(
             f"No variable or class config for indices: {missing}"
         )
 
-    height_da = xs.data['height']
-    dims = tuple(d for d in height_da.dims if d != 'layer') + ('layer',)
-
-    def _vals(da):
-        return da.transpose(*dims).values
-
-    height = _vals(height_da)
-    depth = _vals(xs.data['HS'] - height_da)
-    tags = _vals(xs.data['datetag'])
-    gcode = _vals(xs.data['grain_type'])
-    primary = _vals(slf_graincode_to_ICSSG_primary(xs.data['grain_type']))
-
-    untagged = pd.isna(tags)
-    tag_dates = np.unique(tags[~untagged])
+    tag_dates = _tag_days(xs.data['datetag'], logger)
     labels = [str(d)[:10] for d in tag_dates] + [SHALLOW_OLD_SNOW, NEW_SNOW]
-    is_new = np.isin(primary, NEW_SNOW_GRAINS)
-    valid = ~np.isnan(height)
-    n_groups = len(tag_dates) + 2
+    n_groups = len(labels)
+    is_new = slf_graincode_to_ICSSG_primary(
+        xs.data['grain_type']
+    ).isin(list(NEW_SNOW_GRAINS))
 
-    def group_mask(gi):
-        """One group at a time; holding them all is the memory peak."""
-        if gi < len(tag_dates):
-            return tags == tag_dates[gi]
-        if gi == len(tag_dates):
-            return untagged & valid & ~is_new
-        return is_new & valid
+    height_da = xs.data['height']
+    inputs = [height_da, xs.data['HS'], xs.data['datetag'],
+              xs.data['grain_type'], is_new]
+    inputs += [xs.data[idx] for idx in indices]
+    core = [['layer'], [], ['layer'], ['layer'], ['layer']]
+    core += [['layer']] * len(indices)
+    n_out = 1 + 4 * len(indices)
+    results = apply_profile_block(
+        _simplified_stratigraphy_block, *inputs,
+        input_core_dims=core,
+        output_core_dims=[['group']] * n_out,
+        output_sizes={'group': n_groups},
+        output_dtype=['int16'] + ['float32'] * (4 * len(indices)),
+        kwargs={
+            'tag_ints': tag_dates.astype('int64'),
+            'cfg': [cfg[idx] for idx in indices],
+        },
+    )
+    order = tuple(d for d in height_da.dims if d != 'layer') + ('layer',)
 
-    base_shape = height.shape[:-1] + (n_groups,)
-    count = np.zeros(base_shape, dtype='int16')
-    out_vars: dict[str, np.ndarray] = {
-        idx: np.full(base_shape, np.nan, dtype='float32')
-        for i in indices
-        for idx in (i, f'{i}_depth', f'{i}_gcode_weak', f'{i}_gcode_deep')
-    }
-    # a layer's stability class does not depend on its datetag group, so
-    # both are resolved once per index instead of once per index and group
-    prepared = {}
-    for idx in indices:
-        side, cls_steps = cfg[idx]
-        values = _vals(xs.data[idx])
-        prepared[idx] = (values, side,
-                         classify_poor_or_worse(values, cls_steps))
-
-    for gi in range(n_groups):
-        mask = group_mask(gi)
-        count[..., gi] = mask.sum(-1)
-        for idx in indices:
-            values, side, poor = prepared[idx]
-            stab = np.where(mask, values, np.nan)
-            w_idx, w_valid, pick = _select_weak_and_deep(
-                stab, side, None, poor=poor & mask
-            )
-            out_vars[idx][..., gi] = np.where(
-                w_valid, _take_layer(stab, w_idx), np.nan
-            )
-            out_vars[f'{idx}_depth'][..., gi] = np.where(
-                w_valid, _take_layer(depth, pick), np.nan
-            )
-            out_vars[f'{idx}_gcode_weak'][..., gi] = np.where(
-                w_valid, _take_layer(gcode, w_idx), np.nan
-            )
-            out_vars[f'{idx}_gcode_deep'][..., gi] = np.where(
-                w_valid, _take_layer(gcode, pick), np.nan
-            )
+    def finish(da, attrs):
+        da = da.rename({'group': 'layer'}).transpose(*order)
+        da.attrs = attrs
+        return da
 
     out = xs.data.drop_dims('layer')
-    new_dims = dims[:-1] + ('layer',)
-    for idx in indices:
-        attrs = dict(xs.data[idx].attrs)
-        out[idx] = (new_dims, out_vars[idx], attrs)
-        out[f'{idx}_depth'] = (
-            new_dims, out_vars[f'{idx}_depth'],
+    out['datetag_layer_count'] = finish(results[0], {})
+    for i, idx in enumerate(indices):
+        out[idx] = finish(results[4 * i + 1], dict(xs.data[idx].attrs))
+        out[f'{idx}_depth'] = finish(
+            results[4 * i + 2],
             {'units': 'm', 'long_name': f'{idx} driving depth below surface'},
         )
         gattrs = {'units': 'Swiss Code F1F2F3'}
-        out[f'{idx}_gcode_weak'] = (
-            new_dims, out_vars[f'{idx}_gcode_weak'], dict(gattrs)
-        )
-        out[f'{idx}_gcode_deep'] = (
-            new_dims, out_vars[f'{idx}_gcode_deep'], dict(gattrs)
-        )
-    out['datetag_layer_count'] = (new_dims, count)
+        out[f'{idx}_gcode_weak'] = finish(results[4 * i + 3], dict(gattrs))
+        out[f'{idx}_gcode_deep'] = finish(results[4 * i + 4], dict(gattrs))
     out = out.assign_coords(
         layer=np.arange(n_groups),
         datetag=('layer', labels),

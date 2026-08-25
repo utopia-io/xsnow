@@ -186,7 +186,7 @@ def slf_graincode_to_ICSSG_primary(
             graincodes,
             input_core_dims=[[]],
             output_core_dims=[[]],
-            dask="allowed",
+            dask="parallelized",
             vectorize=False,
             output_dtypes=[object],
         )
@@ -229,7 +229,7 @@ def slf_graincode_to_ICSSG_secondary(
             graincodes,
             input_core_dims=[[]],
             output_core_dims=[[]],
-            dask="allowed",
+            dask="parallelized",
             vectorize=False,
             output_dtypes=[object],
         )
