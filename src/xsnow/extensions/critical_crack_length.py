@@ -12,7 +12,8 @@ Other parametrizations are welcome to be added.
 
 """
 import math
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import numpy as np
 
@@ -40,6 +41,29 @@ A_RICHTER = 4.6e-9       # Richter et al. (2019) parameter "a"
 B_RICHTER = -2.0         # Richter et al. (2019) parameter "b"
 E0 = 5.07e9              # Pa, modulus prefactor in Richter et al. (2019)
 E_EXP = 5.13             # exponent on (rho_slab / rho_ice)
+
+
+@dataclass(frozen=True, slots=True)
+class _SlabMechanics:
+    """Reusable eager-array results from the virtual-slope calculation.
+
+    ``height_n``, ``thick_n``, and ``surface_n`` use slope-normal geometry.
+    Only values consumed by the crack-length or skier calculations are kept;
+    full-array intermediates used solely inside ``compute_slab_mechanics`` are
+    released when that function returns.
+    """
+
+    valid: Any
+    density: Any
+    height_n: Any
+    thick_n: Any
+    surface_n: Any
+    e_layer: Any
+    h_equiv: Any
+    tau_g: Any
+    sigma_n: Any
+    tau_p: Any
+
 
 # ---------------------------------------------------------------------------
 # Slab and crack-length physics
@@ -170,14 +194,14 @@ def strength_correction(grain_type, sigma_n, shear_strength, xp):
 
 
 def compute_slab_mechanics(density, thickness_vertical, height, grain_type,
-                           shear_strength, inclination, xp):
+                           shear_strength, inclination, xp) -> _SlabMechanics:
     """
-    Slab quantities above each layer on a virtual slope, as a dict of
-    backend arrays (slope-normal geometry, layer axis last).
+    Reusable slab quantities above each layer on a virtual slope.
 
     This calculation accepts eager array blocks. Dask-backed datasets must
     use the registered dataset methods, which schedule it blockwise with a
-    complete layer axis.
+    complete layer axis. It returns a frozen record of backend arrays with the
+    layer axis last.
     """
     inputs = (density, thickness_vertical, height, grain_type, shear_strength)
     if any(hasattr(array, '__dask_graph__') for array in inputs):
@@ -212,21 +236,18 @@ def compute_slab_mechanics(density, thickness_vertical, height, grain_type,
     sigma_n = rho_slab * G * d_slab * cos_t
     tau_p = shear + strength_correction(grain_type, sigma_n, shear, xp)
 
-    return {
-        'valid': valid,
-        'density': density,
-        'height_n': height_n,
-        'thick_n': thick_n,
-        'surface_n': surface_n,
-        'd_slab': d_slab,
-        'rho_slab': rho_slab,
-        'e_layer': e_layer,
-        'e_slab': e_slab,
-        'h_equiv': h_equiv,
-        'tau_g': tau_g,
-        'sigma_n': sigma_n,
-        'tau_p': tau_p,
-    }
+    return _SlabMechanics(
+        valid=valid,
+        density=density,
+        height_n=height_n,
+        thick_n=thick_n,
+        surface_n=surface_n,
+        e_layer=e_layer,
+        h_equiv=h_equiv,
+        tau_g=tau_g,
+        sigma_n=sigma_n,
+        tau_p=tau_p,
+    )
 
 
 def compute_rc_flat_richter2019(
@@ -407,12 +428,12 @@ def _compute_critical_crack_length_block(
         xp,
     )
     return compute_rc_slope_richter2019(
-        rho_layer=mech['density'],
+        rho_layer=mech.density,
         grain_size_m=xp.asarray(grain_size),
-        shear_strength_pa=mech['tau_p'],
-        tau_g=mech['tau_g'],
-        sigma_n=mech['sigma_n'],
-        h_equiv=mech['h_equiv'],
+        shear_strength_pa=mech.tau_p,
+        tau_g=mech.tau_g,
+        sigma_n=mech.sigma_n,
+        h_equiv=mech.h_equiv,
         xp=xp,
     )
 
