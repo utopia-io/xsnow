@@ -37,6 +37,14 @@ from .memory import (
     check_memory_budget,
     resolve_memory_limit,
 )
+from .snowpack_zarr import (
+    ZarrIOLayoutError,
+    adapt_snowpack_zarrio,
+    is_snowpack_zarrio,
+    open_snowpack_zarrio,
+)
+
+ZarrFlavour = Literal['auto', 'xsnow', 'snowpack']
 
 # Define the allowed modes matching xarray/zarr requirements
 ZarrModes = Literal['w', 'w-', 'a', 'a-', 'r+', 'r']
@@ -55,6 +63,8 @@ def _read_zarr(
     memory_limit: MemoryLimitLike = "auto",
     norm_slopes: Union[bool, Literal["auto"]] = "auto",
     float_dtype: FloatDtypeLike = "float32",
+    flavour: ZarrFlavour = 'auto',
+    **flavour_kwargs,
 ) -> Optional[xsnowDataset]:
     """
     Internal function to read a Zarr archive.
@@ -90,6 +100,13 @@ def _read_zarr(
             preserves stored dtypes. On Dask-backed opens the cast is lazy
             and applied before the memory guard; with ``lazy=False`` it is
             applied after loading.
+        flavour: ``'xsnow'`` for archives written by :func:`to_zarr`,
+            ``'snowpack'`` for SNOWPACK ZarrIO archives (adapted lazily to
+            the xsnow layout), ``'auto'`` (default) detects the layout.
+        **flavour_kwargs: Options of
+            :func:`xsnow.io.snowpack_zarr.adapt_snowpack_zarrio`
+            (``realization_label``, ``slope_metadata``, ``geo``, ``layers``,
+            ``mask_stale_layers``, ``time_chunk``).
 
     Returns:
         xsnowDataset with the loaded data, or None if loading fails
@@ -118,20 +135,48 @@ def _read_zarr(
             
         # Check for Zarr metadata (v2 or v3)
         has_zarr_v3 = (path / 'zarr.json').exists()
-        has_zarr_v2 = (path / '.zarray').exists() or (path / '.zattrs').exists()
+        has_zarr_v2 = any(
+            (path / name).exists()
+            for name in ('.zarray', '.zattrs', '.zgroup')
+        )
         
         if not (has_zarr_v3 or has_zarr_v2):
             raise ValueError(f"Directory does not appear to be a Zarr archive: {path}")
         
         logger.debug(f"Reading Zarr archive: {path}")
         
-        # Open with xarray
+        # A ZarrIO archive is always opened Dask-backed so the adapter's
+        # index and arithmetic operations stay lazy; an eager request is
+        # honoured by the guarded load below.
         open_lazily = lazy is not False
-        open_chunks = (
-            (chunks if chunks is not None else "auto") if open_lazily else None
+        consolidated = (
+            None if (path / '.zmetadata').exists() or has_zarr_v3 else False
         )
-        opened = xr.open_zarr(path, chunks=open_chunks)
+        if flavour == 'snowpack':
+            opened = open_snowpack_zarrio(path, chunks=chunks)
+        else:
+            open_chunks = (
+                (chunks if chunks is not None else "auto")
+                if open_lazily else None
+            )
+            opened = xr.open_zarr(
+                path, chunks=open_chunks, consolidated=consolidated
+            )
+            if flavour == 'auto' and is_snowpack_zarrio(opened):
+                opened.close()
+                flavour = 'snowpack'
+                opened = open_snowpack_zarrio(path, chunks=chunks)
         ds_raw = opened
+        if flavour == 'snowpack':
+            ds_raw = adapt_snowpack_zarrio(
+                ds_raw, path=path, logger=logger, **flavour_kwargs
+            )
+            open_lazily = True
+        elif flavour_kwargs:
+            raise ZarrIOLayoutError(
+                "ZarrIO reader options given for an xsnow-layout archive: "
+                f"{sorted(flavour_kwargs)}"
+            )
         ds_raw = _promote_slope_metadata_coords(ds_raw)
         ds_raw = _apply_norm_slopes(
             ds_raw,
@@ -194,11 +239,14 @@ def _read_zarr(
         # guarded load
         if not open_lazily:
             ds_raw = _apply_float_dtype(ds_raw, float_dtype)
+        elif not resolved_lazy and lazy is False:
+            ds_raw = _apply_float_dtype(ds_raw, float_dtype)
 
         # Wrap in xsnowDataset
         return xsnowDataset(ds_raw)
 
-    except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown):
+    except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown,
+            ZarrIOLayoutError):
         # Deliberate refusals, not read failures: surface them to the caller
         # rather than degrading to the None "could not read" contract below.
         if opened is not None:

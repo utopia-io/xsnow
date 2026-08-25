@@ -56,6 +56,7 @@ from .pro import _read_pro_files_eager, _read_pro_files_lazy, to_pro
 from .smet import _read_smet_files, read_smet, to_smet
 from .netcdf import _read_xsnow_netcdf, to_netcdf
 from .zarr import _read_zarr, to_zarr
+from .snowpack_zarr import ZarrIOLayoutError, read_snowpack_archives
 
 
 __all__ = [
@@ -66,11 +67,18 @@ __all__ = [
     'to_netcdf',
     'to_zarr',
     'build_archive',
+    'read_snowpack_archives',
     'check_memory_budget',
     'MemoryLimitExceeded',
     'MemorySizeUnknown',
     'ArchiveAppendError',
+    'ZarrIOLayoutError',
 ]
+
+_ZARR_FLAVOUR_KWARGS = (
+    'flavour', 'realization_label', 'slope_metadata', 'geo', 'layers',
+    'mask_stale_layers', 'time_chunk',
+)
 
 
 def read(
@@ -321,11 +329,18 @@ def read(
             logger.warning(f"Failed to read NetCDF file {source}: {e}")
             return None
     
-    # Zarr archives
+    # Zarr archives (xsnow layout, or SNOWPACK ZarrIO archives)
     if isinstance(source, (str, Path)) and (
-        Path(source).suffix == '.zarr' or 
-        (Path(source).is_dir() and (Path(source) / 'zarr.json').exists())
+        Path(source).suffix == '.zarr' or
+        (Path(source).is_dir() and any(
+            (Path(source) / name).exists()
+            for name in ('zarr.json', '.zgroup')
+        ))
     ):
+        zarr_kwargs = {
+            key: parser_kwargs[key]
+            for key in _ZARR_FLAVOUR_KWARGS if key in parser_kwargs
+        }
         try:
             return _read_zarr(
                 source,
@@ -340,8 +355,10 @@ def read(
                 memory_limit=budget_bytes,
                 norm_slopes=norm_slopes,
                 float_dtype=float_dtype,
+                **zarr_kwargs,
             )
-        except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown):
+        except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown,
+                ZarrIOLayoutError):
             # See the NetCDF branch: refusals must not degrade to None.
             raise
         except Exception as e:
