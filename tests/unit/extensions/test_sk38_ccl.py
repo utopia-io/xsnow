@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+import dask.array as da
+from dask.callbacks import Callback
 
 from xsnow import xsnowDataset
 from xsnow.extensions.sk38 import compute_skier_penetration
@@ -115,6 +117,46 @@ def test_compute_sk38_ccl_rta(analysis_ds):
     # without an rta variable the gate falls back to compute_rta
     no_rta = xsnowDataset(analysis_ds.data.drop_vars('rta'))
     assert 'sk38_ccl_rta' in no_rta.compute_sk38_ccl_rta().data
+
+
+@pytest.mark.parametrize(
+    'method_name, out_name',
+    [
+        ('compute_sk38', 'sk38'),
+        ('compute_sk38_ccl', 'sk38_ccl'),
+        ('compute_sk38_ccl_rta', 'sk38_ccl_rta'),
+    ],
+)
+def test_skier_indices_remain_lazy(analysis_ds, method_name, out_name):
+    expected = getattr(analysis_ds, method_name)()[out_name]
+    lazy = xsnowDataset(analysis_ds.data.chunk({'layer': 3}))
+    started_tasks = []
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        actual = getattr(lazy, method_name)()[out_name]
+
+    assert started_tasks == []
+    assert isinstance(actual.data, da.Array)
+    assert sum(actual.chunks[-1]) == actual.sizes['layer']
+    if method_name != 'compute_sk38_ccl_rta':
+        assert actual.chunks[-1] == (actual.sizes['layer'],)
+    xr.testing.assert_allclose(actual.compute(), expected)
+
+
+def test_sk38_ccl_rta_fallback_remains_lazy(analysis_ds):
+    eager = xsnowDataset(analysis_ds.data.drop_vars('rta'))
+    expected = eager.compute_sk38_ccl_rta()
+    lazy = xsnowDataset(eager.data.chunk({'layer': 3}))
+    started_tasks = []
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        actual = lazy.compute_sk38_ccl_rta()
+
+    assert started_tasks == []
+    assert isinstance(actual['rta'].data, da.Array)
+    assert isinstance(actual['sk38_ccl_rta'].data, da.Array)
+    xr.testing.assert_allclose(
+        actual[['rta', 'sk38_ccl_rta']].compute(),
+        expected[['rta', 'sk38_ccl_rta']],
+    )
 
 
 def test_missing_inputs_are_never_stable(analysis_ds):
@@ -398,7 +440,9 @@ def test_backend_stays_within_cupy_api(analysis_ds, monkeypatch):
 
     from xsnow.extensions import critical_crack_length, rta, sk38, sk38_ccl
     for mod in (sk38, sk38_ccl, rta, critical_crack_length):
-        monkeypatch.setattr(mod, 'get_backend', lambda ds: CupySurface())
+        monkeypatch.setattr(
+            mod, 'get_array_backend', lambda array: CupySurface()
+        )
 
     assert 'sk38' in analysis_ds.compute_sk38().data
     assert 'sk38_ccl_rta' in analysis_ds.compute_sk38_ccl_rta().data

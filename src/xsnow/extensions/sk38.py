@@ -23,15 +23,17 @@ from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..utils import (
     finite_max,
-    get_backend,
     get_logger,
     registry_attrs,
     require_vars,
-    wrap_like,
+)
+from .profile_block_computation import (
+    apply_profile_block,
+    float_result_dtype,
+    get_array_backend,
 )
 from .critical_crack_length import (
     compute_slab_mechanics,
-    layer_thickness,
     slab_weighted_mean,
 )
 from .rta import compute_rta  # noqa: F401 (registers rta)
@@ -156,9 +158,16 @@ def skier_delta_tau(alpha, h_equiv, inclination_rad, line_load, xp):
     )
 
 
-def _prepare_skier_mechanics(ds, penetrated_layer=PENETRATED_LAYER):
+def _prepare_skier_mechanics(
+    density,
+    shear_strength,
+    height,
+    grain_type,
+    xp,
+    penetrated_layer=PENETRATED_LAYER,
+):
     """
-    Slab mechanics plus the skier-specific quantities for one dataset.
+    Slab mechanics plus the skier-specific quantities for eager arrays.
 
     Extends :func:`~xsnow.extensions.critical_crack_length.
     compute_slab_mechanics` with the skier penetration, the mask of
@@ -177,21 +186,20 @@ def _prepare_skier_mechanics(ds, penetrated_layer=PENETRATED_LAYER):
             "penetrated_layer must be 'full' or 'residual', got "
             f"{penetrated_layer!r}"
         )
-    require_vars(
-        ds, ['density', 'shear_strength', 'height', 'grain_type'],
-        'skier stability',
-    )
-
-    xp = get_backend(ds)
     theta = math.radians(DEFAULT_INCLINATION)
     cos_t = math.cos(theta)
 
-    height_da = ds.data['height']
-    thick_vert_da = layer_thickness(height_da)
+    density = xp.asarray(density)
+    shear_strength = xp.asarray(shear_strength)
+    height = xp.asarray(height)
+    grain_type = xp.asarray(grain_type)
+    bottom = xp.concatenate(
+        [xp.zeros_like(height[..., :1]), height[..., :-1]], axis=-1
+    )
+    thick_vert = height - bottom
 
     mech = compute_slab_mechanics(
-        ds.data['density'].data, thick_vert_da.data, height_da.data,
-        ds.data['grain_type'].data, ds.data['shear_strength'].data,
+        density, thick_vert, height, grain_type, shear_strength,
         DEFAULT_INCLINATION, xp,
     )
     valid = mech['valid']
@@ -200,8 +208,6 @@ def _prepare_skier_mechanics(ds, penetrated_layer=PENETRATED_LAYER):
     e_layer = mech['e_layer']
 
     # skier penetration and the layers it consumes
-    thick_vert = xp.asarray(thick_vert_da.data)
-    grain_type = xp.asarray(ds.data['grain_type'].data)
     penetration = compute_skier_penetration(
         mech['density'], thick_vert, grain_type, xp,
     )
@@ -245,13 +251,33 @@ def _prepare_skier_mechanics(ds, penetrated_layer=PENETRATED_LAYER):
         'xp': xp,
         'theta': theta,
         'line_load': SKIER_LINE_LOAD,
-        'height_da': height_da,
         'penetration': penetration,
         'penetrated': penetrated,
         'h_equiv_sk': h_equiv_sk,
         'top_layer': top_layer,
     })
     return mech
+
+
+def _compute_sk38_block(density, shear_strength, height, grain_type):
+    """Compute SK38 for an eager block containing complete profiles."""
+    xp = get_array_backend(density)
+    mech = _prepare_skier_mechanics(
+        density, shear_strength, height, grain_type, xp
+    )
+
+    alpha_star = alpha_max_skier_stress(mech['theta'])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        delta_tau_max = skier_delta_tau(
+            xp.asarray(alpha_star, dtype=mech['h_equiv_sk'].dtype),
+            mech['h_equiv_sk'], mech['theta'], mech['line_load'], xp
+        )
+        sk38 = mech['tau_p'] / (mech['tau_g'] + delta_tau_max)
+
+    computable = (
+        mech['valid'] & ~mech['penetrated'] & ~mech['top_layer']
+    )
+    return xp.where(computable, sk38, xp.nan)
 
 
 @register_xsnowDataset_method
@@ -275,30 +301,31 @@ def compute_sk38(ds: 'xsnowDataset') -> 'xsnowDataset':
     ``density``, ``shear_strength``, ``height`` and ``grain_type``; the
     topmost and skier-penetrated layers are NaN.
     """
-    logger = get_logger(__name__)
-    mech = _prepare_skier_mechanics(ds)
-    xp = mech['xp']
-
-    alpha_star = alpha_max_skier_stress(mech['theta'])
-    with np.errstate(divide='ignore', invalid='ignore'):
-        delta_tau_max = skier_delta_tau(
-            xp.asarray(alpha_star, dtype=mech['h_equiv_sk'].dtype),
-            mech['h_equiv_sk'], mech['theta'], mech['line_load'], xp
-        )
-        sk38 = mech['tau_p'] / (mech['tau_g'] + delta_tau_max)
-
-    computable = (
-        mech['valid'] & ~mech['penetrated'] & ~mech['top_layer']
+    require_vars(
+        ds, ['density', 'shear_strength', 'height', 'grain_type'],
+        'skier stability',
     )
-    sk38 = xp.where(computable, sk38, xp.nan)
+    density_da = ds.data['density']
+    shear_da = ds.data['shear_strength']
+    height_da = ds.data['height']
+    grain_type_da = ds.data['grain_type']
+    sk38 = apply_profile_block(
+        _compute_sk38_block,
+        density_da,
+        shear_da,
+        height_da,
+        grain_type_da,
+        output_dtype=float_result_dtype(
+            density_da, shear_da, height_da
+        ),
+    )
 
+    logger = get_logger(__name__)
     if 'sk38' in ds.data:
         logger.info("Overwriting existing variable 'sk38'.")
 
-    attrs = registry_attrs('sk38', 'skier stability index SK38', '1')
-    result = ds.data.assign(
-        sk38=wrap_like(sk38, mech['height_da'], attrs)
-    )
+    sk38.attrs = registry_attrs('sk38', 'skier stability index SK38', '1')
+    result = ds.data.assign(sk38=sk38)
     return ds.__class__(result)
 
 
@@ -322,16 +349,14 @@ def compute_sk38_rta(
     pure = xs.compute_rta() if 'rta' not in xs.data else xs
 
     index_da = pure.data['sk38']
-    rta_da = pure.data['rta']
-    xp = get_backend(pure)
-    index = xp.asarray(index_da.data)
-    rta_arr = xp.asarray(rta_da.broadcast_like(index_da).data)
-    gated = xp.where(
-        xp.isfinite(index) & (rta_arr < rta_threshold),
-        STABLE_SK38, index,
+    rta_da = pure.data['rta'].broadcast_like(index_da)
+    gated = index_da.where(
+        ~(np.isfinite(index_da) & (rta_da < rta_threshold)),
+        STABLE_SK38,
     )
 
     attrs = registry_attrs('sk38_rta', 'RTA-gated stability index SK38', '1')
     attrs['rta_threshold'] = rta_threshold
-    new_xr = pure.data.assign(sk38_rta=wrap_like(gated, index_da, attrs))
+    gated.attrs = attrs
+    new_xr = pure.data.assign(sk38_rta=gated)
     return ds.__class__(new_xr)
