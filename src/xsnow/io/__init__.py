@@ -76,8 +76,8 @@ __all__ = [
 ]
 
 _ZARR_FLAVOUR_KWARGS = (
-    'flavour', 'realization_label', 'slope_metadata', 'geo', 'layers',
-    'mask_stale_layers', 'time_chunk',
+    'flavour', 'realization_label', 'slope_metadata', 'geo', 'station_index',
+    'layers', 'mask_stale_layers', 'time_chunk',
 )
 
 

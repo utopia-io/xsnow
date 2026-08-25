@@ -55,10 +55,46 @@ def is_snowpack_zarrio(ds: xr.Dataset) -> bool:
     """Whether an opened Zarr store carries the SNOWPACK ZarrIO layout."""
     return (
         'snowpack_version' in ds.attrs
-        and 'station_id' in ds.data_vars
+        and 'location' in ds.dims
         and 'location' not in ds.coords
         and 'slope' not in ds.dims
     )
+
+
+StationIndex = Union[str, Path, Mapping[str, int]]
+
+
+def _slot_labels(
+    ds: xr.Dataset, station_index: Optional[StationIndex]
+) -> np.ndarray:
+    """Label of every location slot: from the archive's ``station_id`` array,
+    else from a station index file (``<label> <slot>`` per line) or mapping.
+
+    The plugin writes ``station_id`` only when it also writes the snow cover
+    (``[Output] SNOW = ZARR``); runs keeping ``.sno`` state need the index
+    file they pinned the slots with.
+    """
+    n_slots = ds.sizes['location']
+    labels = np.full(n_slots, '', dtype='U64')
+    if 'station_id' in ds.data_vars:
+        labels[:] = _decode_labels(ds['station_id'].values)
+    if station_index is not None:
+        if isinstance(station_index, (str, Path)):
+            mapping: dict[str, int] = {}
+            with open(station_index, 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    parts = line.split()
+                    if not parts or parts[0].startswith('#'):
+                        continue
+                    mapping[parts[0]] = (
+                        int(parts[1]) if len(parts) > 1 else len(mapping)
+                    )
+        else:
+            mapping = {str(k): int(v) for k, v in station_index.items()}
+        for label, slot in mapping.items():
+            if 0 <= slot < n_slots and not labels[slot]:
+                labels[slot] = label
+    return labels
 
 
 def open_snowpack_zarrio(
@@ -240,6 +276,7 @@ def adapt_snowpack_zarrio(
     realization_label: Optional[str] = None,
     slope_metadata: Optional[SlopeMetadata] = None,
     geo: Optional[GeoMetadata] = None,
+    station_index: Optional[StationIndex] = None,
     layers: Optional[int] = None,
     mask_stale_layers: bool = False,
     time_chunk: Optional[int] = _DEFAULT_TIME_CHUNK,
@@ -263,6 +300,11 @@ def adapt_snowpack_zarrio(
         slopes, used where the archive carries no checkpoint.
     geo
         ``{station_id: (latitude, longitude, altitude)}``, likewise.
+    station_index
+        Station index file (``<label> <slot>`` lines, the run's
+        ``ZARR_STATION_INDEX_FILE``)
+        or mapping naming the slots; needed when the archive carries no
+        ``station_id`` array (runs with ``[Output] SNOW = SMET``).
     layers
         Length of the returned ``layer`` axis. Default: the deepest profile
         in the archive. Longer pads with NaN, shorter truncates (with a
@@ -294,10 +336,14 @@ def adapt_snowpack_zarrio(
             "(expected root attr 'snowpack_version' and a 'station_id' array)."
         )
 
-    labels = _decode_labels(ds['station_id'].values)
+    labels = _slot_labels(ds, station_index)
     written = np.array([bool(s) for s in labels])
     if not written.any():
-        raise ZarrIOLayoutError("Archive holds no written station slots.")
+        raise ZarrIOLayoutError(
+            "Archive holds no labelled station slots: it carries no "
+            "'station_id' array (written only with [Output] SNOW = ZARR); "
+            "pass station_index= (the ZARR_STATION_INDEX_FILE of the run)."
+        )
     checkpoint = _read_checkpoint(path)
     base, sector = _split_slots([s for s in labels])
     terrain = _slot_terrain(
@@ -314,18 +360,24 @@ def adapt_snowpack_zarrio(
         ds = ds.sortby('time')
     ds['time'].attrs.setdefault('timezone', 'UTC')
 
+    # terrain coordinates only when known: NaN slope coordinates would make
+    # xsnow's slope normalization fold the sectors together
+    have_slopes = bool(np.isfinite(terrain['inclination'][written]).all())
+    have_geo = any(np.isfinite(terrain[n][written]).any()
+                   for n in ('latitude', 'longitude', 'altitude'))
     parts = []
     for k in sorted(set(sector[written])):
         idx = np.flatnonzero((sector == k) & written)
         part = ds.isel(location=idx)
         part = part.assign_coords(location=('location', base[idx]))
         part = part.expand_dims(slope=[k])
-        part = part.assign_coords(
-            inclination=(('location', 'slope'),
-                         terrain['inclination'][idx][:, None]),
-            azimuth=(('location', 'slope'),
-                     terrain['azimuth'][idx][:, None]),
-        )
+        if have_slopes:
+            part = part.assign_coords(
+                inclination=(('location', 'slope'),
+                             terrain['inclination'][idx][:, None]),
+                azimuth=(('location', 'slope'),
+                         terrain['azimuth'][idx][:, None]),
+            )
         parts.append(part)
     ds = xr.concat(
         parts, dim='slope', join='outer', coords='minimal',
@@ -333,14 +385,15 @@ def adapt_snowpack_zarrio(
     )
     # stations in name order, like the PRO reader, whatever the slot order
     ds = ds.sortby('location')
-    first = np.array(
-        [np.flatnonzero(base == b)[0] for b in ds['location'].values]
-    )
-    ds = ds.assign_coords(
-        latitude=('location', terrain['latitude'][first]),
-        longitude=('location', terrain['longitude'][first]),
-        altitude=('location', terrain['altitude'][first]),
-    )
+    if have_geo:
+        first = np.array(
+            [np.flatnonzero(base == b)[0] for b in ds['location'].values]
+        )
+        ds = ds.assign_coords(
+            latitude=('location', terrain['latitude'][first]),
+            longitude=('location', terrain['longitude'][first]),
+            altitude=('location', terrain['altitude'][first]),
+        )
 
     label = realization_label or str(ds.attrs.get('experiment', 'NO_EXP'))
     ds = ds.expand_dims(realization=1)

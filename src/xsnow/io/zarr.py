@@ -105,7 +105,7 @@ def _read_zarr(
             the xsnow layout), ``'auto'`` (default) detects the layout.
         **flavour_kwargs: Options of
             :func:`xsnow.io.snowpack_zarr.adapt_snowpack_zarrio`
-            (``realization_label``, ``slope_metadata``, ``geo``, ``layers``,
+            (``realization_label``, ``slope_metadata``, ``geo``, ``station_index``, ``layers``,
             ``mask_stale_layers``, ``time_chunk``).
 
     Returns:

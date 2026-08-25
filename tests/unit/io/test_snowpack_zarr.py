@@ -28,7 +28,8 @@ NAMES = ['Weissfluhjoch', 'Weissfluhjoch', 'Klosters', 'Klosters']
 
 
 def _write_archive(path, *, pinned=False, checkpoint=True, chunk_times=T,
-                   precip_rates=True, empty_slot=False, ids=None):
+                   precip_rates=True, empty_slot=False, ids=None,
+                   labels=True):
     """A ZarrIO-shaped Zarr v2 store (no .zmetadata, |S64 labels, NaN fill,
     storage units, optional checkpoint group)."""
     ids = ids or IDS
@@ -92,10 +93,13 @@ def _write_archive(path, *, pinned=False, checkpoint=True, chunk_times=T,
     ta.attrs.update({'_ARRAY_DIMENSIONS': ['time'],
                      'units': 'seconds since 1970-01-01 00:00:00',
                      'calendar': 'proleptic_gregorian'})
+    labels_arrays = labels
     labels = list(ids)
     if empty_slot:
         labels[-1] = ''
     for name, values in (('station_id', labels), ('station_name', NAMES)):
+        if not labels_arrays:
+            break
         a = g.create_array(name, shape=(L,), chunks=(L,), dtype='S64',
                            fill_value=None, compressors=None)
         a[:] = np.array([v.encode() for v in values], dtype='S64')
@@ -332,6 +336,20 @@ def test_adapted_dataset_writes_to_zarr(tmp_path, archive):
     back = xr.open_zarr(target)
     xr.testing.assert_allclose(back['height'].compute(),
                                ds['height'].compute())
+
+
+def test_station_index_file_replaces_missing_labels(tmp_path):
+    path = _write_archive(tmp_path / 'nolabels.zarr', labels=False,
+                          checkpoint=False)
+    with pytest.raises(ZarrIOLayoutError, match='station_index'):
+        xsnow.read(path, lazy=True)
+    index = tmp_path / 'nolabels.zarr.stations.txt'
+    index.write_text('WFJ 0\nWFJ1 1\nKLO 2\nKLO1 3\n')
+    ds = xsnow.read(path, lazy=True, station_index=index).data
+    assert list(ds['location'].values) == ['KLO', 'WFJ']
+    assert list(ds['slope'].values) == [0, 1]
+    # unknown terrain is left out rather than written as NaN coordinates
+    assert 'inclination' not in ds.coords and 'altitude' not in ds.coords
 
 
 def test_adapt_rejects_foreign_layout():
