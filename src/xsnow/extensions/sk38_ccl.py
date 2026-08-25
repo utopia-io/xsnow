@@ -32,7 +32,7 @@ from .profile_block_computation import (
 from .critical_crack_length import compute_rc_slope_richter2019
 from .rta import compute_rta
 from .sk38 import (
-    _prepare_skier_mechanics,
+    _compute_skier_mechanics,
     alpha_max_skier_stress,
     skier_delta_tau,
 )
@@ -42,28 +42,52 @@ RTA_THRESHOLD = 0.8       # weak-layer candidate threshold
 _BISECT_ITERATIONS = 60   # bisection depth for the crack-tip angles
 
 
-def compute_skier_crack_length(mech, xp):
+def compute_skier_crack_length(
+    inclination_rad,
+    line_load,
+    h_equiv,
+    strength_excess,
+    xp,
+):
     """
     Skier-induced crack length ``l_sk`` [m].
 
     Returns ``(l_sk, crack_possible)``; ``l_sk`` is NaN where the skier
     stress never reaches the strength excess (``crack_possible`` False).
 
+    Parameters
+    ----------
+    inclination_rad : float
+        Virtual slope inclination [rad].
+    line_load : float
+        Effective skier line load [N m^-1].
+    h_equiv : xp.ndarray
+        Equivalent slab thickness above each candidate weak layer [m].
+    strength_excess : xp.ndarray
+        Corrected shear strength minus gravitational shear stress [Pa].
+    xp : module
+        Eager array backend (NumPy or CuPy).
+
+    Returns
+    -------
+    l_sk : xp.ndarray
+        Skier-induced crack length [m], or NaN where a crack cannot form.
+    crack_possible : xp.ndarray
+        Boolean mask indicating where skier stress exceeds the strength
+        excess.
+
     Notes
     -----
     Bisection finds the two angles at which the line-load stress equals
-    the strength excess ``tau_p - tau_g``.
+    ``strength_excess``.
     """
-    theta = mech['theta']
-    line_load = mech['line_load']
-    h_equiv = mech['h_equiv_sk']
-    strength_excess = mech['tau_p'] - mech['tau_g']
-
-    alpha_star = alpha_max_skier_stress(theta)
+    alpha_star = alpha_max_skier_stress(inclination_rad)
 
     def stress_excess(alpha):
         return (
-            skier_delta_tau(alpha, h_equiv, theta, line_load, xp)
+            skier_delta_tau(
+                alpha, h_equiv, inclination_rad, line_load, xp
+            )
             - strength_excess
         )
 
@@ -104,21 +128,27 @@ def _compute_sk38_ccl_block(
 ):
     """Compute SK38-CCL for an eager block of complete profiles."""
     xp = get_array_backend(density)
-    mech = _prepare_skier_mechanics(
+    mech = _compute_skier_mechanics(
         density, shear_strength, height, grain_type, xp
     )
     grain_size = xp.asarray(grain_size)
 
     ccl = compute_rc_slope_richter2019(
-        rho_layer=mech['density'],
+        rho_layer=mech.density,
         grain_size_m=grain_size,
-        shear_strength_pa=mech['tau_p'],
-        tau_g=mech['tau_g'],
-        sigma_n=mech['sigma_n'],
-        h_equiv=mech['h_equiv'],
+        shear_strength_pa=mech.tau_p,
+        tau_g=mech.tau_g,
+        sigma_n=mech.sigma_n,
+        h_equiv=mech.h_equiv,
         xp=xp,
     )
-    l_sk, crack_possible = compute_skier_crack_length(mech, xp)
+    l_sk, crack_possible = compute_skier_crack_length(
+        inclination_rad=mech.inclination_rad,
+        line_load=mech.line_load,
+        h_equiv=mech.h_equiv_sk,
+        strength_excess=mech.tau_p - mech.tau_g,
+        xp=xp,
+    )
 
     with np.errstate(divide='ignore', invalid='ignore'):
         index = xp.minimum(ccl / l_sk, INDEX_CAP)
@@ -128,16 +158,16 @@ def _compute_sk38_ccl_block(
     # actual (capped) index. The spontaneous verdict needs only the
     # strength excess; the crack computation additionally needs the
     # equivalent slab thickness.
-    spontaneous = mech['tau_p'] < mech['tau_g']
-    known = xp.isfinite(mech['tau_p'] - mech['tau_g']) & (
-        spontaneous | xp.isfinite(mech['h_equiv_sk'])
+    spontaneous = mech.tau_p < mech.tau_g
+    known = xp.isfinite(mech.tau_p - mech.tau_g) & (
+        spontaneous | xp.isfinite(mech.h_equiv_sk)
     )
     result = xp.where(crack_possible, index, INDEX_CAP)
     result = xp.where(spontaneous, 0.0, result)
-    result = xp.where(mech['penetrated'] & ~spontaneous, xp.nan, result)
+    result = xp.where(mech.penetrated & ~spontaneous, xp.nan, result)
     result = xp.where(known, result, xp.nan)
     return xp.where(
-        mech['top_layer'] | ~mech['valid'], xp.nan, result
+        mech.top_layer | ~mech.valid, xp.nan, result
     )
 
 
