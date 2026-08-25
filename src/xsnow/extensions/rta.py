@@ -31,10 +31,13 @@ from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..utils import (
     finite_max,
-    get_backend,
     registry_attrs,
     require_vars,
-    wrap_like,
+)
+from .profile_block_computation import (
+    apply_profile_block,
+    float_result_dtype,
+    get_array_backend,
 )
 
 WEIBULL_SHAPE = 2.5          # shape of the depth weighting
@@ -72,44 +75,13 @@ def _minmax_span(z, valid, xp):
     return mn, span
 
 
-@register_xsnowDataset_method
-def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
-    """
-    Compute the structural instability index ``rta`` for every layer.
-
-    Returns
-    -------
-    xsnowDataset
-        New dataset with the ``rta`` variable attached ([0, 1], weakest
-        layer = 1; NaN on padding, 0 for single-layer profiles).
-
-    Notes
-    -----
-    Requires ``height`` [m], ``hand_hardness`` (index steps),
-    ``grain_size`` [m] and ``grain_type`` (Swiss Code F1F2F3). Each of
-    the six structural properties is standardized by the profile mean
-    and population standard deviation (floored at 1; grain size in mm
-    and depths in cm, as the floors imply these units), min-max scaled
-    across the profile (span floored at 1, hardness inverted), and
-    summed; interface differences enter as the weaker of the
-    upper-/lower-interface variants (per-layer maximum). The depth
-    property is a Weibull weighting of the layer-top depth, reduced by
-    the accumulated influence of overlying supporting crusts (hand
-    hardness >= 3, thicker than 1 cm). A valid layer whose interface
-    differences are undefined on both sides (isolated between invalid
-    layers) is NaN as well; the single-layer zero applies only to
-    profiles with fewer than two valid layers.
-    """
-    require_vars(
-        ds, ['height', 'hand_hardness', 'grain_size', 'grain_type'],
-        'rta calculation',
-    )
-
-    xp = get_backend(ds)
-    height_m = xp.asarray(ds.data['height'].data)
-    hardness = xp.asarray(ds.data['hand_hardness'].data)
-    gsize_m = xp.asarray(ds.data['grain_size'].data)
-    gtype = xp.asarray(ds.data['grain_type'].data)
+def _compute_rta_block(height_m, hardness, gsize_m, gtype):
+    """Compute RTA for an eager block containing complete profiles."""
+    xp = get_array_backend(height_m)
+    height_m = xp.asarray(height_m)
+    hardness = xp.asarray(hardness)
+    gsize_m = xp.asarray(gsize_m)
+    gtype = xp.asarray(gtype)
 
     valid = (xp.isfinite(height_m) & xp.isfinite(hardness)
              & xp.isfinite(gsize_m) & xp.isfinite(gtype))
@@ -214,12 +186,60 @@ def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
         rta = rta / finite_max(rta, xp)[..., None]
 
     single = valid.sum(axis=-1) < 2
-    rta = xp.where(single[..., None] & valid, 0.0, rta)
+    return xp.where(single[..., None] & valid, 0.0, rta)
+
+
+@register_xsnowDataset_method
+def compute_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
+    """
+    Compute the structural instability index ``rta`` for every layer.
+
+    Returns
+    -------
+    xsnowDataset
+        New dataset with the ``rta`` variable attached ([0, 1], weakest
+        layer = 1; NaN on padding, 0 for single-layer profiles).
+
+    Notes
+    -----
+    Requires ``height`` [m], ``hand_hardness`` (index steps),
+    ``grain_size`` [m] and ``grain_type`` (Swiss Code F1F2F3). Each of
+    the six structural properties is standardized by the profile mean
+    and population standard deviation (floored at 1; grain size in mm
+    and depths in cm, as the floors imply these units), min-max scaled
+    across the profile (span floored at 1, hardness inverted), and
+    summed; interface differences enter as the weaker of the
+    upper-/lower-interface variants (per-layer maximum). The depth
+    property is a Weibull weighting of the layer-top depth, reduced by
+    the accumulated influence of overlying supporting crusts (hand
+    hardness >= 3, thicker than 1 cm). A valid layer whose interface
+    differences are undefined on both sides (isolated between invalid
+    layers) is NaN as well; the single-layer zero applies only to
+    profiles with fewer than two valid layers.
+    """
+    require_vars(
+        ds, ['height', 'hand_hardness', 'grain_size', 'grain_type'],
+        'rta calculation',
+    )
+
+    height_da = ds.data['height']
+    hardness_da = ds.data['hand_hardness']
+    gsize_da = ds.data['grain_size']
+    gtype_da = ds.data['grain_type']
+    rta = apply_profile_block(
+        _compute_rta_block,
+        height_da,
+        hardness_da,
+        gsize_da,
+        gtype_da,
+        output_dtype=float_result_dtype(
+            height_da, hardness_da, gsize_da, gtype_da
+        ),
+    )
 
     attrs = registry_attrs(
         'rta', 'Relative Threshold Sum Approach (RTA)', '1'
     )
-    new_xr = ds.data.assign(
-        rta=wrap_like(rta, ds.data['height'], attrs)
-    )
+    rta.attrs = attrs
+    new_xr = ds.data.assign(rta=rta)
     return ds.__class__(new_xr)

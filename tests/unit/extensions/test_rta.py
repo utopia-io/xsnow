@@ -9,6 +9,8 @@ import pytest
 import xarray as xr
 import numpy as np
 import pandas as pd
+import dask.array as da
+from dask.callbacks import Callback
 
 from xsnow import xsnowDataset
 from xsnow.extensions import rta  # noqa: F401 -- registers the methods
@@ -59,6 +61,19 @@ def test_float32_storage_stays_float32(analysis_ds):
     """Computation follows the storage dtype (no float64 upcasts)."""
     f32 = xsnowDataset(analysis_ds.data.astype(np.float32))
     assert f32.compute_rta()['rta'].dtype == np.float32
+
+
+def test_compute_rta_remains_lazy(analysis_ds):
+    expected = analysis_ds.compute_rta()['rta']
+    lazy = xsnowDataset(analysis_ds.data.chunk({'layer': 3}))
+    started_tasks = []
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        actual = lazy.compute_rta()['rta']
+
+    assert started_tasks == []
+    assert isinstance(actual.data, da.Array)
+    assert actual.chunks[-1] == (actual.sizes['layer'],)
+    xr.testing.assert_allclose(actual.compute(), expected)
 
 
 def test_single_layer_profile_is_zero(analysis_ds):
