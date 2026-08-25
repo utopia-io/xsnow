@@ -304,9 +304,14 @@ def test_rta_gate_keeps_existing_sk38_ccl(analysis_ds):
 
 
 def test_missing_variable_raises(analysis_ds):
-    broken = xsnowDataset(analysis_ds.data.drop_vars('shear_strength'))
-    with pytest.raises(ValueError, match='shear_strength'):
+    broken = xsnowDataset(
+        analysis_ds.data.drop_vars(['shear_strength', 'grain_size'])
+    )
+    with pytest.raises(ValueError) as exc_info:
         broken.compute_sk38_ccl()
+    message = str(exc_info.value)
+    assert "'shear_strength'" in message
+    assert "'grain_size'" in message
 
 
 def _profile_ds(**arrays):
@@ -479,7 +484,7 @@ def test_backend_stays_within_cupy_api(analysis_ds, monkeypatch):
                                   sk38_ccl)
     for mod in (sk38, sk38_ccl, rta, critical_crack_length):
         monkeypatch.setattr(
-            mod, 'get_array_backend', lambda array: CupySurface()
+            mod, 'get_backend', lambda array: CupySurface()
         )
 
     assert 'sk38' in analysis_ds.compute_sk38().data

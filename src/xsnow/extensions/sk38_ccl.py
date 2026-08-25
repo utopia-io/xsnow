@@ -27,7 +27,7 @@ from ..utils import registry_attrs, require_vars
 from .profile_block_computation import (
     apply_profile_block,
     float_result_dtype,
-    get_array_backend,
+    get_backend,
 )
 from .critical_crack_length import compute_rc_slope_richter2019
 from .rta import compute_rta
@@ -127,7 +127,7 @@ def _compute_sk38_ccl_block(
     grain_size,
 ):
     """Compute SK38-CCL for an eager block of complete profiles."""
-    xp = get_array_backend(density)
+    xp = get_backend(density)
     mech = _compute_skier_mechanics(
         density, shear_strength, height, grain_type, xp
     )
@@ -190,10 +190,16 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
     padding, and layers whose slab mechanics are undefined because of
     missing input data -- a missing value is never reported as stable).
     """
-    require_vars(ds, ['grain_size'], 'sk38_ccl calculation')
     require_vars(
-        ds, ['density', 'shear_strength', 'height', 'grain_type'],
-        'skier stability',
+        ds,
+        [
+            'density',
+            'shear_strength',
+            'height',
+            'grain_type',
+            'grain_size',
+        ],
+        'sk38_ccl calculation',
     )
     density_da = ds.data['density']
     shear_da = ds.data['shear_strength']

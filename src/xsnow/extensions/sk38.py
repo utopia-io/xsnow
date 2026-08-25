@@ -32,7 +32,7 @@ from ..utils import (
 from .profile_block_computation import (
     apply_profile_block,
     float_result_dtype,
-    get_array_backend,
+    get_backend,
 )
 from .critical_crack_length import (
     compute_slab_mechanics,
@@ -286,7 +286,7 @@ def _compute_skier_mechanics(
 
 def _compute_sk38_block(density, shear_strength, height, grain_type):
     """Compute SK38 for an eager block containing complete profiles."""
-    xp = get_array_backend(density)
+    xp = get_backend(density)
     mech = _compute_skier_mechanics(
         density, shear_strength, height, grain_type, xp
     )

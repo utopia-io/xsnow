@@ -31,11 +31,11 @@ lazy execution as follows::
     from xsnow.extensions import (
         apply_profile_block,
         float_result_dtype,
-        get_array_backend,
+        get_backend,
     )
 
     def _distance_from_profile_min_block(values):
-        xp = get_array_backend(values)
+        xp = get_backend(values)
         values = xp.asarray(values)
         minimum = xp.nanmin(values, axis=-1)
         return values - minimum[..., None]
@@ -51,28 +51,47 @@ lazy for Dask-backed input.  Exceptions from a lazy block function are raised
 when the returned array is computed.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any
+from types import ModuleType
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
 
+if TYPE_CHECKING:
+    import cupy
+    import dask.array as da
+
+    from ..core import xsnowDataset
+
 __all__ = [
     'apply_profile_block',
     'float_result_dtype',
-    'get_array_backend',
+    'get_backend',
 ]
 
 
-def get_array_backend(array: Any) -> Any:
-    """Return the NumPy or CuPy module for an eager array block.
+def get_backend(
+    array_like: (
+        np.ndarray
+        | cupy.ndarray
+        | da.Array
+        | xr.DataArray
+        | xr.Dataset
+        | xsnowDataset
+    ),
+) -> ModuleType:
+    """Return the NumPy or CuPy numerical backend for an array-like object.
 
     Parameters
     ----------
-    array : array-like
-        An eager array passed to a profile block function.  CuPy arrays select
-        CuPy;
-        all other inputs select NumPy.
+    array_like : array-like, xarray object, or xsnowDataset
+        An eager array block, Dask array, xarray DataArray or Dataset, or
+        xsnowDataset. CuPy arrays, including the metadata arrays of
+        CuPy-backed Dask collections, select CuPy; all other inputs select
+        NumPy. For a Dataset, the first data variable determines the backend.
 
     Returns
     -------
@@ -82,8 +101,35 @@ def get_array_backend(array: Any) -> Any:
     Notes
     -----
     Importing CuPy is deferred until a CuPy array is encountered, so CPU-only
-    installations do not need CuPy installed.
+    installations do not need CuPy installed. Inspecting a Dask collection's
+    empty metadata array does not trigger computation.
     """
+    # Import locally to avoid making the public block helpers part of the
+    # core module's import graph.
+    from ..core import xsnowDataset
+
+    if isinstance(array_like, xsnowDataset):
+        if array_like.data is None:
+            return np
+        array_like = array_like.data
+
+    if isinstance(array_like, xr.Dataset):
+        first_name = next(iter(array_like.data_vars), None)
+        if first_name is None:
+            return np
+        array = array_like[first_name].data
+    elif isinstance(array_like, xr.DataArray):
+        array = array_like.data
+    else:
+        array = array_like
+
+    # Dask exposes a zero-length array representative of its chunk backend.
+    # Follow nested metadata defensively without importing Dask itself.
+    seen = set()
+    while hasattr(array, '_meta') and id(array) not in seen:
+        seen.add(id(array))
+        array = array._meta
+
     if type(array).__module__.split('.')[0] == 'cupy':
         import cupy
 

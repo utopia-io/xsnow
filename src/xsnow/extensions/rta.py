@@ -37,7 +37,7 @@ from ..utils import (
 from .profile_block_computation import (
     apply_profile_block,
     float_result_dtype,
-    get_array_backend,
+    get_backend,
 )
 
 WEIBULL_SHAPE = 2.5          # shape of the depth weighting
@@ -77,7 +77,7 @@ def _minmax_span(z, valid, xp):
 
 def _compute_rta_block(height_m, hardness, gsize_m, gtype):
     """Compute RTA for an eager block containing complete profiles."""
-    xp = get_array_backend(height_m)
+    xp = get_backend(height_m)
     height_m = xp.asarray(height_m)
     hardness = xp.asarray(hardness)
     gsize_m = xp.asarray(gsize_m)
