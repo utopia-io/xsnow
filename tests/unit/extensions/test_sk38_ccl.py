@@ -18,7 +18,7 @@ from dask.callbacks import Callback
 from xsnow import xsnowDataset
 # importing the module registers all methods on xsnowDataset
 from xsnow.extensions.critical_crack_length import compute_slab_mechanics
-from xsnow.extensions.sk38_ccl import INDEX_CAP
+from xsnow.extensions.sk38_ccl import INDEX_CAP, RTA_THRESHOLD
 from xsnow.extensions.sk38 import (
     _compute_skier_mechanics,
     compute_skier_penetration,
@@ -292,15 +292,21 @@ def test_skier_penetration_excludes_unknown_density():
 
 
 def test_rta_gate_keeps_existing_sk38_ccl(analysis_ds):
-    """A pre-existing sk38_ccl survives the gate (recomputed); the
-    internally created intermediate is still dropped (see
-    test_compute_sk38_ccl_rta)."""
-    chained = analysis_ds.compute_sk38_ccl().compute_sk38_ccl_rta()
-    assert 'sk38_ccl' in chained.data
-    np.testing.assert_allclose(
-        chained['sk38_ccl'].values,
-        analysis_ds.compute_sk38_ccl()['sk38_ccl'].values,
+    """A precomputed index is reused without requiring raw mechanics inputs."""
+    with_index = analysis_ds.compute_sk38_ccl()
+    minimal = with_index.data[['sk38_ccl', 'rta']].copy()
+    minimal['rta'][0, 0, 0] = RTA_THRESHOLD / 2.0
+    precomputed = xsnowDataset(minimal)
+    expected = precomputed['sk38_ccl'].copy()
+    expected_gated = expected.where(
+        ~(np.isfinite(expected) & (precomputed['rta'] < RTA_THRESHOLD)),
+        INDEX_CAP,
     )
+
+    gated = precomputed.compute_sk38_ccl_rta()
+
+    xr.testing.assert_identical(gated['sk38_ccl'], expected)
+    xr.testing.assert_allclose(gated['sk38_ccl_rta'], expected_gated)
 
 
 def test_missing_variable_raises(analysis_ds):
