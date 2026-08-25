@@ -1292,6 +1292,8 @@ def _create_pro_dataset(
                     final_values.append(sh_gsize)
                 elif param == 'density':
                     final_values.append(sh_density)
+                elif param == 'hand_hardness':
+                    final_values.append(1.0)
                 elif param == 'height':
                     last_height = (
                         final_values[-1]
