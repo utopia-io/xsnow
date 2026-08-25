@@ -371,15 +371,27 @@ def adapt_snowpack_zarrio(
     ds.attrs.setdefault('crs', 'EPSG:4326')
 
     if time_chunk and ds['time'].size:
-        # rechunk only the Dask-backed data variables: Dataset.chunk would
-        # also turn the small numpy coordinates into Dask arrays
-        size = min(time_chunk, ds.sizes['time'])
-        for name, var in ds.data_vars.items():
-            chunks = getattr(var.data, 'chunks', None)
-            if chunks is None or 'time' not in var.dims:
-                continue
-            if max(chunks[var.get_axis_num('time')]) < size:
-                ds[name] = var.chunk({'time': size})
+        ds = _regularize_time_chunks(ds, time_chunk)
+    return ds
+
+
+def _regularize_time_chunks(ds: xr.Dataset, time_chunk: int) -> xr.Dataset:
+    """Give every Dask-backed data variable uniform ``time`` chunks (the last
+    one may be shorter), coarsened to ``time_chunk``.
+
+    Dropping inactive slots leaves ragged chunks that Zarr refuses to write;
+    only data variables are rechunked so the small numpy coordinates stay
+    numpy (``Dataset.chunk`` would wrap them in Dask too).
+    """
+    n = ds.sizes['time']
+    size = min(time_chunk, n)
+    regular = (size,) * (n // size) + ((n % size,) if n % size else ())
+    for name, var in ds.data_vars.items():
+        chunks = getattr(var.data, 'chunks', None)
+        if chunks is None or 'time' not in var.dims:
+            continue
+        if tuple(chunks[var.get_axis_num('time')]) != regular:
+            ds[name] = var.chunk({'time': size})
     return ds
 
 

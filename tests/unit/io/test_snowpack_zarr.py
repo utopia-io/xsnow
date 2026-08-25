@@ -338,6 +338,8 @@ def test_real_archive_opens_lazily():
     assert validate_xsnow_unit_attrs(ds, unit_validation='strict')
     assert ds.sizes['layer'] >= 400
     assert ds['height'].chunks[-1] == (ds.sizes['layer'],)
+    tchunks = ds['height'].chunks[1]
+    assert len(set(tchunks[:-1])) == 1 and tchunks[-1] <= tchunks[0]
     column = ds['height'].isel(location=0, slope=1, realization=0)
     assert os.path.exists(REAL_ARCHIVE / 'height')
     hs = ds['HS'].isel(location=0, slope=1, realization=0).compute()
