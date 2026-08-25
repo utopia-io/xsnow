@@ -1,6 +1,8 @@
 import pytest
 import xarray as xr
 import numpy as np
+import dask.array as da
+from dask.callbacks import Callback
 from xsnow.graincode_converter import slf_graincode_to_ICSSG_primary, slf_graincode_to_ICSSG_secondary
 
 
@@ -127,3 +129,50 @@ def test_broadcasting_over_extra_dims():
     # 0   → ('PPgp','PPgp','dry')   → prim 'PPgp', sec 'PPgp'
     assert prim.isel(location=1, time=1).values.tolist() == ["DF", "PP", "PPgp"]
     assert sec.isel(location=1, time=1).values.tolist()  == ["FC", "DF", "PPgp"]
+
+
+def test_dask_arrays_remain_lazy_and_preserve_chunks():
+    graincodes = xr.DataArray(
+        da.from_array(
+            np.array([[33, 332, 45, np.nan], [120, 742, 9, 241]]),
+            chunks=(1, 2),
+        ),
+        dims=("profile", "layer"),
+    )
+
+    started_tasks = []
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        prim = slf_graincode_to_ICSSG_primary(graincodes)
+        sec = slf_graincode_to_ICSSG_secondary(graincodes)
+
+    assert started_tasks == []
+    assert isinstance(prim.data, da.Array)
+    assert isinstance(sec.data, da.Array)
+    assert prim.chunks == graincodes.chunks
+    assert sec.chunks == graincodes.chunks
+    xr.testing.assert_equal(
+        prim.compute(),
+        xr.DataArray(
+            np.array(
+                [
+                    ["RG", "MFcr", "FC", np.nan],
+                    ["PP", "MFcr", "FCxr", "DF"],
+                ],
+                dtype=object,
+            ),
+            dims=graincodes.dims,
+        ),
+    )
+    xr.testing.assert_equal(
+        sec.compute(),
+        xr.DataArray(
+            np.array(
+                [
+                    ["RG", "RG", "DH", np.nan],
+                    ["DF", "FC", "FCxr", "FC"],
+                ],
+                dtype=object,
+            ),
+            dims=graincodes.dims,
+        ),
+    )
