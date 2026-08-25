@@ -6,6 +6,8 @@ indices, ensuring they work correctly with the layer-based coordinate
 system and reproduce the verified reference values (implementation
 verified against the R/operational reference outputs, 2026-08-14).
 """
+from dataclasses import fields
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -14,9 +16,13 @@ import dask.array as da
 from dask.callbacks import Callback
 
 from xsnow import xsnowDataset
-from xsnow.extensions.sk38 import compute_skier_penetration
+from xsnow.extensions.sk38 import (
+    _compute_skier_mechanics,
+    compute_skier_penetration,
+)
 
 # importing the module registers all methods on xsnowDataset
+from xsnow.extensions.critical_crack_length import compute_slab_mechanics
 from xsnow.extensions.sk38_ccl import INDEX_CAP
 
 
@@ -78,6 +84,38 @@ def test_compute_sk38_ccl(analysis_ds):
     # the index owns .pro parameter code 0608
     from xsnow.io.base import CODE_TO_NAME_MAP
     assert CODE_TO_NAME_MAP['0608'] == 'sk38_ccl'
+
+
+def test_mechanics_records_retain_only_reusable_results(analysis_ds):
+    """Block-sized intermediates do not outlive mechanics construction."""
+    density = analysis_ds['density'].values
+    shear = analysis_ds['shear_strength'].values
+    height = analysis_ds['height'].values
+    grain_type = analysis_ds['grain_type'].values
+    thickness = np.diff(
+        height,
+        axis=-1,
+        prepend=np.zeros_like(height[..., :1]),
+    )
+
+    slab = compute_slab_mechanics(
+        density, thickness, height, grain_type, shear, 38.0, np
+    )
+    assert tuple(field.name for field in fields(slab)) == (
+        'valid', 'density', 'height_n', 'thick_n', 'surface_n',
+        'e_layer', 'h_equiv', 'tau_g', 'sigma_n', 'tau_p',
+    )
+    assert not hasattr(slab, '__dict__')
+
+    skier = _compute_skier_mechanics(
+        density, shear, height, grain_type, np
+    )
+    assert tuple(field.name for field in fields(skier)) == (
+        'valid', 'density', 'h_equiv', 'tau_g', 'sigma_n', 'tau_p',
+        'inclination_rad', 'line_load', 'penetrated', 'h_equiv_sk',
+        'top_layer',
+    )
+    assert not hasattr(skier, '__dict__')
 
 
 def test_compute_sk38_ccl_soft_slab(analysis_ds):

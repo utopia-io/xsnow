@@ -16,6 +16,8 @@ References
   296-302.
 """
 import math
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -50,6 +52,27 @@ CRUST_MIN_DENSITY = 500.0    # kg m^-3, supporting crust density
 CRUST_MIN_THICKNESS = 0.03   # m, supporting crust thickness
 # treatment of the partially penetrated layer ('full' or 'residual')
 PENETRATED_LAYER = 'full'
+
+
+@dataclass(frozen=True, slots=True)
+class _SkierMechanics:
+    """Final eager-array quantities consumed by the skier indices.
+
+    Construction-only slab geometry and penetration intermediates are omitted
+    so their block-sized arrays can be released before an index is evaluated.
+    """
+
+    valid: Any
+    density: Any
+    h_equiv: Any
+    tau_g: Any
+    sigma_n: Any
+    tau_p: Any
+    inclination_rad: float
+    line_load: float
+    penetrated: Any
+    h_equiv_sk: Any
+    top_layer: Any
 
 
 def compute_skier_penetration(
@@ -158,14 +181,14 @@ def skier_delta_tau(alpha, h_equiv, inclination_rad, line_load, xp):
     )
 
 
-def _prepare_skier_mechanics(
+def _compute_skier_mechanics(
     density,
     shear_strength,
     height,
     grain_type,
     xp,
     penetrated_layer=PENETRATED_LAYER,
-):
+) -> _SkierMechanics:
     """
     Slab mechanics plus the skier-specific quantities for eager arrays.
 
@@ -198,20 +221,20 @@ def _prepare_skier_mechanics(
     )
     thick_vert = height - bottom
 
-    mech = compute_slab_mechanics(
+    slab = compute_slab_mechanics(
         density, thick_vert, height, grain_type, shear_strength,
         DEFAULT_INCLINATION, xp,
     )
-    valid = mech['valid']
-    height_n = mech['height_n']
-    thick_n = mech['thick_n']
-    e_layer = mech['e_layer']
+    valid = slab.valid
+    height_n = slab.height_n
+    thick_n = slab.thick_n
+    e_layer = slab.e_layer
 
     # skier penetration and the layers it consumes
     penetration = compute_skier_penetration(
-        mech['density'], thick_vert, grain_type, xp,
+        slab.density, thick_vert, grain_type, xp,
     )
-    min_height_n = mech['surface_n'] - penetration * cos_t
+    min_height_n = slab.surface_n - penetration * cos_t
     penetrated = valid & (height_n > min_height_n[..., None])
     first_penetrated = penetrated & (
         xp.cumsum(penetrated.astype(xp.int64), axis=-1) == 1
@@ -247,35 +270,41 @@ def _prepare_skier_mechanics(
         xp.cumsum(reversed_valid.astype(xp.int64), axis=-1) == 1
     )[..., ::-1] & valid
 
-    mech.update({
-        'xp': xp,
-        'theta': theta,
-        'line_load': SKIER_LINE_LOAD,
-        'penetration': penetration,
-        'penetrated': penetrated,
-        'h_equiv_sk': h_equiv_sk,
-        'top_layer': top_layer,
-    })
-    return mech
+    return _SkierMechanics(
+        valid=valid,
+        density=slab.density,
+        h_equiv=slab.h_equiv,
+        tau_g=slab.tau_g,
+        sigma_n=slab.sigma_n,
+        tau_p=slab.tau_p,
+        inclination_rad=theta,
+        line_load=SKIER_LINE_LOAD,
+        penetrated=penetrated,
+        h_equiv_sk=h_equiv_sk,
+        top_layer=top_layer,
+    )
 
 
 def _compute_sk38_block(density, shear_strength, height, grain_type):
     """Compute SK38 for an eager block containing complete profiles."""
     xp = get_array_backend(density)
-    mech = _prepare_skier_mechanics(
+    mech = _compute_skier_mechanics(
         density, shear_strength, height, grain_type, xp
     )
 
-    alpha_star = alpha_max_skier_stress(mech['theta'])
+    alpha_star = alpha_max_skier_stress(mech.inclination_rad)
     with np.errstate(divide='ignore', invalid='ignore'):
         delta_tau_max = skier_delta_tau(
-            xp.asarray(alpha_star, dtype=mech['h_equiv_sk'].dtype),
-            mech['h_equiv_sk'], mech['theta'], mech['line_load'], xp
+            xp.asarray(alpha_star, dtype=mech.h_equiv_sk.dtype),
+            mech.h_equiv_sk,
+            mech.inclination_rad,
+            mech.line_load,
+            xp,
         )
-        sk38 = mech['tau_p'] / (mech['tau_g'] + delta_tau_max)
+        sk38 = mech.tau_p / (mech.tau_g + delta_tau_max)
 
     computable = (
-        mech['valid'] & ~mech['penetrated'] & ~mech['top_layer']
+        mech.valid & ~mech.penetrated & ~mech.top_layer
     )
     return xp.where(computable, sk38, xp.nan)
 
