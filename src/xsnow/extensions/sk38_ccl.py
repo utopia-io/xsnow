@@ -6,8 +6,16 @@ al. 2019, on a virtual 38 degree slope) to the length of the crack a
 skier can induce (Foehn 1987); values below 1 indicate that a skier can
 initiate a self-propagating crack.
 
+Both ``sk38_ccl`` and its RTA-gated variant ``sk38_ccl_rta`` follow the
+combined failure-initiation and crack-propagation framework described by
+Borsotti et al. (in preparation).
+
 References
 ----------
+- Borsotti, J., Mariani, A., Villa, G., Metzger, M., Mayer, S.,
+  Schweizer, J., Haegeli, P., & Monti, F. Assessing skier-induced
+  snowpack instability from simulated snow stratigraphy by combining
+  failure initiation and crack propagation. In preparation.
 - Gaume, J., & Reuter, B. (2017). Assessing snow instability in skier-
   triggered snow slab avalanches by combining failure initiation and
   crack propagation. Cold Reg. Sci. Technol., 144, 6-15.
