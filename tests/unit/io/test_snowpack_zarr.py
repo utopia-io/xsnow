@@ -350,6 +350,14 @@ def test_station_index_file_replaces_missing_labels(tmp_path):
     assert list(ds['slope'].values) == [0, 1]
     # unknown terrain is left out rather than written as NaN coordinates
     assert 'inclination' not in ds.coords and 'altitude' not in ds.coords
+    # profsnow's side files next to the archive are picked up automatically
+    (tmp_path / 'nolabels.zarr.layout.json').write_text(
+        '{"slope_metadata": {"0": [0, 0], "1": [38, 180]}}'
+    )
+    auto = xsnow.read(path, lazy=True).data
+    assert list(auto['location'].values) == ['KLO', 'WFJ']
+    np.testing.assert_allclose(_slope_coord(auto, 'azimuth', 'WFJ'),
+                               [0.0, 180.0])
 
 
 def test_adapt_rejects_foreign_layout():

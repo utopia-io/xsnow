@@ -12,6 +12,7 @@ several archives as one dataset.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import warnings
@@ -151,6 +152,35 @@ def _split_slots(labels: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
             base.append(label)
             sector.append(0)
     return np.asarray(base, dtype='U'), np.asarray(sector, dtype='int64')
+
+
+def _discover_side_files(
+    path: Optional[Union[str, Path]],
+    station_index: Optional[StationIndex],
+    slope_metadata: Optional[SlopeMetadata],
+) -> tuple[Optional[StationIndex], Optional[SlopeMetadata]]:
+    """Pick up the index and layout files profsnow writes next to an archive
+    (``<archive>.stations.txt``, ``<archive>.layout.json``) unless the caller
+    supplied the information."""
+    if path is None:
+        return station_index, slope_metadata
+    if station_index is None:
+        index_file = Path(f'{path}.stations.txt')
+        if index_file.is_file():
+            station_index = index_file
+    if slope_metadata is None:
+        layout_file = Path(f'{path}.layout.json')
+        if layout_file.is_file():
+            try:
+                recorded = json.loads(layout_file.read_text()).get(
+                    'slope_metadata') or {}
+                slope_metadata = {
+                    int(k): (float(v[0]), float(v[1]))
+                    for k, v in recorded.items()
+                }
+            except (ValueError, TypeError, IndexError, OSError):
+                slope_metadata = None
+    return station_index, slope_metadata
 
 
 def _read_checkpoint(path: Optional[Union[str, Path]]) -> Optional[xr.Dataset]:
@@ -333,8 +363,11 @@ def adapt_snowpack_zarrio(
     if not is_snowpack_zarrio(ds):
         raise ZarrIOLayoutError(
             "Dataset does not carry the SNOWPACK ZarrIO layout "
-            "(expected root attr 'snowpack_version' and a 'station_id' array)."
+            "(expected root attr 'snowpack_version' and a 'location' axis)."
         )
+    station_index, slope_metadata = _discover_side_files(
+        path, station_index, slope_metadata
+    )
 
     labels = _slot_labels(ds, station_index)
     written = np.array([bool(s) for s in labels])
