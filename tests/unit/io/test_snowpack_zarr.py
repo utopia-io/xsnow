@@ -322,6 +322,18 @@ def test_xsnow_layout_archive_is_untouched(tmp_path, archive):
         xsnow.read(target, layers=3)
 
 
+def test_adapted_dataset_writes_to_zarr(tmp_path, archive):
+    ds = xsnow.read(archive, lazy=True).data
+    assert all(not v.encoding for v in ds.variables.values())
+    target = tmp_path / 'derived.zarr'
+    ds[['height', 'HS', 'n_layers', 'profile_status']].to_zarr(
+        target, mode='w'
+    )
+    back = xr.open_zarr(target)
+    xr.testing.assert_allclose(back['height'].compute(),
+                               ds['height'].compute())
+
+
 def test_adapt_rejects_foreign_layout():
     ds = xr.Dataset({'x': ('location', np.zeros(2))})
     with pytest.raises(ZarrIOLayoutError):

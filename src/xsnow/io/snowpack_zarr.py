@@ -369,6 +369,10 @@ def adapt_snowpack_zarrio(
 
     ds = _attach_profile_status(ds)
     ds.attrs.setdefault('crs', 'EPSG:4326')
+    # the source's Zarr v2 encodings (numcodecs compressor, chunks, units)
+    # would be reused by xarray when writing the adapted data to a store
+    for var in list(ds.variables.values()):
+        var.encoding = {}
 
     if time_chunk and ds['time'].size:
         ds = _regularize_time_chunks(ds, time_chunk)
