@@ -167,7 +167,9 @@ def slf_graincode_to_ICSSG_primary(
             graincodes,
             input_core_dims=[[]],
             output_core_dims=[[]],
-            dask="allowed",
+            # Dask cannot determine the output shape through the labeller and
+            # would otherwise have to materialize the array in full.
+            dask="parallelized",
             vectorize=False,
             output_dtypes=[object],
         )
@@ -210,7 +212,9 @@ def slf_graincode_to_ICSSG_secondary(
             graincodes,
             input_core_dims=[[]],
             output_core_dims=[[]],
-            dask="allowed",
+            # Dask cannot determine the output shape through the labeller and
+            # would otherwise have to materialize the array in full.
+            dask="parallelized",
             vectorize=False,
             output_dtypes=[object],
         )
