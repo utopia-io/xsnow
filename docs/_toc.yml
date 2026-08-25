@@ -55,4 +55,5 @@ parts:
           - file: api/_generated/xsnow.extensions.classification
           - file: api/_generated/xsnow.extensions.hazard_chart
           - file: api/_generated/xsnow.extensions.critical_crack_length
+          - file: api/_generated/xsnow.extensions.profile_block_computation
           - file: api/_generated/xsnow.extensions.season_plot

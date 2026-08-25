@@ -23,7 +23,12 @@ import numpy as np
 
 from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
-from ..utils import get_backend, registry_attrs, require_vars, wrap_like
+from ..utils import registry_attrs, require_vars
+from .profile_block_computation import (
+    apply_profile_block,
+    float_result_dtype,
+    get_array_backend,
+)
 from .critical_crack_length import compute_rc_slope_richter2019
 from .rta import compute_rta
 from .sk38 import (
@@ -90,30 +95,19 @@ def compute_skier_crack_length(mech, xp):
     return l_sk, crack_possible
 
 
-@register_xsnowDataset_method
-def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
-    """
-    Compute the stability index ``sk38_ccl = ccl / l_sk``.
-
-    Returns
-    -------
-    xsnowDataset
-        New dataset with the ``sk38_ccl`` variable attached.
-
-    Notes
-    -----
-    Requires ``density``, ``shear_strength``, ``height``,
-    ``grain_type`` and ``grain_size``.
-    ``0`` = spontaneous failure expected (slab load exceeds strength);
-    ``NaN`` = not computable (topmost layer, skier-penetrated layers,
-    padding, and layers whose slab mechanics are undefined because of
-    missing input data -- a missing value is never reported as stable).
-    """
-    require_vars(ds, ['grain_size'], 'sk38_ccl calculation')
-
-    mech = _prepare_skier_mechanics(ds)
-    xp = mech['xp']
-    grain_size = xp.asarray(ds.data['grain_size'].data)
+def _compute_sk38_ccl_block(
+    density,
+    shear_strength,
+    height,
+    grain_type,
+    grain_size,
+):
+    """Compute SK38-CCL for an eager block of complete profiles."""
+    xp = get_array_backend(density)
+    mech = _prepare_skier_mechanics(
+        density, shear_strength, height, grain_type, xp
+    )
+    grain_size = xp.asarray(grain_size)
 
     ccl = compute_rc_slope_richter2019(
         rho_layer=mech['density'],
@@ -142,7 +136,51 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
     result = xp.where(spontaneous, 0.0, result)
     result = xp.where(mech['penetrated'] & ~spontaneous, xp.nan, result)
     result = xp.where(known, result, xp.nan)
-    result = xp.where(mech['top_layer'] | ~mech['valid'], xp.nan, result)
+    return xp.where(
+        mech['top_layer'] | ~mech['valid'], xp.nan, result
+    )
+
+
+@register_xsnowDataset_method
+def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
+    """
+    Compute the stability index ``sk38_ccl = ccl / l_sk``.
+
+    Returns
+    -------
+    xsnowDataset
+        New dataset with the ``sk38_ccl`` variable attached.
+
+    Notes
+    -----
+    Requires ``density``, ``shear_strength``, ``height``,
+    ``grain_type`` and ``grain_size``.
+    ``0`` = spontaneous failure expected (slab load exceeds strength);
+    ``NaN`` = not computable (topmost layer, skier-penetrated layers,
+    padding, and layers whose slab mechanics are undefined because of
+    missing input data -- a missing value is never reported as stable).
+    """
+    require_vars(ds, ['grain_size'], 'sk38_ccl calculation')
+    require_vars(
+        ds, ['density', 'shear_strength', 'height', 'grain_type'],
+        'skier stability',
+    )
+    density_da = ds.data['density']
+    shear_da = ds.data['shear_strength']
+    height_da = ds.data['height']
+    grain_type_da = ds.data['grain_type']
+    grain_size_da = ds.data['grain_size']
+    result = apply_profile_block(
+        _compute_sk38_ccl_block,
+        density_da,
+        shear_da,
+        height_da,
+        grain_type_da,
+        grain_size_da,
+        output_dtype=float_result_dtype(
+            density_da, shear_da, height_da, grain_size_da
+        ),
+    )
 
     attrs = registry_attrs(
         'sk38_ccl',
@@ -151,9 +189,8 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
         '1',
     )
     attrs['index_cap'] = INDEX_CAP
-    new_xr = ds.data.assign(
-        sk38_ccl=wrap_like(result, mech['height_da'], attrs)
-    )
+    result.attrs = attrs
+    new_xr = ds.data.assign(sk38_ccl=result)
     return ds.__class__(new_xr)
 
 
@@ -188,12 +225,10 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     pure = compute_sk38_ccl(ds)
     index_da = pure['sk38_ccl']
 
-    xp = get_backend(pure)
-    index = xp.asarray(index_da.data)
-    rta_arr = xp.asarray(rta_da.broadcast_like(index_da).data)
-    gated = xp.where(
-        xp.isfinite(index) & (rta_arr < RTA_THRESHOLD),
-        INDEX_CAP, index,
+    rta_da = rta_da.broadcast_like(index_da)
+    gated = index_da.where(
+        ~(np.isfinite(index_da) & (rta_da < RTA_THRESHOLD)),
+        INDEX_CAP,
     )
 
     attrs = registry_attrs(
@@ -204,9 +239,8 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
     attrs['index_cap'] = INDEX_CAP
     attrs['rta_threshold'] = RTA_THRESHOLD
 
-    new_xr = pure.data.assign(
-        sk38_ccl_rta=wrap_like(gated, index_da, attrs)
-    )
+    gated.attrs = attrs
+    new_xr = pure.data.assign(sk38_ccl_rta=gated)
     if 'sk38_ccl' not in ds.data:
         new_xr = new_xr.drop_vars('sk38_ccl')
     return ds.__class__(new_xr)

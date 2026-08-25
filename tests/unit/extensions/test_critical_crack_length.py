@@ -9,6 +9,8 @@ import pytest
 import xarray as xr
 import numpy as np
 import pandas as pd
+import dask.array as da
+from dask.callbacks import Callback
 
 from xsnow import xsnowDataset
 from xsnow.extensions import critical_crack_length  # all methods are now registered on xsnowDataset
@@ -108,3 +110,54 @@ def test_interior_nan_height_raises(analysis_ds):
     padded[0, 0, -1] = np.nan
     ok = xsnowDataset(analysis_ds.data.assign(height=padded))
     assert 'rc_flat' in ok.compute_critical_crack_length().data
+
+
+@pytest.mark.parametrize(
+    'inclination, out_name',
+    [(None, 'rc_flat'), (38.0, 'rc_slope')],
+)
+def test_critical_crack_length_remains_lazy(
+    analysis_ds, inclination, out_name
+):
+    source = analysis_ds
+    if inclination is not None:
+        source = xsnowDataset(source.data.assign(
+            shear_strength=source.data['shear_strength'] * 5,
+            grain_type=(
+                source.data['height'].dims,
+                np.array([[[430.0, 330.0, 330.0, 330.0]]]),
+            ),
+        ))
+
+    expected = source.compute_critical_crack_length(
+        inclination=inclination
+    )[out_name]
+    lazy = xsnowDataset(source.data.chunk({'layer': 2}))
+    started_tasks = []
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        actual = lazy.compute_critical_crack_length(
+            inclination=inclination
+        )[out_name]
+
+    assert started_tasks == []
+    assert isinstance(actual.data, da.Array)
+    assert actual.chunks[-1] == (actual.sizes['layer'],)
+    xr.testing.assert_allclose(actual.compute(), expected)
+
+
+def test_direct_slab_computation_rejects_lazy_arrays_without_computing():
+    values = da.from_array(np.ones((1, 4)), chunks=(1, 2))
+    started_tasks = []
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        with pytest.raises(TypeError, match='eager array blocks'):
+            critical_crack_length.compute_slab_mechanics(
+                values,
+                values,
+                values,
+                values,
+                values,
+                38.0,
+                np,
+            )
+
+    assert started_tasks == []

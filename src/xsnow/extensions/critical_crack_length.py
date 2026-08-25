@@ -20,10 +20,13 @@ from ..core import xsnowDataset
 from ..plugin import register_xsnowDataset_method
 from ..utils import (
     finite_max,
-    get_backend,
     registry_attrs,
     require_vars,
-    wrap_like,
+)
+from .profile_block_computation import (
+    apply_profile_block,
+    float_result_dtype,
+    get_array_backend,
 )
 
 # ---------------------------------------------------------------------------
@@ -37,6 +40,10 @@ A_RICHTER = 4.6e-9       # Richter et al. (2019) parameter "a"
 B_RICHTER = -2.0         # Richter et al. (2019) parameter "b"
 E0 = 5.07e9              # Pa, modulus prefactor in Richter et al. (2019)
 E_EXP = 5.13             # exponent on (rho_slab / rho_ice)
+
+# ---------------------------------------------------------------------------
+# Slab and crack-length physics
+# ---------------------------------------------------------------------------
 
 
 def layer_thickness(height_da):
@@ -167,7 +174,18 @@ def compute_slab_mechanics(density, thickness_vertical, height, grain_type,
     """
     Slab quantities above each layer on a virtual slope, as a dict of
     backend arrays (slope-normal geometry, layer axis last).
+
+    This calculation accepts eager array blocks. Dask-backed datasets must
+    use the registered dataset methods, which schedule it blockwise with a
+    complete layer axis.
     """
+    inputs = (density, thickness_vertical, height, grain_type, shear_strength)
+    if any(hasattr(array, '__dask_graph__') for array in inputs):
+        raise TypeError(
+            "compute_slab_mechanics expects eager array blocks; use the "
+            "xsnowDataset stability methods for Dask-backed data."
+        )
+
     theta = math.radians(inclination)
     density = xp.asarray(density)
     thick_vert = xp.asarray(thickness_vertical)
@@ -335,6 +353,75 @@ def compute_rc_slope_richter2019(
     return rc
 
 
+# ---------------------------------------------------------------------------
+# Array-execution adapter
+# ---------------------------------------------------------------------------
+
+
+def _compute_critical_crack_length_block(
+    density,
+    grain_size,
+    shear_strength,
+    height,
+    thickness,
+    grain_type=None,
+    *,
+    inclination=None,
+):
+    """Connect the xarray gateway to the eager Richter physics functions.
+
+    Each argument is one eager block whose last axis contains every layer.
+    The outer axes may contain any number of profiles from chunks of times,
+    locations, slopes, or other dimensions.
+    """
+    xp = get_array_backend(density)
+
+    if inclination is None:
+        density = xp.asarray(density)
+        grain_size = xp.asarray(grain_size)
+        shear_strength = xp.asarray(shear_strength)
+        height = xp.asarray(height)
+        thickness = xp.asarray(thickness)
+
+        _require_contiguous_layers(height, xp)
+        rho_slab = compute_rho_slab(density, thickness, xp)
+        return compute_rc_flat_richter2019(
+            rho_layer=density,
+            grain_size_m=grain_size,
+            shear_strength_pa=shear_strength,
+            rho_slab=rho_slab,
+            xp=xp,
+        )
+
+    if grain_type is None:
+        raise ValueError(
+            "The slope formulation requires a grain-type array."
+        )
+    mech = compute_slab_mechanics(
+        density,
+        thickness,
+        height,
+        grain_type,
+        shear_strength,
+        inclination,
+        xp,
+    )
+    return compute_rc_slope_richter2019(
+        rho_layer=mech['density'],
+        grain_size_m=xp.asarray(grain_size),
+        shear_strength_pa=mech['tau_p'],
+        tau_g=mech['tau_g'],
+        sigma_n=mech['sigma_n'],
+        h_equiv=mech['h_equiv'],
+        xp=xp,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Registered dataset gateway
+# ---------------------------------------------------------------------------
+
+
 @register_xsnowDataset_method
 def compute_critical_crack_length(
     ds: 'xsnowDataset',
@@ -378,60 +465,32 @@ def compute_critical_crack_length(
         required.append('grain_type')
     require_vars(ds, required, 'critical crack length calculation')
 
-    # Pick NumPy or CuPy depending on where ds.data lives
-    xp = get_backend(ds)
-
     density_da = ds.data['density']
     gsize_da = ds.data['grain_size']
     shear_da = ds.data['shear_strength']
     height_da = ds.data['height']
 
     thick_da = layer_thickness(height_da)  # [m]
+    output_dtype = float_result_dtype(
+        density_da, gsize_da, shear_da, height_da
+    )
 
+    inputs = [density_da, gsize_da, shear_da, height_da, thick_da]
     if inclination is None:
-        # Move data to backend arrays (NumPy or CuPy)
-        rho_layer_arr = xp.asarray(density_da.data)
-        gsize_arr = xp.asarray(gsize_da.data)
-        shear_arr = xp.asarray(shear_da.data)
-        thick_arr = xp.asarray(thick_da.data)
-        _require_contiguous_layers(xp.asarray(height_da.data), xp)
-
-        # Compute density of slab above each layer
-        rho_slab_arr = compute_rho_slab(
-            density=rho_layer_arr,
-            thickness=thick_arr,
-            xp=xp,
-        )
-
-        # Richter et al. (2019) flat-terrain rc
-        rc_arr = compute_rc_flat_richter2019(
-            rho_layer=rho_layer_arr,
-            grain_size_m=gsize_arr,
-            shear_strength_pa=shear_arr,
-            rho_slab=rho_slab_arr,
-            xp=xp,
-        )
         out_name = 'rc_flat'
         default_long_name = 'critical crack length on flat terrain'
     else:
-        mech = compute_slab_mechanics(
-            density_da.data, thick_da.data, height_da.data,
-            ds.data['grain_type'].data, shear_da.data, inclination, xp,
-        )
-        rc_arr = compute_rc_slope_richter2019(
-            rho_layer=mech['density'],
-            grain_size_m=xp.asarray(gsize_da.data),
-            shear_strength_pa=mech['tau_p'],
-            tau_g=mech['tau_g'],
-            sigma_n=mech['sigma_n'],
-            h_equiv=mech['h_equiv'],
-            xp=xp,
-        )
+        inputs.append(ds.data['grain_type'])
         out_name = 'rc_slope'
         default_long_name = 'critical crack length on the slope'
 
-    attrs = registry_attrs(out_name, default_long_name, 'm')
-    new_xr = ds.data.assign(
-        **{out_name: wrap_like(rc_arr, height_da, attrs)}
+    rc_da = apply_profile_block(
+        _compute_critical_crack_length_block,
+        *inputs,
+        output_dtype=output_dtype,
+        kwargs={'inclination': inclination},
     )
+
+    rc_da.attrs = registry_attrs(out_name, default_long_name, 'm')
+    new_xr = ds.data.assign(**{out_name: rc_da})
     return ds.__class__(new_xr)
