@@ -44,6 +44,7 @@ from .base import (
 _PRO_UNIT_RE = re.compile(r"\(([^()]*)\)")
 _PRO_UNIT_VALIDATION_MODES = {"light", "strict"}
 _PRO_UNIT_MAPS_KEY = "_pro_unit_maps_by_file"
+_PRO_NODATA = -999.0  # custom nodata values are a MeteoIO/SMET feature, not SNOWPACK's
 _PRO_INTEGER_VARS = {"element_ID", "grain_type"}
 _PRO_INTEGER_VECTOR_ITEMS = {"SH_at_surface": {0}}
 _PRO_SCIENTIFIC_VARS = {"stress", "viscosity", "temperature_gradient"}
@@ -401,7 +402,7 @@ def _format_compact_pro_float(value: float, scientific: bool = False) -> str:
 def _format_pro_value(var_name: str, value: Any, index: int = 0) -> str:
     """Format one value using SNOWPACK-like PRO precision conventions."""
     if pd.isna(value):
-        return "-999"
+        return str(int(_PRO_NODATA))
     numeric = float(value)
     if var_name in _PRO_INTEGER_VARS or index in _PRO_INTEGER_VECTOR_ITEMS.get(var_name, set()):
         return str(int(round(numeric)))
@@ -1021,8 +1022,9 @@ def _parse_pro_profiles_from_lines(
                 param_code, *data_parts = profile_line.split(',')
                 param_name = code_map_to_use.get(param_code)
                 if param_name:
-                    data_values = data_parts[1:]  # skip declared layer count
-                    profile_dict[param_name] = np.array(data_values, dtype=float)
+                    values = np.array(data_parts[1:], dtype=float)  # skip declared layer count
+                    values[values == _PRO_NODATA] = np.nan
+                    profile_dict[param_name] = values
             except (ValueError, IndexError):
                 parse_error = True
                 logger.error(

@@ -412,6 +412,21 @@ def test_read_pro_raw_varying_layer_counts(tmp_path, synthetic_pro):
         assert actual_count == expected_counts[i]
 
 
+@pytest.mark.synthetic
+def test_read_pro_raw_masks_nodata(tmp_path, synthetic_pro):
+    """SNOWPACK's nodata value is -999.0."""
+    filepath = synthetic_pro.basic(tmp_path, n_layers=3)
+    with open(filepath, "a") as f:
+        f.write("0606,3,0.35,-999.00,-999\n")
+
+    _, profiles = _read_pro_raw(filepath)
+
+    rc = profiles[0]["rc_flat"]
+    assert rc[0] == pytest.approx(0.35)
+    assert np.isnan(rc[1:]).all()
+    assert not np.isnan(profiles[0]["height"]).any()
+
+
 # ============================================================================
 # HELPER FUNCTION TESTS
 # ============================================================================
