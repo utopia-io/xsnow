@@ -12,6 +12,7 @@ import xarray as xr
 
 import xsnow
 from xsnow import read
+from xsnow.io.base import _FloatDtypePlan, _plan_float_dtype
 from xsnow.io.memory import (
     DEFAULT_MEMORY_FRACTION,
     MemoryLimitExceeded,
@@ -32,6 +33,38 @@ def archive_paths(tmp_path):
     ds.to_netcdf(nc_path)
     ds.to_zarr(zarr_path)
     return {"nc": nc_path, "zarr": zarr_path, "nbytes": int(ds.data.nbytes)}
+
+
+@pytest.fixture
+def float_cast_archive_paths(tmp_path, fmt):
+    """Archives of one format with known post-cast payload sizes."""
+    paths = {}
+    sizes = {}
+    for dtype in ("float32", "float64"):
+        ds = xr.Dataset(
+            {"value": (("location", "time"), np.ones((1, 1000), dtype=dtype))},
+            coords={
+                "location": np.array(["A"], dtype="U1"),
+                "time": np.arange(1000, dtype="int64"),
+                "latitude": ("location", np.array([47.0], dtype=dtype)),
+                "longitude": ("location", np.array([12.0], dtype=dtype)),
+                "altitude": ("location", np.array([2500.0], dtype=dtype)),
+            },
+        )
+        if fmt == "nc":
+            path = tmp_path / f"source-{dtype}.nc"
+            ds.to_netcdf(path)
+        else:
+            path = tmp_path / f"source-{dtype}.zarr"
+            ds.to_zarr(path)
+        paths[(dtype, fmt)] = path
+        sizes[(dtype, "float32")] = _plan_float_dtype(
+            ds, "float32"
+        ).estimated_nbytes
+        sizes[(dtype, "float64")] = _plan_float_dtype(
+            ds, "float64"
+        ).estimated_nbytes
+    return {"paths": paths, "sizes": sizes}
 
 
 class TestResolveMemoryLimit:
@@ -269,8 +302,8 @@ class TestReadIntegration:
     ):
         """read() refuses an eager load when its size cannot be verified."""
         monkeypatch.setattr(
-            "xsnow.io.memory.estimate_decoded_nbytes",
-            lambda ds: None,
+            "xsnow.io.base._plan_float_dtype",
+            lambda ds, float_dtype: _FloatDtypePlan(None, 0, False),
         )
         with pytest.raises(MemorySizeUnknown):
             read(archive_paths[fmt], lazy=False, memory_limit="8GB")
@@ -295,3 +328,47 @@ class TestReadIntegration:
             time=slice(None, None, 4),
         )
         assert narrowed is not None
+
+
+@pytest.mark.parametrize("fmt", ["nc", "zarr"])
+class TestFloatDtypeReadBudget:
+    """Explicit eager archive budgets apply to the requested result dtype."""
+
+    def test_upcast_is_checked_against_larger_target(
+        self, float_cast_archive_paths, fmt
+    ):
+        source_size = float_cast_archive_paths["sizes"][("float32", "float32")]
+        target_size = float_cast_archive_paths["sizes"][("float32", "float64")]
+        assert source_size is not None and target_size is not None
+        assert source_size < target_size
+
+        with pytest.raises(MemoryLimitExceeded):
+            read(
+                float_cast_archive_paths["paths"][("float32", fmt)],
+                lazy=False,
+                float_dtype="float64",
+                memory_limit=(source_size + target_size) // 2,
+                unit_validation="light",
+            )
+
+    def test_downcast_can_fit_when_source_dtype_would_not(
+        self, float_cast_archive_paths, fmt
+    ):
+        source_size = float_cast_archive_paths["sizes"][("float64", "float64")]
+        target_size = float_cast_archive_paths["sizes"][("float64", "float32")]
+        assert source_size is not None and target_size is not None
+        assert target_size < source_size
+
+        result = read(
+            float_cast_archive_paths["paths"][("float64", fmt)],
+            lazy=False,
+            float_dtype="float32",
+            memory_limit=(source_size + target_size) // 2,
+            unit_validation="light",
+        )
+
+        assert result is not None
+        assert result.data.nbytes == target_size
+        assert result.data["value"].dtype == np.float32
+        assert result.data["latitude"].dtype == np.float32
+        assert result.data["value"].chunks is None

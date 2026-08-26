@@ -39,6 +39,9 @@ from .base import (
     _sanitize_station_name,
     _handle_duplicate_names,
     _validate_norm_slopes,
+    _apply_float_dtype,
+    _validate_float_dtype,
+    FloatDtypeLike,
 )
 from .memory import (
     MemoryLimitExceeded,
@@ -86,6 +89,7 @@ def read(
     chunks: Optional[Dict[str, int]] = None,
     memory_limit: MemoryLimitLike = "auto",
     norm_slopes: Union[bool, Literal["auto"]] = "auto",
+    float_dtype: FloatDtypeLike = "float32",
     **parser_kwargs: Any
 ) -> Optional[xsnowDataset]:
     """
@@ -164,6 +168,14 @@ def read(
             resulting coords have dimensions `(slope,)`. If usable recognized
             slope metadata is unavailable, normalization preserves the existing
             layout. It warns for `True` or an ambiguous multi-slope layout.
+        float_dtype: Floating-point storage dtype for every source format.
+            `'float32'` (default) casts all float variables and coordinates to
+            single precision at read-in, including geographic coordinates;
+            datetime variables keep their source precision. `'float64'` casts
+            all floating-point values to double precision, while None preserves
+            source dtypes. Dask-backed reads stay lazy. Archive memory guards
+            and automatic mode account for the post-cast size; explicit eager
+            archive reads use bounded conversion chunks for large variables.
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions:
             - `max_layers`: Max layer dimension. `'auto'` (default) uses the
@@ -264,6 +276,7 @@ def read(
     # --- Step 1: Setup ---
     logger = get_logger(__name__, logger=logger)
     _validate_norm_slopes(norm_slopes)
+    _validate_float_dtype(float_dtype)
 
     if n_cpus_use is None:
         cpu_count = os.cpu_count()
@@ -298,6 +311,7 @@ def read(
                 realization_sel=realization_sel,
                 memory_limit=budget_bytes,
                 norm_slopes=norm_slopes,
+                float_dtype=float_dtype,
                 **netcdf_kwargs,
             )
         except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown):
@@ -326,6 +340,7 @@ def read(
                 chunks=chunks,
                 memory_limit=budget_bytes,
                 norm_slopes=norm_slopes,
+                float_dtype=float_dtype,
             )
         except (UnitValidationError, MemoryLimitExceeded, MemorySizeUnknown):
             # See the NetCDF branch: refusals must not degrade to None.
@@ -392,6 +407,7 @@ def read(
         realization_sel,
         logger=logger,
         norm_slopes=norm_slopes,
+        float_dtype=float_dtype,
     )
 
     # Keep the public lazy contract consistent for every text-source result.
