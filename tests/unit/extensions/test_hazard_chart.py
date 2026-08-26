@@ -328,3 +328,39 @@ def test_points_coloured_by_grain_type(reduced):
     face = ax.collections[0].get_facecolor()
     # one point per profile; its driving layer is the DH layer (550)
     assert [to_hex(c) for c in face] == ['#0078ff']
+
+
+class TestLazyInput:
+    """The chart is built from blocks, so a chunked dataset stays lazy."""
+
+    def test_stays_lazy_and_matches_the_eager_result(self, full):
+        chunked = xsnowDataset(full.data.chunk({'location': 1, 'layer': -1}))
+        lazy = HazardChart(chunked).compute_hazard_chart(
+            stability_index='sk38', depth_var='z')
+        assert lazy.data['hc_instability'].chunks is not None
+        eager = HazardChart(full).compute_hazard_chart(
+            stability_index='sk38', depth_var='z')
+        for name in ('hc_instability', 'hc_depth', 'hc_size_estimate'):
+            np.testing.assert_allclose(
+                lazy.data[name].values, eager.data[name].values, equal_nan=True)
+        for name in ('hc_instabilityDrivenBy', 'hc_depthDrivenBy'):
+            np.testing.assert_array_equal(
+                lazy.data[name].values, eager.data[name].values)
+
+    def test_datetag_provenance_stays_lazy(self, reduced):
+        chunked = xsnowDataset(reduced.data.chunk({'location': 1, 'layer': -1}))
+        lazy = HazardChart(chunked).compute_hazard_chart(stability_index='sk38')
+        assert lazy.data['hc_instabilityDrivenBy'].chunks is not None
+        eager = HazardChart(reduced).compute_hazard_chart(stability_index='sk38')
+        np.testing.assert_array_equal(
+            lazy.data['hc_instabilityDrivenBy'].values,
+            eager.data['hc_instabilityDrivenBy'].values)
+
+    def test_grouping_on_a_lazy_dataset(self, reduced):
+        data = reduced.data.assign_coords(
+            region_id=('location', ['AT-07-01']))
+        chunked = xsnowDataset(data.chunk({'location': 1, 'layer': -1}))
+        chart = HazardChart(chunked).compute_hazard_chart(
+            stability_index='sk38', groupby='region_id')
+        assert 'hc_group_id' in chart.data
+        assert np.isfinite(chart.data['hc_group_id'].values).any()

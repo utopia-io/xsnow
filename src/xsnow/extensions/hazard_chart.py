@@ -45,6 +45,7 @@ from xsnow import DatasetDecorator
 from ..core import xsnowDataset
 from ..graincode_converter import GRAIN_COLORS, slf_graincode_to_ICSSG_primary
 from ..plugin import register_xsnowDataset_method
+from .profile_block_computation import apply_profile_block, float_result_dtype
 from ..utils import get_backend, latex_style
 
 # ---------------------------------------------------------------------
@@ -294,67 +295,56 @@ class HazardChart(DatasetDecorator):
                 raise ValueError(
                     f"Both '{index_var}' and '{dvar}' must have layer_dim='{layer_dim}'"
                 )
-            dims = tuple(d for d in si.dims if d != layer_dim) + (layer_dim,)
-            values = xp.asarray(si.transpose(*dims).data)
-            if keep is not None:
-                values = xp.where(xp.asarray(keep), values, np.nan)
-
-            w_idx, valid, d_idx = _select_weak_and_deep(values, side, cls_steps)
-            depths = xp.asarray(ds[dvar].transpose(*dims).data)
-            if str(ds[dvar].attrs.get("positive", "")).lower() == "up":
-                depths = -depths          # e.g. 'z' counts up from the surface
-            depth = xp.where(valid, _take_layer(depths, d_idx), np.nan)
-            point_dims = dims[:-1]
-            # labels are strings, which only exist on the host
-            host = (_to_host(valid), _to_host(w_idx), _to_host(d_idx))
-
-            new_vars = {
-                "hc_instability": (
-                    xp.where(valid, _take_layer(values, w_idx), np.nan),
-                    {"description": "Weakest stability index value", "index": index_var},
-                ),
-                "hc_depth": (
-                    depth,
-                    {
-                        "description": "Depth of the deepest poor-or-worse layer",
-                        "units": ds[dvar].attrs.get("units", "m"),
-                        "positive": "down",
-                        "depth_var": dvar,
-                    },
-                ),
-                "hc_size_estimate": (
-                    xp.where(valid, estimate_avalanche_size(depth, size_estimate), np.nan),
-                    {"units": "1", "long_name": f"avalanche size ({size_estimate})"},
-                ),
-                "hc_instabilityDrivenBy": (
-                    np.where(host[0], labels[host[1]], "") if labels is not None
-                    else xp.where(valid, w_idx, np.nan),
-                    {"description": "Datetag or layer index that drove hc_instability"},
-                ),
-                "hc_depthDrivenBy": (
-                    np.where(host[0], labels[host[2]], "") if labels is not None
-                    else xp.where(valid, d_idx, np.nan),
-                    {"description": "Datetag or layer index that drove hc_depth"},
-                ),
-            }
             gvar = f"{index_var}_gcode_weak"
             if gvar not in ds and "grain_type" in ds:
                 gvar = "grain_type"
-            if gvar in ds:
-                gcodes = xp.asarray(ds[gvar].transpose(*dims).data)
-                new_vars["hc_gcode"] = (
-                    xp.where(valid, _take_layer(gcodes, w_idx), np.nan),
-                    {"units": "Swiss Code F1F2F3",
-                     "description": "Grain code of the weakest layer"},
-                )
+            with_gcode = gvar in ds
+
+            inputs = [si, ds[dvar]] + ([ds[gvar]] if with_gcode else [])
+            label_dtype = labels.dtype if labels is not None else float_result_dtype(si)
+            dtypes = [float_result_dtype(si)] * 3 + [label_dtype] * 2
+            if with_gcode:
+                dtypes.append(float_result_dtype(si))
+            results = apply_profile_block(
+                _hazard_chart_block, *inputs,
+                output_dtype=dtypes,
+                layer_dim=layer_dim,
+                output_core_dims=[[]] * len(dtypes),
+                kwargs={
+                    "side": side, "cls_steps": cls_steps, "labels": labels,
+                    "keep": keep, "size_estimate": size_estimate,
+                    "flip_depth": str(ds[dvar].attrs.get("positive", "")).lower() == "up",
+                    "with_gcode": with_gcode,
+                },
+            )
+            names = ["hc_instability", "hc_depth", "hc_size_estimate",
+                "hc_instabilityDrivenBy", "hc_depthDrivenBy"]
+            if with_gcode:
+                names.append("hc_gcode")
+            attributes = {
+                "hc_instability":
+                    {"description": "Weakest stability index value", "index": index_var},
+                "hc_depth": {
+                    "description": "Depth of the deepest poor-or-worse layer",
+                    "units": ds[dvar].attrs.get("units", "m"),
+                    "positive": "down",
+                    "depth_var": dvar,
+                },
+                "hc_size_estimate":
+                    {"units": "1", "long_name": f"avalanche size ({size_estimate})"},
+                "hc_instabilityDrivenBy":
+                    {"description": "Datetag or layer index that drove hc_instability"},
+                "hc_depthDrivenBy":
+                    {"description": "Datetag or layer index that drove hc_depth"},
+                "hc_gcode": {"units": "Swiss Code F1F2F3",
+                    "description": "Grain code of the weakest layer"},
+            }
 
             new_idx = start_idx + offset
-            coords = {d: ds.coords[d] for d in point_dims if d in ds.coords}
             arrays = {
-                name: xr.DataArray(vals, dims=point_dims, coords=coords)
-                .assign_attrs(attrs)
+                name: result.assign_attrs(attributes[name])
                 .expand_dims(hc_variant=[new_idx])
-                for name, (vals, attrs) in new_vars.items()
+                for name, result in zip(names, results)
             }
             mapping = {}
             if groupby_list:
@@ -362,9 +352,7 @@ class HazardChart(DatasetDecorator):
                 gid, mapping = _unique_labels_to_ids(
                     _compose_group_labels(ds, groupby_list, proto_like=proto)
                 )
-                gid = gid.where(
-                    xr.DataArray(host[0], dims=point_dims, coords=coords)
-                )
+                gid = gid.where(proto.notnull())
                 arrays["hc_group_id"] = gid.assign_attrs(
                     {"description": "Integer group id; see coordinate attrs for mapping"}
                 ).expand_dims(hc_variant=[new_idx])
@@ -1003,6 +991,37 @@ def _argreduce_layer(values: np.ndarray, side: str):
 def _take_layer(values: np.ndarray, idx: np.ndarray) -> np.ndarray:
     xp = _array_backend(values)
     return xp.take_along_axis(values, idx[..., None], -1)[..., 0]
+
+
+def _hazard_chart_block(values, depths, gcodes=None, *, side, cls_steps,
+                        labels=None, keep=None, size_estimate='McClung2009',
+                        flip_depth=False, with_gcode=False):
+    """Reduce one block of complete profiles to the hazard-chart summary.
+
+    The layer axis is last; every output loses it.
+    """
+    xp = _array_backend(values)
+    if keep is not None:
+        values = xp.where(xp.asarray(keep), values, np.nan)
+    if flip_depth:
+        depths = -depths          # e.g. 'z' counts up from the surface
+    weak_idx, valid, deep_idx = _select_weak_and_deep(values, side, cls_steps)
+    depth = xp.where(valid, _take_layer(depths, deep_idx), np.nan)
+    outputs = [
+        xp.where(valid, _take_layer(values, weak_idx), np.nan),
+        depth,
+        xp.where(valid, estimate_avalanche_size(depth, size_estimate), np.nan),
+    ]
+    if labels is not None:
+        host = (_to_host(valid), _to_host(weak_idx), _to_host(deep_idx))
+        outputs += [np.where(host[0], labels[host[1]], ""),
+                    np.where(host[0], labels[host[2]], "")]
+    else:
+        outputs += [xp.where(valid, weak_idx, np.nan),
+                    xp.where(valid, deep_idx, np.nan)]
+    if with_gcode:
+        outputs.append(xp.where(valid, _take_layer(gcodes, weak_idx), np.nan))
+    return tuple(outputs)
 
 
 def _select_weak_and_deep(values: np.ndarray, side: str, cls_steps,
