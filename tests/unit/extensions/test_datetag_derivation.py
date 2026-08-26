@@ -216,3 +216,81 @@ def test_scale_and_explicit_variables():
         daily['hn24'].values,
         2.0 * (plain['hn24'] + plain['rain24']).values, rtol=1e-5,
     )
+
+
+def _gap_season(seed=360, days=200):
+    """A season whose long snowfall gap has a local minimum on its first day."""
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range('2025-10-01', periods=days, freq='D')
+    hn24 = np.zeros(days)
+    rain24 = np.zeros(days)
+    for onset in rng.choice(np.arange(5, days - 5), size=rng.integers(3, 9),
+                            replace=False):
+        for offset, amount in enumerate(rng.uniform(4, 25, rng.integers(1, 4))):
+            if onset + offset < days:
+                hn24[onset + offset] = amount
+    start = rng.integers(20, days - 45)
+    for day in range(start, start + rng.integers(25, 42), int(rng.integers(2, 4))):
+        hn24[day] = rng.uniform(2.0, 8.0)
+    for onset in rng.choice(np.arange(5, days - 3), size=2, replace=False):
+        rain24[onset] = rng.uniform(5, 14)
+    hn24 += rng.uniform(0.0, 1.0, days)
+    frame = pd.DataFrame({'date': dates, 'hn24': hn24, 'rain24': rain24})
+    frame['hn72'] = frame['hn24'].rolling(3).sum()
+    frame['rain72'] = frame['rain24'].rolling(3).sum()
+    return frame
+
+
+@pytest.mark.skipif(not QMAH_SOURCE.is_file(), reason='no qmah checkout')
+@pytest.mark.parametrize('seed', [360, 381, 699, 773, 1140])
+def test_known_divergence_from_qmah_on_the_first_day_of_a_gap(seed):
+    """qmah fills a gap on its own first day; the port never tags that day.
+
+    qmah's "10 mm of snow before the tag" guard reads ``cumsum()[index - 1]``,
+    which for index 0 wraps to the whole-gap total and always passes.
+    """
+    qmah = _qmah_module()
+    weather = _gap_season(seed)
+    expected = set(map(str, qmah.derive_datetags(weather.copy())))
+    actual = set(map(str, dt.derive_datetags(weather.copy())))
+    assert actual < expected                      # only ever tags qmah also has
+    dropped = expected - actual
+    assert len(dropped) == 1
+
+
+def test_rolling_works_on_a_dask_backed_forcing():
+    """resample leaves one chunk per day; the 3-day rolling needs them joined."""
+    forcing = _forcing()
+    lazy = xsnowDataset(forcing.data.chunk({'location': 2, 'time': -1}))
+    daily = dt.daily_precipitation(lazy)
+    assert daily['hn72'].chunks is not None
+    np.testing.assert_allclose(
+        daily['hn72'].compute().values,
+        dt.daily_precipitation(forcing)['hn72'].values,
+        rtol=1e-5, equal_nan=True,
+    )
+
+
+def test_kelvin_without_a_units_attribute():
+    forcing = _forcing()
+    kelvin = forcing.data.copy()
+    kelvin['TA'] = kelvin['TA'] + 273.15
+    kelvin['TA'].attrs.pop('units', None)
+    warm = dt.daily_precipitation(xsnowDataset(kelvin)).compute()
+    plain = dt.daily_precipitation(forcing).compute()
+    np.testing.assert_allclose(warm['hn24'].values, plain['hn24'].values, rtol=1e-5)
+
+
+def test_partial_phase_is_filled_from_the_temperature():
+    forcing = _forcing()
+    partial = forcing.data.copy()
+    phase = xr.zeros_like(partial['PSUM'])
+    phase[:, : phase.sizes['time'] // 2] = np.nan
+    partial['PSUM_PH'] = phase
+    filled = dt.daily_precipitation(xsnowDataset(partial)).compute()
+    assert float(filled['hn24'].max()) > 0.0      # the NaN half is not lost
+
+    orphan = forcing.data.drop_vars('TA')
+    orphan['PSUM_PH'] = phase
+    with pytest.raises(ValueError, match='missing values'):
+        dt.daily_precipitation(xsnowDataset(orphan))

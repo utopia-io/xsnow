@@ -552,7 +552,10 @@ def _fill_snowfall_gaps(wx: pd.DataFrame, tags_snow, extra: Mapping):
             continue
         rising = np.array([False] + list(np.diff(hn24) > 0) + [True])
         minima = np.where(np.diff(rising.astype('int')) > 0)[0]
-        # never tag the first or last day of the gap
+        # Never tag the first or last day of the gap. Index 1 is excluded on
+        # top of that to keep qmah's candidate set; index 0 is excluded where
+        # qmah keeps it, because there qmah's own `forward[index - 1]` guard
+        # below wraps to the whole-gap total and always passes.
         minima = minima[~np.isin(minima, np.array([1, len(hn24) - 1]))]
         minima = minima[(minima > 0) & (minima < len(hn24) - 1)]
         if minima.size == 0:
@@ -627,7 +630,17 @@ def daily_precipitation(
             )
         precip = data[precip_var]
         if phase_var in data:
-            rainfall = precip * data[phase_var]
+            phase = data[phase_var]
+            if phase.isnull().any():
+                if 'TA' not in data:
+                    raise ValueError(
+                        f"The precipitation phase {phase_var!r} has missing "
+                        "values and the dataset carries no air temperature to "
+                        "fill them from."
+                    )
+                phase = phase.fillna(
+                    xr.where(data['TA'] >= ta_threshold, 1.0, 0.0))
+            rainfall = precip * phase
             snowfall = precip - rainfall
         else:
             if 'TA' not in data:
@@ -637,13 +650,17 @@ def daily_precipitation(
                     "snowfall from rainfall."
                 )
             temperature = data['TA']
-            if str(temperature.attrs.get('units', '')).strip() == 'K':
+            units = str(temperature.attrs.get('units', '')).strip()
+            if units == 'K' or (not units and float(temperature.min()) > 100.0):
                 temperature = temperature - 273.15
             snowfall = precip.where(temperature < ta_threshold, 0.0)
             rainfall = precip.where(temperature >= ta_threshold, 0.0)
 
     hn24 = (snowfall * scale).resample(time='1D').sum()
     rain24 = (rainfall * scale).resample(time='1D').sum()
+    if hn24.chunks is not None:      # resample leaves one chunk per day
+        hn24 = hn24.chunk({'time': -1})
+        rain24 = rain24.chunk({'time': -1})
     return xr.Dataset({
         'hn24': hn24,
         'rain24': rain24,
@@ -732,6 +749,12 @@ def weather_datetags(
             'hn72': np.asarray(summary['hn72'].values, dtype='float64'),
             'rain72': np.asarray(summary['rain72'].values, dtype='float64'),
         })
+        if frame[['hn24', 'rain24']].isna().all().any():
+            logger.warning(
+                "weather_datetags: %s/%s has no precipitation at all over %d "
+                "location(s); it gets no datetags",
+                level1, level2, members.size,
+            )
         tags = derive_datetags(
             frame,
             human_datetags=human_datetags,
