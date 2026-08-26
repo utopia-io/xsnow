@@ -8,8 +8,15 @@ import xarray as xr
 
 from xsnow import read, to_netcdf, to_zarr
 from xsnow.combiners import _nan_like
-from xsnow.io.base import GEO_COORD_NAMES, _apply_float_dtype
+from xsnow.io.base import (
+    _materialize_eager_archive,
+    _plan_float_dtype,
+    _apply_float_dtype,
+)
 from xsnow.io.smet import read_smet
+
+
+GEO_COORD_NAMES = ("latitude", "longitude", "altitude")
 
 
 def _synthetic_dataset() -> xr.Dataset:
@@ -36,15 +43,16 @@ def _synthetic_dataset() -> xr.Dataset:
 
 class TestApplyFloatDtype:
     def test_casts_float64_vars_and_coords(self):
-        result = _apply_float_dtype(_synthetic_dataset(), "float32")
+        source = _synthetic_dataset()
+        result = _apply_float_dtype(source, "float32")
 
         assert result["density"].dtype == np.float32
         assert result["temperature"].dtype == np.float32
         assert result["z"].dtype == np.float32
         assert result["profile_status"].dtype == np.int8
-        assert result["time"].dtype.kind == "M"
+        assert result["time"].dtype == source["time"].dtype
         for name in GEO_COORD_NAMES:
-            assert result[name].dtype == np.float64
+            assert result[name].dtype == np.float32
 
     def test_none_is_noop(self):
         ds = _synthetic_dataset()
@@ -60,12 +68,89 @@ class TestApplyFloatDtype:
         assert ds["density"].dtype == np.float64
 
     def test_float64_upcasts(self):
-        result = _apply_float_dtype(_synthetic_dataset(), "float64")
+        source = _apply_float_dtype(_synthetic_dataset(), "float32")
+        result = _apply_float_dtype(source, "float64")
         assert result["temperature"].dtype == np.float64
+        for name in GEO_COORD_NAMES:
+            assert result[name].dtype == np.float64
 
     def test_invalid_dtype_raises(self):
         with pytest.raises(ValueError, match="float_dtype"):
             _apply_float_dtype(_synthetic_dataset(), "int32")
+
+
+class TestEagerArchiveMaterialization:
+    def test_plan_uses_post_cast_dtypes_without_materializing(self):
+        ds = _synthetic_dataset()
+        plan = _plan_float_dtype(ds, "float32")
+
+        expected = _apply_float_dtype(ds, "float32").nbytes
+        assert plan.estimated_nbytes == expected
+        assert plan.requires_cast
+        assert plan.largest_source_cast_nbytes == ds["density"].nbytes
+
+    def test_plan_does_not_materialize_file_backed_data(self, tmp_path):
+        path = tmp_path / "source.nc"
+        _synthetic_dataset().drop_vars("location").to_netcdf(path)
+        opened = xr.open_dataset(path, chunks=None)
+        try:
+            _plan_float_dtype(opened, "float32")
+            assert not any(var._in_memory for var in opened.data_vars.values())
+        finally:
+            opened.close()
+
+    def test_small_variables_keep_fast_non_dask_path(
+        self, monkeypatch, tmp_path
+    ):
+        path = tmp_path / "source.nc"
+        _synthetic_dataset().to_netcdf(path)
+        ds = xr.open_dataset(path, chunks=None)
+        original_chunk = xr.Dataset.chunk
+        chunk_calls = []
+
+        def record_chunk(self, *args, **kwargs):
+            chunk_calls.append((args, kwargs))
+            return original_chunk(self, *args, **kwargs)
+
+        monkeypatch.setattr(xr.Dataset, "chunk", record_chunk)
+        try:
+            result = _materialize_eager_archive(
+                ds,
+                "float32",
+                memory_budget_bytes=None,
+                source="test dataset",
+            )
+
+            assert not chunk_calls
+            assert result is ds
+            assert result["density"].dtype == np.float32
+            assert result["density"].chunks is None
+        finally:
+            ds.close()
+
+    def test_large_variable_uses_bounded_chunks_but_returns_eager(
+        self, monkeypatch
+    ):
+        ds = _synthetic_dataset()
+        original_chunk = xr.Dataset.chunk
+        chunk_calls = []
+
+        def record_chunk(self, *args, **kwargs):
+            chunk_calls.append((args, kwargs))
+            return original_chunk(self, *args, **kwargs)
+
+        monkeypatch.setattr(xr.Dataset, "chunk", record_chunk)
+        result = _materialize_eager_archive(
+            ds,
+            "float32",
+            memory_budget_bytes=None,
+            source="test dataset",
+            cast_chunk_bytes=1,
+        )
+
+        assert chunk_calls
+        assert result["density"].dtype == np.float32
+        assert result["density"].chunks is None
 
 
 class TestNanLike:
@@ -93,11 +178,13 @@ class TestReadFloatDtype:
         assert float_vars
         assert all(dt == np.float32 for dt in float_vars.values())
         for name in GEO_COORD_NAMES:
-            assert ds.data[name].dtype == np.float64
+            assert ds.data[name].dtype == np.float32
 
     def test_none_preserves_source(self, gridded_pros_dir):
         ds = read(gridded_pros_dir / "VIR1A4.smet", float_dtype=None)
         assert ds.data["TA"].dtype == np.float64
+        for name in GEO_COORD_NAMES:
+            assert ds.data[name].dtype == np.float64
 
     def test_float64_upcasts_pro(self, gridded_pros_dir):
         ds = read(
@@ -106,6 +193,8 @@ class TestReadFloatDtype:
             float_dtype="float64",
         )
         assert ds.data["density"].dtype == np.float64
+        for name in GEO_COORD_NAMES:
+            assert ds.data[name].dtype == np.float64
 
     def test_merged_pro_smet_is_float32(self, gridded_pros_dir):
         ds = read(
@@ -126,10 +215,11 @@ class TestReadFloatDtype:
     def test_read_smet_standalone(self, gridded_pros_dir):
         ds = read_smet(gridded_pros_dir / "VIR1A4.smet")
         assert ds["TA"].dtype == np.float32
-        assert ds["latitude"].dtype == np.float64
+        assert ds["latitude"].dtype == np.float32
 
         ds64 = read_smet(gridded_pros_dir / "VIR1A4.smet", float_dtype=None)
         assert ds64["TA"].dtype == np.float64
+        assert ds64["latitude"].dtype == np.float64
 
 
 @pytest.mark.real_data
@@ -142,7 +232,9 @@ class TestArchiveFloatDtype:
         path = tmp_path / "rt.nc"
         to_netcdf(float64_archive_source, path)
 
-        assert read(path).data["TA"].dtype == np.float32
+        default = read(path)
+        assert default.data["TA"].dtype == np.float32
+        assert default.data["latitude"].dtype == np.float32
         assert read(path, float_dtype=None).data["TA"].dtype == np.float64
         assert read(path, lazy=False).data["TA"].dtype == np.float32
 

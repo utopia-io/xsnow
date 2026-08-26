@@ -26,6 +26,7 @@ from ..utils import get_logger
 from .base import (
     _apply_norm_slopes,
     _apply_float_dtype,
+    _materialize_eager_archive,
     _promote_slope_metadata_coords,
     _resolve_archive_lazy,
     FloatDtypeLike,
@@ -34,7 +35,6 @@ from .memory import (
     MemoryLimitExceeded,
     MemoryLimitLike,
     MemorySizeUnknown,
-    check_memory_budget,
     resolve_memory_limit,
 )
 
@@ -88,8 +88,9 @@ def _read_zarr(
             dimension. False preserves per-location dimensions.
         float_dtype: Floating-point storage dtype; see `read()`. None
             preserves stored dtypes. On Dask-backed opens the cast is lazy
-            and applied before the memory guard; with ``lazy=False`` it is
-            applied after loading.
+            and applied before the memory guard. Explicit eager reads check
+            the post-cast size before allocating and use bounded conversion
+            chunks only when an individual source variable is large.
 
     Returns:
         xsnowDataset with the loaded data, or None if loading fails
@@ -177,23 +178,14 @@ def _read_zarr(
             )
 
         if not resolved_lazy:
-            # Check the narrowed selection, not the whole archive, and check it
-            # before the allocation an OOM kill would make uncatchable.
-            check_memory_budget(
+            ds_raw = _materialize_eager_archive(
                 ds_raw,
-                budget_bytes,
-                raise_on_exceed=True,
-                raise_on_unknown=True,
+                float_dtype,
+                memory_budget_bytes=budget_bytes,
                 source=f"Zarr archive {path}",
                 logger=logger,
             )
-            ds_raw.load()
             opened.close()
-
-        # Non-Dask opens materialize on .astype(), so cast only after the
-        # guarded load
-        if not open_lazily:
-            ds_raw = _apply_float_dtype(ds_raw, float_dtype)
 
         # Wrap in xsnowDataset
         return xsnowDataset(ds_raw)
