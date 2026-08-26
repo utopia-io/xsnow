@@ -12,7 +12,7 @@ import os
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Union, Any, Literal, Optional, List, Sequence, overload
+from typing import Any, Literal, Optional, List, Sequence, Union, overload
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,7 @@ import warnings
 
 from .core import xsnowDataset
 from .plugin import register_xsnowDataset_method
+from .registry import registry
 
 LEVEL_PREFIX = {
     logging.DEBUG: "[d]",
@@ -153,47 +154,40 @@ def get_logger(
     return log
 
 
-def get_backend(array_like: Union[xsnowDataset, xr.Dataset, xr.DataArray]) -> Any:
-    """
-    Determines the appropriate numerical backend (NumPy or CuPy) for a given object.
+def require_vars(ds: xsnowDataset, names: Sequence[str], context: str) -> None:
+    """Raise ``ValueError`` if ``ds`` is empty or misses any of ``names``."""
+    if ds.data is None:
+        raise ValueError("Cannot compute on an empty dataset.")
+    missing = [name for name in names if name not in ds.data]
+    if missing:
+        formatted = ", ".join(repr(name) for name in missing)
+        raise ValueError(
+            f"Missing required variables for {context}: {formatted}"
+        )
 
-    This function inspects the underlying data in an xarray object to see if it's
-    a CuPy array (on a GPU) or a NumPy array (on the CPU) and returns the
-    corresponding module.
 
-    Args:
-        array_like: An xsnowDataset, xarray.Dataset, or xarray.DataArray.
+def registry_attrs(name: str, default_long_name: str,
+                   default_units: str) -> dict:
+    """Variable attrs from the registry with a fallback."""
+    if name in registry:
+        entry = registry[name]
+        return {
+            'long_name': entry.get('long_name', default_long_name),
+            'units': entry.get('xsnow_units', default_units),
+            'standard_name': entry.get('standard_name', name),
+        }
+    return {
+        'long_name': default_long_name,
+        'units': default_units,
+        'standard_name': name,
+    }
 
-    Returns:
-        The `numpy` or `cupy` module.
-    """
-    # If it's an xsnowDataset, get the underlying xarray.Dataset
-    if isinstance(array_like, xsnowDataset):
-        if array_like.data is None:
-            return np
-        data = array_like.data
-    else:
-        data = array_like
 
-    # Find the first data variable to inspect
-    if isinstance(data, xr.Dataset):
-        first_var_name = next(iter(data.data_vars), None)
-        if first_var_name is None:
-            return np # No data variables, default to numpy
-        array = data[first_var_name].data
-    else: # It's a DataArray
-        array = data.data
+def finite_max(a: Any, xp: Any, axis: int = -1) -> Any:
+    """Maximum over the finite entries of ``a``; NaN where there are none."""
+    m = xp.max(xp.where(xp.isfinite(a), a, -xp.inf), axis=axis)
+    return xp.where(xp.isfinite(m), m, xp.nan)
 
-    # Check for the 'device' attribute, which is characteristic of a CuPy array
-    if hasattr(array, 'device'):
-        try:
-            import cupy
-            return cupy
-        except ImportError:
-            # This case is unlikely if a cupy array exists, but handled for safety
-            return np
-            
-    return np
 
 @register_xsnowDataset_method
 def print(*values: Any, force_details: bool = False, **kwargs: Any) -> None:
