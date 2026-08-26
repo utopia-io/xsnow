@@ -23,6 +23,9 @@ from .core import xsnowDataset
 from .plugin import register_xsnowDataset_method
 from .registry import registry
 
+#: CF coordinate reference system every xsnow dataset is built on.
+DEFAULT_CRS = 'EPSG:4326'
+
 LEVEL_PREFIX = {
     logging.DEBUG: "[d]",
     logging.INFO: "[i]",
@@ -225,6 +228,39 @@ def registry_attrs(name: str, default_long_name: str,
         'units': default_units,
         'standard_name': name,
     }
+
+
+def attach_registry_attrs(
+    ds: xr.Dataset,
+    *,
+    units: bool = True,
+    long_name: bool = True,
+    variables: bool = False,
+) -> xr.Dataset:
+    """Fill in missing registry attrs, leaving existing ones untouched.
+
+    ``variables=True`` covers coordinates as well as data variables.
+    Datetime variables never get a ``units`` attr: CF encoding raises on
+    the conflict with its own time units.
+    """
+    names = ds.variables if variables else ds.data_vars
+    for name_hashable in list(names):
+        name = str(name_hashable)
+        entry = registry.get(name)
+        if not entry:
+            continue
+        attrs = ds[name].attrs
+        attrs.setdefault('standard_name', entry.get('standard_name', name))
+        if units and not np.issubdtype(ds[name].dtype, np.datetime64):
+            attrs.setdefault(
+                'units', entry.get('xsnow_units', entry.get('si_units', '1'))
+            )
+        if long_name:
+            attrs.setdefault(
+                'long_name',
+                entry.get('standard_name', name).replace('_', ' '),
+            )
+    return ds
 
 
 def wrap_like(arr: Any, template_da: xr.DataArray,

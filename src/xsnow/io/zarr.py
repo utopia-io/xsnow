@@ -49,14 +49,16 @@ from ..units import (
     normalize_unit,
     validate_xsnow_unit_attrs,
 )
-from ..utils import get_logger
+from ..utils import DEFAULT_CRS, attach_registry_attrs, get_logger
 
 from .base import (
     _apply_norm_slopes,
     _apply_float_dtype,
+    _open_any_as_text,
     _promote_slope_metadata_coords,
     _resolve_archive_lazy,
     FloatDtypeLike,
+    GEO_COORD_NAMES,
 )
 from .memory import (
     MemoryLimitExceeded,
@@ -88,6 +90,31 @@ class ZarrIOLayoutError(RuntimeError):
 # --------------------------------------------------------------------------- #
 #                       CORE: THE XSNOW ARCHIVE LAYOUT                         #
 # --------------------------------------------------------------------------- #
+
+
+def _open_zarr_store(
+    path: Union[str, Path],
+    *,
+    chunks: Any,
+    group: Optional[str] = None,
+) -> xr.Dataset:
+    """Open a Zarr store, using consolidated metadata only where the store
+    carries it, and muting zarr's complaints about SNOWPACK's side files."""
+    path = Path(path)
+    consolidated = (
+        None
+        if (path / '.zmetadata').exists() or (path / 'zarr.json').exists()
+        else False
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='.*station_index.json.*')
+        warnings.filterwarnings('ignore', message='.*_WRITE_INCOMPLETE.*')
+        return xr.open_zarr(
+            str(path),
+            group=group,
+            chunks=chunks,
+            consolidated=consolidated,
+        )
 
 
 def _read_zarr(
@@ -189,9 +216,6 @@ def _read_zarr(
         # index and arithmetic operations stay lazy; an eager request is
         # honoured by the guarded load below.
         open_lazily = lazy is not False
-        consolidated = (
-            None if (path / '.zmetadata').exists() or has_zarr_v3 else False
-        )
         if flavour == 'snowpack':
             opened = open_snowpack_zarrio(path, chunks=chunks)
         else:
@@ -199,9 +223,7 @@ def _read_zarr(
                 (chunks if chunks is not None else "auto")
                 if open_lazily else None
             )
-            opened = xr.open_zarr(
-                path, chunks=open_chunks, consolidated=consolidated
-            )
+            opened = _open_zarr_store(path, chunks=open_chunks)
             if flavour == 'auto' and is_snowpack_zarrio(opened):
                 opened.close()
                 flavour = 'snowpack'
@@ -444,7 +466,7 @@ def _slot_labels(
     if station_index is not None:
         if isinstance(station_index, (str, Path)):
             mapping: dict[str, int] = {}
-            with open(station_index, 'r', encoding='utf-8') as fh:
+            with _open_any_as_text(station_index) as fh:
                 for line in fh:
                     parts = line.split()
                     if not parts or parts[0].startswith('#'):
@@ -465,22 +487,11 @@ def open_snowpack_zarrio(
     chunks: Any = None,
     group: Optional[str] = None,
 ) -> xr.Dataset:
-    """Open a ZarrIO archive (or one of its groups) lazily, without the
-    consolidated-metadata fallback warning and zarr's complaint about the
-    plugin's ``station_index.json`` side file."""
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            'ignore', message='.*station_index.json.*'
-        )
-        warnings.filterwarnings(
-            'ignore', message='.*_WRITE_INCOMPLETE.*'
-        )
-        return xr.open_zarr(
-            str(path),
-            group=group,
-            consolidated=False,
-            chunks={} if chunks is None else chunks,
-        )
+    """Open a ZarrIO archive (or one of its groups) lazily, at the store's
+    own chunking."""
+    return _open_zarr_store(
+        path, chunks={} if chunks is None else chunks, group=group
+    )
 
 
 def _decode_labels(values: np.ndarray) -> np.ndarray:
@@ -571,8 +582,7 @@ def _slot_terrain(
     """
     out = {
         name: np.full(n_slots, np.nan)
-        for name in ('inclination', 'azimuth',
-                     'latitude', 'longitude', 'altitude')
+        for name in ('inclination', 'azimuth', *GEO_COORD_NAMES)
     }
     out['inclination'][sector == 0] = 0.0
     out['azimuth'][sector == 0] = 0.0
@@ -650,14 +660,6 @@ def _convert_to_registry_units(ds: xr.Dataset) -> xr.Dataset:
                 f"Cannot convert archive variable {name!r} from "
                 f"{source!r} to xsnow units {target!r}: {exc}"
             ) from exc
-    return ds
-
-
-def _attach_registry_attrs(ds: xr.Dataset) -> xr.Dataset:
-    for name in ds.data_vars:
-        entry = registry.get(name)
-        if entry and 'standard_name' in entry:
-            ds[name].attrs.setdefault('standard_name', entry['standard_name'])
     return ds
 
 
@@ -759,7 +761,7 @@ def adapt_snowpack_zarrio(
     # xsnow's slope normalization fold the sectors together
     have_slopes = bool(np.isfinite(terrain['inclination'][written]).all())
     have_geo = any(np.isfinite(terrain[n][written]).any()
-                   for n in ('latitude', 'longitude', 'altitude'))
+                   for n in GEO_COORD_NAMES)
     parts = []
     for k in sorted(set(sector[written])):
         idx = np.flatnonzero((sector == k) & written)
@@ -799,24 +801,15 @@ def adapt_snowpack_zarrio(
 
     ds = ds.rename({k: v for k, v in _ARCHIVE_RENAMES.items() if k in ds})
     ds = _convert_to_registry_units(ds)
-    ds = _attach_registry_attrs(ds)
+    ds = attach_registry_attrs(ds, units=False, long_name=False)
 
     if 'layer' in ds.dims:
         ds = _finish_layer_axis(ds, deepest, layers, mask_stale_layers, logger)
-        if 'height' in ds and 'HS' in ds:
-            z = ds['height'] - ds['HS']
-            entry = registry.get('z', {})
-            z.attrs = {
-                'long_name': entry.get('long_name',
-                                       'Depth Below Snow Surface'),
-                'units': entry.get('xsnow_units', 'm'),
-                'standard_name': entry.get('standard_name', 'depth'),
-                'positive': 'up',
-            }
-            ds = ds.assign_coords(z=z)
+        if 'height' in ds:
+            ds = xsnowDataset(ds).compute_z_depth().data
 
     ds = _attach_profile_status(ds)
-    ds.attrs.setdefault('crs', 'EPSG:4326')
+    ds.attrs.setdefault('crs', DEFAULT_CRS)
     # the source's Zarr v2 encodings (numcodecs compressor, chunks, units)
     # would be reused by xarray when writing the adapted data to a store
     for var in list(ds.variables.values()):

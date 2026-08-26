@@ -21,7 +21,7 @@ import xarray as xr
 from ..core import xsnowDataset
 from ..registry import registry
 from ..selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
-from ..utils import get_logger
+from ..utils import DEFAULT_CRS, attach_registry_attrs, get_logger
 
 from .base import (
     _apply_norm_slopes,
@@ -800,37 +800,20 @@ def _merge_and_finalize(
     if not final_xr_dataset.attrs:
         final_xr_dataset.attrs = {
             'Conventions': 'CF-1.8',
-            'crs': 'EPSG:4326'
+            'crs': DEFAULT_CRS
         }
 
     # Add variable metadata
-    for var_name_hashable in list(final_xr_dataset.variables):
+    final_xr_dataset = attach_registry_attrs(final_xr_dataset, variables=True)
+    for var_name_hashable in list(final_xr_dataset.data_vars):
         var_name = str(var_name_hashable)
-        if reg_entry := registry.get(var_name):
-            final_xr_dataset[var_name].attrs.setdefault(
-                'standard_name',
-                reg_entry.get('standard_name', 'unknown'),
-            )
-            # no 'units' attr on datetime vars: CF encoding raises on conflict
-            var_dtype = final_xr_dataset[var_name].dtype
-            if not np.issubdtype(var_dtype, np.datetime64):
-                final_xr_dataset[var_name].attrs.setdefault(
-                    'units',
-                    reg_entry.get('xsnow_units', reg_entry.get('si_units', 'unknown')),
-                )
-            final_xr_dataset[var_name].attrs.setdefault(
-                'long_name',
-                reg_entry.get('standard_name', var_name).replace('_', ' '),
-            )
-        else:
-            # Set defaults for variables not in registry if not already set
-            if var_name in final_xr_dataset.data_vars:
-                if 'units' not in final_xr_dataset[var_name].attrs:
-                    final_xr_dataset[var_name].attrs['units'] = '1'
-                if 'standard_name' not in final_xr_dataset[var_name].attrs:
-                    final_xr_dataset[var_name].attrs['standard_name'] = var_name
-                if 'long_name' not in final_xr_dataset[var_name].attrs:
-                    final_xr_dataset[var_name].attrs['long_name'] = var_name.replace('_', ' ')
+        if var_name in registry:
+            continue
+        # Set defaults for variables not in registry if not already set
+        attrs = final_xr_dataset[var_name].attrs
+        attrs.setdefault('units', '1')
+        attrs.setdefault('standard_name', var_name)
+        attrs.setdefault('long_name', var_name.replace('_', ' '))
 
     # Normalize slope coordinates
     try:
