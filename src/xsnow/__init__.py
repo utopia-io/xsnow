@@ -10,7 +10,7 @@ from .io.memory import (
     check_memory_budget,
 )
 from .io.convert import ArchiveAppendError, build_archive
-from .io.snowpack_zarr import ZarrIOLayoutError, read_snowpack_archives
+from .io.zarr import ZarrIOLayoutError, read_snowpack_archives
 from .plugin import register_xsnowDataset_method
 from .registry import registry
 from .sample_data import single_profile, single_profile_timeseries

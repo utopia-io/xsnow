@@ -11,7 +11,7 @@ import zarr
 from dask.callbacks import Callback
 
 import xsnow
-from xsnow.io.snowpack_zarr import (
+from xsnow.io.zarr import (
     ZarrIOLayoutError,
     adapt_snowpack_zarrio,
     is_snowpack_zarrio,

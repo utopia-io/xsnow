@@ -55,8 +55,12 @@ from .merge import _resolve_filepaths, _merge_and_finalize
 from .pro import _read_pro_files_eager, _read_pro_files_lazy, to_pro
 from .smet import _read_smet_files, read_smet, to_smet
 from .netcdf import _read_xsnow_netcdf, to_netcdf
-from .zarr import _read_zarr, to_zarr
-from .snowpack_zarr import ZarrIOLayoutError, read_snowpack_archives
+from .zarr import (
+    _read_zarr,
+    to_zarr,
+    ZarrIOLayoutError,
+    read_snowpack_archives,
+)
 
 
 __all__ = [
