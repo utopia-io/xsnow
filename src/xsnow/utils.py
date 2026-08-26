@@ -157,51 +157,6 @@ def get_logger(
     return log
 
 
-def get_backend(array_like: Union[xsnowDataset, xr.Dataset, xr.DataArray]) -> Any:
-    """
-    Determines the appropriate numerical backend (NumPy or CuPy) for a given object.
-
-    This function inspects the underlying data in an xarray object to see if it's
-    a CuPy array (on a GPU) or a NumPy array (on the CPU) and returns the
-    corresponding module.
-
-    Args:
-        array_like: An xsnowDataset, xarray.Dataset, or xarray.DataArray.
-
-    Returns:
-        The `numpy` or `cupy` module.
-    """
-    # If it's an xsnowDataset, get the underlying xarray.Dataset
-    if isinstance(array_like, xsnowDataset):
-        if array_like.data is None:
-            return np
-        data = array_like.data
-    else:
-        data = array_like
-
-    # Find the first data variable to inspect
-    if isinstance(data, xr.Dataset):
-        first_var_name = next(iter(data.data_vars), None)
-        if first_var_name is None:
-            return np # No data variables, default to numpy
-        array = data[first_var_name].data
-    else: # It's a DataArray
-        array = data.data
-
-    # CuPy arrays live in the 'cupy' package. (NumPy >= 2.0 arrays also
-    # expose a 'device' attribute, so the type's module is the reliable
-    # signal.)
-    if type(array).__module__.split('.')[0] == 'cupy':
-        try:
-            import cupy
-            return cupy
-        except ImportError:
-            # This case is unlikely if a cupy array exists, but handled for safety
-            return np
-
-    return np
-
-
 def require_vars(ds: xsnowDataset, names: Sequence[str], context: str) -> None:
     """Raise ``ValueError`` if ``ds`` is empty or misses any of ``names``."""
     if ds.data is None:
@@ -261,14 +216,6 @@ def attach_registry_attrs(
                 entry.get('standard_name', name).replace('_', ' '),
             )
     return ds
-
-
-def wrap_like(arr: Any, template_da: xr.DataArray,
-              attrs: dict) -> xr.DataArray:
-    """Wrap a backend array into a DataArray shaped like ``template_da``."""
-    da = xr.DataArray(arr, dims=template_da.dims, coords=template_da.coords)
-    da.attrs = attrs
-    return da
 
 
 def finite_max(a: Any, xp: Any, axis: int = -1) -> Any:

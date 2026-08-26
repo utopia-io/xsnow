@@ -9,12 +9,10 @@ import pytest
 import xarray as xr
 
 import xsnow.extensions.datetags  # noqa: F401
+from dask.callbacks import Callback
 from xsnow import xsnowDataset
-from xsnow.extensions.hazard_chart import (
-    HazardChart,
-    _array_backend,
-    _to_host,
-)
+from xsnow.extensions import get_array_backend
+from xsnow.extensions.hazard_chart import HazardChart, _to_host
 
 T1, T2 = np.datetime64('2025-11-01', 'ns'), np.datetime64('2025-12-06', 'ns')
 NAT = np.datetime64('NaT', 'ns')
@@ -180,8 +178,8 @@ class TestGrouping:
 
 class TestArrayBackend:
     def test_numpy_arrays_stay_on_numpy(self):
-        assert _array_backend(np.zeros(3)) is np
-        assert _array_backend(0.5) is np
+        assert get_array_backend(np.zeros(3)) is np
+        assert get_array_backend(0.5) is np
 
     def test_cupy_arrays_dispatch_to_cupy(self):
         cupy = pytest.importorskip('cupy')
@@ -190,7 +188,7 @@ class TestArrayBackend:
             pass
 
         FakeDeviceArray.__module__ = 'cupy._core.core'
-        assert _array_backend(FakeDeviceArray()) is cupy
+        assert get_array_backend(FakeDeviceArray()) is cupy
 
     def test_to_host_returns_numpy(self):
         values = np.arange(4)
@@ -216,8 +214,7 @@ def test_backend_stays_within_cupy_api(reduced, full, monkeypatch):
 
     from xsnow.extensions import hazard_chart
 
-    monkeypatch.setattr(hazard_chart, 'get_backend', lambda ds: CupySurface())
-    monkeypatch.setattr(hazard_chart, '_array_backend',
+    monkeypatch.setattr(hazard_chart, 'get_array_backend',
                         lambda values: CupySurface())
 
     out = HazardChart(full).compute_hazard_chart(
@@ -330,13 +327,26 @@ def test_points_coloured_by_grain_type(reduced):
     assert [to_hex(c) for c in face] == ['#0078ff']
 
 
+def _chunk_data_vars(xs, **chunks):
+    """Chunk the data variables only, as xsnow.read leaves the small
+    coordinates in numpy."""
+    data = xs.data.copy()
+    for name, var in xs.data.data_vars.items():
+        data[name] = var.chunk({d: c for d, c in chunks.items()
+                                if d in var.dims})
+    return xsnowDataset(data)
+
+
 class TestLazyInput:
     """The chart is built from blocks, so a chunked dataset stays lazy."""
 
     def test_stays_lazy_and_matches_the_eager_result(self, full):
-        chunked = xsnowDataset(full.data.chunk({'location': 1, 'layer': -1}))
-        lazy = HazardChart(chunked).compute_hazard_chart(
-            stability_index='sk38', depth_var='z')
+        chunked = _chunk_data_vars(full, location=1, layer=-1)
+        started = []
+        with Callback(pretask=lambda key, *_: started.append(key)):
+            lazy = HazardChart(chunked).compute_hazard_chart(
+                stability_index='sk38', depth_var='z')
+        assert started == []
         assert lazy.data['hc_instability'].chunks is not None
         eager = HazardChart(full).compute_hazard_chart(
             stability_index='sk38', depth_var='z')
@@ -348,8 +358,12 @@ class TestLazyInput:
                 lazy.data[name].values, eager.data[name].values)
 
     def test_datetag_provenance_stays_lazy(self, reduced):
-        chunked = xsnowDataset(reduced.data.chunk({'location': 1, 'layer': -1}))
-        lazy = HazardChart(chunked).compute_hazard_chart(stability_index='sk38')
+        chunked = _chunk_data_vars(reduced, location=1, layer=-1)
+        started = []
+        with Callback(pretask=lambda key, *_: started.append(key)):
+            lazy = HazardChart(chunked).compute_hazard_chart(
+                stability_index='sk38')
+        assert started == []
         assert lazy.data['hc_instabilityDrivenBy'].chunks is not None
         eager = HazardChart(reduced).compute_hazard_chart(stability_index='sk38')
         np.testing.assert_array_equal(

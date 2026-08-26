@@ -45,8 +45,12 @@ from xsnow import DatasetDecorator
 from ..core import xsnowDataset
 from ..graincode_converter import GRAIN_COLORS, slf_graincode_to_ICSSG_primary
 from ..plugin import register_xsnowDataset_method
-from .profile_block_computation import apply_profile_block, float_result_dtype
-from ..utils import get_backend, latex_style
+from .profile_block_computation import (
+    apply_profile_block,
+    float_result_dtype,
+    get_array_backend,
+)
+from ..utils import latex_style
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -122,14 +126,14 @@ AVA_SIZE_ANCHORS = {
 def classify_stability(values: np.ndarray, classes) -> np.ndarray:
     """Class index per value from the ascending (label, upper_bound]
     steps; NaN maps to ``len(classes)``."""
-    xp = _array_backend(values)
+    xp = get_array_backend(values)
     bounds = xp.asarray([b for _, b in classes])
     return xp.searchsorted(bounds, values, side='left')
 
 
 def classify_poor_or_worse(values: np.ndarray, classes) -> np.ndarray:
     """Per-entry ``POOR_OR_WORSE`` flag; independent of any grouping."""
-    xp = _array_backend(values)
+    xp = get_array_backend(values)
     poor_ids = [i for i, (label, _) in enumerate(classes)
                 if label in POOR_OR_WORSE]
     return xp.isin(classify_stability(values, classes), xp.asarray(poor_ids))
@@ -139,7 +143,7 @@ def estimate_avalanche_size(depth, kind: str = 'McClung2009'):
     """Avalanche size 0..5 interpolated from the failure depth [m]."""
     if kind not in AVA_SIZE_ANCHORS:
         raise ValueError(f"Unknown avalanche size estimator: {kind!r}")
-    xp = _array_backend(depth)
+    xp = get_array_backend(depth)
     return xp.interp(depth, xp.asarray(AVA_SIZE_ANCHORS[kind]), xp.arange(6.0))
 
 
@@ -256,7 +260,6 @@ class HazardChart(DatasetDecorator):
 
         # --- restrict to time if requested (but keep 'time' as a dim) ---
         ds = base if at_time is None else base.sel(time=at_time)
-        xp = get_backend(ds)
 
         # the datetag entries of a reduced dataset name the drivers; a
         # full-layer dataset falls back to layer indices
@@ -948,15 +951,6 @@ def _to_timestr(time_values: Any) -> str:
         return str(time_values)
 
 
-def _array_backend(values):
-    """The array namespace of ``values``: numpy, or cupy on the GPU."""
-    if type(values).__module__.split('.')[0] == 'cupy':
-        import cupy
-
-        return cupy
-    return np
-
-
 def _to_host(values) -> np.ndarray:
     """Copy back to the CPU for string, pandas or numpy-only work."""
     return values.get() if hasattr(values, 'get') else np.asarray(values)
@@ -981,7 +975,7 @@ def _index_label(index: str) -> str:
 
 def _argreduce_layer(values: np.ndarray, side: str):
     """NaN-safe argmax/argmin over the last axis with a validity flag."""
-    xp = _array_backend(values)
+    xp = get_array_backend(values)
     fill = -np.inf if side == 'max' else np.inf
     filled = xp.where(xp.isnan(values), fill, values)
     idx = filled.argmax(-1) if side == 'max' else filled.argmin(-1)
@@ -989,7 +983,7 @@ def _argreduce_layer(values: np.ndarray, side: str):
 
 
 def _take_layer(values: np.ndarray, idx: np.ndarray) -> np.ndarray:
-    xp = _array_backend(values)
+    xp = get_array_backend(values)
     return xp.take_along_axis(values, idx[..., None], -1)[..., 0]
 
 
@@ -1000,7 +994,7 @@ def _hazard_chart_block(values, depths, gcodes=None, *, side, cls_steps,
 
     The layer axis is last; every output loses it.
     """
-    xp = _array_backend(values)
+    xp = get_array_backend(values)
     if keep is not None:
         values = xp.where(xp.asarray(keep), values, np.nan)
     if flip_depth:
@@ -1034,7 +1028,7 @@ def _select_weak_and_deep(values: np.ndarray, side: str, cls_steps,
     ``poor`` skips the classification when the caller already has it (see
     ``classify_poor_or_worse``). Returns ``(weak_idx, valid, depth_idx)``.
     """
-    xp = _array_backend(values)
+    xp = get_array_backend(values)
     weak_idx, valid = _argreduce_layer(values, side)
     if poor is None:
         poor = classify_poor_or_worse(values, cls_steps)

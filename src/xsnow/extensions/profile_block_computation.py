@@ -104,7 +104,7 @@ def float_result_dtype(*arrays: xr.DataArray) -> np.dtype:
 def apply_profile_block(
     block_function: Callable[..., Any],
     *arrays: xr.DataArray,
-    output_dtype: Any,
+    output_dtype: Any = None,
     kwargs: dict[str, Any] | None = None,
     layer_dim: str = 'layer',
     input_core_dims: Sequence[Sequence[str]] | None = None,
@@ -123,10 +123,15 @@ def apply_profile_block(
     *arrays : xarray.DataArray
         Inputs containing ``layer_dim``.  Xarray aligns and broadcasts their
         labelled outer dimensions before invoking ``block_function``.
-    output_dtype : dtype-like or sequence of dtype-like
-        Block result dtype, one per output.  It must be supplied explicitly
-        so Dask does not execute the function while constructing the lazy
-        graph.
+    output_dtype : dtype-like or sequence of dtype-like, optional
+        Block result dtype, one per output.  Default:
+        :func:`float_result_dtype` over ``arrays``, a single floating
+        output.  A dtype is never inferred by calling ``block_function``,
+        which would execute a lazy graph while it is being built: on the
+        Dask path it is the dtype the graph advertises, unverified, so a
+        block function returning another dtype makes the lazy and the
+        computed dtype disagree.  Eager input keeps the dtype the block
+        function actually returns.
     kwargs : dict, optional
         Keyword arguments forwarded unchanged to ``block_function``.
     layer_dim : str, default ``"layer"``
@@ -160,6 +165,8 @@ def apply_profile_block(
     without an outer dimension of another input reach the block function
     with a size-1 axis there (NumPy broadcasting rules).
     """
+    if output_dtype is None:
+        output_dtype = float_result_dtype(*arrays)
     if input_core_dims is None:
         input_core_dims = [[layer_dim]] * len(arrays)
     if output_core_dims is None:
