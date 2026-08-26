@@ -182,11 +182,12 @@ def read(
             layout. It warns for `True` or an ambiguous multi-slope layout.
         float_dtype: Floating-point storage dtype for every source format.
             `'float32'` (default) casts all float variables and coordinates to
-            single precision at read-in; `latitude`/`longitude`/`altitude` and
+            single precision at read-in, including geographic coordinates;
             datetime variables keep their source precision. `'float64'` casts
-            to double precision, None preserves source dtypes. Dask-backed
-            reads stay lazy; the memory guard and automatic archive mode
-            account for the cast size on Dask-backed archive reads.
+            all floating-point values to double precision, while None preserves
+            source dtypes. Dask-backed reads stay lazy. Archive memory guards
+            and automatic mode account for the post-cast size; explicit eager
+            archive reads use bounded conversion chunks for large variables.
         **parser_kwargs: Additional keyword arguments passed to the underlying
             parser functions:
             - `max_layers`: Max layer dimension. `'auto'` (default) uses the

@@ -203,6 +203,62 @@ def estimate_decoded_nbytes(ds: Any) -> Optional[int]:
         return None
 
 
+def _check_estimated_memory_budget(
+    estimated_nbytes: Optional[int],
+    budget_bytes: Optional[int],
+    *,
+    raise_on_exceed: bool,
+    raise_on_unknown: bool,
+    source: str,
+    logger: logging.Logger,
+) -> bool | None:
+    """Check a pre-computed decoded-size estimate against a resolved budget."""
+    if budget_bytes is None:
+        return True
+
+    if estimated_nbytes is None:
+        message = (
+            f"Cannot determine the decoded memory size of {source}, so it "
+            f"cannot be compared with the memory limit of "
+            f"{_format_bytes(budget_bytes)}. Object and variable-length "
+            f"string data do not provide a trustworthy payload size.\n"
+            f"Options:\n"
+            f"  - keep the data Dask-backed instead of computing it\n"
+            f"  - convert object or variable-length strings to fixed-width data\n"
+            f"  - disable the guard with memory_limit=None if memory safety is "
+            f"managed elsewhere"
+        )
+        if raise_on_unknown:
+            raise MemorySizeUnknown(message)
+
+        logger.debug(message)
+        return None
+
+    if estimated_nbytes <= budget_bytes:
+        logger.debug(
+            f"Memory guard passed for {source}: "
+            f"{_format_bytes(estimated_nbytes)} within "
+            f"{_format_bytes(budget_bytes)}."
+        )
+        return True
+
+    message = (
+        f"Materializing {source} would use about "
+        f"{_format_bytes(estimated_nbytes)}, which exceeds the memory limit "
+        f"of {_format_bytes(budget_bytes)}.\n"
+        f"Options:\n"
+        f"  - narrow the selection with time/location/slope/realization selectors\n"
+        f"  - keep the data Dask-backed instead of computing it\n"
+        f"  - raise or disable the budget with memory_limit='32GB' or "
+        f"memory_limit=None"
+    )
+    if raise_on_exceed:
+        raise MemoryLimitExceeded(message)
+
+    logger.warning(message)
+    return False
+
+
 @register_xsnowDataset_method
 def check_memory_budget(
     ds: Any,
@@ -267,48 +323,15 @@ def check_memory_budget(
     """
     log = get_logger(__name__, logger=logger)
     budget_bytes = resolve_memory_limit(memory_limit, logger=log)
-
     if budget_bytes is None:
         return True
 
     estimated = estimate_decoded_nbytes(ds)
-
-    if estimated is None:
-        message = (
-            f"Cannot determine the decoded memory size of {source}, so it "
-            f"cannot be compared with the memory limit of "
-            f"{_format_bytes(budget_bytes)}. Object and variable-length "
-            f"string data do not provide a trustworthy payload size.\n"
-            f"Options:\n"
-            f"  - keep the data Dask-backed instead of computing it\n"
-            f"  - convert object or variable-length strings to fixed-width data\n"
-            f"  - disable the guard with memory_limit=None if memory safety is "
-            f"managed elsewhere"
-        )
-        if raise_on_unknown:
-            raise MemorySizeUnknown(message)
-
-        log.debug(message)
-        return None
-
-    if estimated <= budget_bytes:
-        log.debug(
-            f"Memory guard passed for {source}: "
-            f"{_format_bytes(estimated)} within {_format_bytes(budget_bytes)}."
-        )
-        return True
-
-    message = (
-        f"Materializing {source} would use about {_format_bytes(estimated)}, "
-        f"which exceeds the memory limit of {_format_bytes(budget_bytes)}.\n"
-        f"Options:\n"
-        f"  - narrow the selection with time/location/slope/realization selectors\n"
-        f"  - keep the data Dask-backed instead of computing it\n"
-        f"  - raise or disable the budget with memory_limit='32GB' or "
-        f"memory_limit=None"
+    return _check_estimated_memory_budget(
+        estimated,
+        budget_bytes,
+        raise_on_exceed=raise_on_exceed,
+        raise_on_unknown=raise_on_unknown,
+        source=source,
+        logger=log,
     )
-    if raise_on_exceed:
-        raise MemoryLimitExceeded(message)
-
-    log.warning(message)
-    return False

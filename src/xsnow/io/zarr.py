@@ -54,17 +54,16 @@ from ..utils import DEFAULT_CRS, attach_registry_attrs, get_logger
 from .base import (
     _apply_norm_slopes,
     _apply_float_dtype,
+    _materialize_eager_archive,
     _open_any_as_text,
     _promote_slope_metadata_coords,
     _resolve_archive_lazy,
     FloatDtypeLike,
-    GEO_COORD_NAMES,
 )
 from .memory import (
     MemoryLimitExceeded,
     MemoryLimitLike,
     MemorySizeUnknown,
-    check_memory_budget,
     resolve_memory_limit,
 )
 
@@ -165,8 +164,9 @@ def _read_zarr(
             dimension. False preserves per-location dimensions.
         float_dtype: Floating-point storage dtype; see `read()`. None
             preserves stored dtypes. On Dask-backed opens the cast is lazy
-            and applied before the memory guard; with ``lazy=False`` it is
-            applied after loading.
+            and applied before the memory guard. Explicit eager reads check
+            the post-cast size before allocating and use bounded conversion
+            chunks only when an individual source variable is large.
         flavour: ``'xsnow'`` for archives written by :func:`to_zarr`,
             ``'snowpack'`` for SNOWPACK ZarrIO archives (adapted lazily to
             the xsnow layout), ``'auto'`` (default) detects the layout.
@@ -284,25 +284,14 @@ def _read_zarr(
             )
 
         if not resolved_lazy:
-            # Check the narrowed selection, not the whole archive, and check it
-            # before the allocation an OOM kill would make uncatchable.
-            check_memory_budget(
+            ds_raw = _materialize_eager_archive(
                 ds_raw,
-                budget_bytes,
-                raise_on_exceed=True,
-                raise_on_unknown=True,
+                float_dtype,
+                memory_budget_bytes=budget_bytes,
                 source=f"Zarr archive {path}",
                 logger=logger,
             )
-            ds_raw.load()
             opened.close()
-
-        # Non-Dask opens materialize on .astype(), so cast only after the
-        # guarded load
-        if not open_lazily:
-            ds_raw = _apply_float_dtype(ds_raw, float_dtype)
-        elif not resolved_lazy and lazy is False:
-            ds_raw = _apply_float_dtype(ds_raw, float_dtype)
 
         # Wrap in xsnowDataset
         return xsnowDataset(ds_raw)
@@ -431,6 +420,7 @@ _SLOT_LABEL_VARS = ('station_id', 'station_name')
 _CHECKPOINT_GROUP = 'checkpoint'
 _DEFAULT_TIME_CHUNK = 720
 _CORE_DIMS = ('location', 'time', 'slope', 'realization', 'layer')
+_GEO_COORDS = ('latitude', 'longitude', 'altitude')
 
 SlopeMetadata = Mapping[int, tuple[float, float]]
 GeoMetadata = Mapping[str, tuple[float, float, float]]
@@ -582,7 +572,7 @@ def _slot_terrain(
     """
     out = {
         name: np.full(n_slots, np.nan)
-        for name in ('inclination', 'azimuth', *GEO_COORD_NAMES)
+        for name in ('inclination', 'azimuth', *_GEO_COORDS)
     }
     out['inclination'][sector == 0] = 0.0
     out['azimuth'][sector == 0] = 0.0
@@ -761,7 +751,7 @@ def adapt_snowpack_zarrio(
     # xsnow's slope normalization fold the sectors together
     have_slopes = bool(np.isfinite(terrain['inclination'][written]).all())
     have_geo = any(np.isfinite(terrain[n][written]).any()
-                   for n in GEO_COORD_NAMES)
+                   for n in _GEO_COORDS)
     parts = []
     for k in sorted(set(sector[written])):
         idx = np.flatnonzero((sector == k) & written)

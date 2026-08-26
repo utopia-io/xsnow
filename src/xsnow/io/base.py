@@ -12,10 +12,12 @@ import gzip
 import lzma
 import re
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, IO, Literal, Optional, List, Sequence, Union
 from collections import Counter
 
+import dask
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -27,12 +29,13 @@ from ..selectors import (
 )
 from ..utils import get_logger, normalize_slope_coords
 
-from .memory import estimate_decoded_nbytes
+from .memory import _check_estimated_memory_budget, estimate_decoded_nbytes
 
 
 _ARCHIVE_AUTO_EAGER_BUDGET_FRACTION = 0.5
 _ARCHIVE_AUTO_EAGER_CAP_BYTES = 4 * 1024**3
 _ARCHIVE_AUTO_EAGER_FALLBACK_BYTES = 1024**3
+_EAGER_CAST_CHUNK_BYTES = 32 * 1024**2
 
 
 def _resolve_archive_auto_eager_max_bytes(
@@ -139,10 +142,6 @@ def _validate_norm_slopes(
 
 FloatDtypeLike = Union[str, np.dtype, None]
 
-# Kept at source precision: station merging compares these at tolerances
-# below float32 resolution (see _snap_station_coords, _values_equal).
-GEO_COORD_NAMES = ("latitude", "longitude", "altitude")
-
 
 def _validate_float_dtype(float_dtype: FloatDtypeLike) -> Optional[np.dtype]:
     """Validate the public ``float_dtype`` read policy value."""
@@ -164,9 +163,10 @@ def _apply_float_dtype(
     ds: xr.Dataset,
     float_dtype: FloatDtypeLike,
 ) -> xr.Dataset:
-    """Cast float variables and coordinates (except geographic ones) to
-    ``float_dtype``. ``None`` preserves source dtypes. Dask-backed arrays
-    stay lazy."""
+    """Cast float variables and coordinates to ``float_dtype``.
+
+    ``None`` preserves source dtypes. Dask-backed arrays stay lazy.
+    """
     target = _validate_float_dtype(float_dtype)
     if target is None:
         return ds
@@ -179,9 +179,7 @@ def _apply_float_dtype(
     coord_casts = {
         name: ds[name].astype(target)
         for name, var in ds.coords.items()
-        if name not in GEO_COORD_NAMES
-        and var.dtype.kind == "f"
-        and var.dtype != target
+        if var.dtype.kind == "f" and var.dtype != target
     }
     if not data_casts and not coord_casts:
         return ds
@@ -191,6 +189,132 @@ def _apply_float_dtype(
         ds[name] = cast
     if coord_casts:
         ds = ds.assign_coords(coord_casts)
+    return ds
+
+
+@dataclass(frozen=True)
+class _FloatDtypePlan:
+    """Metadata-only plan for applying a floating-point dtype policy."""
+
+    estimated_nbytes: Optional[int]
+    largest_source_cast_nbytes: int
+    requires_cast: bool
+
+
+def _plan_float_dtype(
+    ds: xr.Dataset,
+    float_dtype: FloatDtypeLike,
+) -> _FloatDtypePlan:
+    """Estimate the post-cast payload and largest source cast allocation."""
+    target = _validate_float_dtype(float_dtype)
+    estimated_nbytes = 0
+    estimate_unknown = False
+    largest_source_cast_nbytes = 0
+    requires_cast = False
+
+    try:
+        for variable in ds.variables.values():
+            source_dtype = np.dtype(variable.dtype)
+            if source_dtype.kind in {"O", "T"}:
+                estimate_unknown = True
+                continue
+
+            variable_size = int(variable.size)
+            cast_variable = (
+                target is not None
+                and source_dtype.kind == "f"
+                and source_dtype != target
+            )
+            if cast_variable:
+                requires_cast = True
+                largest_source_cast_nbytes = max(
+                    largest_source_cast_nbytes,
+                    variable_size * source_dtype.itemsize,
+                )
+                effective_dtype = target
+            else:
+                effective_dtype = source_dtype
+
+            estimated_nbytes += variable_size * effective_dtype.itemsize
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        estimate_unknown = True
+
+    return _FloatDtypePlan(
+        estimated_nbytes=None if estimate_unknown else estimated_nbytes,
+        largest_source_cast_nbytes=largest_source_cast_nbytes,
+        requires_cast=requires_cast,
+    )
+
+
+def _apply_float_dtype_eager_in_place(
+    ds: xr.Dataset,
+    float_dtype: FloatDtypeLike,
+) -> xr.Dataset:
+    """Cast one file-backed variable at a time and release its source data."""
+    target = _validate_float_dtype(float_dtype)
+    if target is None:
+        return ds
+
+    for name in list(ds.data_vars):
+        variable = ds[name].variable
+        if variable.dtype.kind == "f" and variable.dtype != target:
+            ds[name] = variable.astype(target)
+
+    for name in list(ds.coords):
+        variable = ds.coords[name].variable
+        if variable.dtype.kind == "f" and variable.dtype != target:
+            ds.coords[name] = variable.astype(target)
+
+    return ds
+
+
+def _materialize_eager_archive(
+    ds: xr.Dataset,
+    float_dtype: FloatDtypeLike,
+    *,
+    memory_budget_bytes: Optional[int],
+    source: str,
+    logger: Optional[logging.Logger] = None,
+    cast_chunk_bytes: int = _EAGER_CAST_CHUNK_BYTES,
+) -> xr.Dataset:
+    """Apply an archive dtype policy safely and return in-memory NumPy data.
+
+    The post-cast payload is checked before any cast allocation. Small archive
+    variables use xarray's fast non-Dask backend path and are converted before
+    the remaining variables are loaded. A large variable is wrapped in bounded
+    Dask chunks and computed sequentially so conversion does not require the
+    complete source and target arrays in memory at the same time.
+    """
+    log = get_logger(__name__, logger=logger)
+    plan = _plan_float_dtype(ds, float_dtype)
+    _check_estimated_memory_budget(
+        plan.estimated_nbytes,
+        memory_budget_bytes,
+        raise_on_exceed=True,
+        raise_on_unknown=True,
+        source=source,
+        logger=log,
+    )
+
+    use_chunked_cast = (
+        plan.requires_cast
+        and plan.largest_source_cast_nbytes > cast_chunk_bytes
+    )
+    if use_chunked_cast:
+        log.debug(
+            "Using bounded chunks for eager archive dtype conversion: "
+            f"largest source variable is {plan.largest_source_cast_nbytes:,} "
+            f"bytes; chunk target is {cast_chunk_bytes:,} bytes."
+        )
+        with dask.config.set({"array.chunk-size": f"{cast_chunk_bytes}B"}):
+            ds = ds.chunk("auto")
+
+    if use_chunked_cast:
+        ds = _apply_float_dtype(ds, float_dtype)
+        ds.load(scheduler="single-threaded")
+    else:
+        ds = _apply_float_dtype_eager_in_place(ds, float_dtype)
+        ds.load()
     return ds
 
 

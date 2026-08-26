@@ -235,6 +235,9 @@ class TestStationCoordPrecision:
         (tmp_path / 'SNAP.smet').write_text(self.SMET)
         ds = read([tmp_path / 'SNAP.pro', tmp_path / 'SNAP.smet'],
                   unit_validation='light')
+        # float32 storage (the io default) carries the profile's value to
+        # ~2.4e-7; the tolerance stays below the 1e-6 gap to the SMET header
+        # so the assertion still tells the two apart.
         assert float(ds.data['longitude'].values[0]) == pytest.approx(
-            12.459378, abs=1e-9)
+            12.459378, abs=5e-7)
         assert 'HS_mod' in ds.data
