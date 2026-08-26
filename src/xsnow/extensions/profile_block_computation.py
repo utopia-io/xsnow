@@ -69,7 +69,6 @@ if TYPE_CHECKING:
 __all__ = [
     'apply_profile_block',
     'float_result_dtype',
-    'get_array_backend',
     'get_backend',
 ]
 
@@ -136,12 +135,6 @@ def get_backend(
 
         return cupy
     return np
-
-
-#: The name third-party extensions import this under. punstable was written
-#: against it, and renaming across repos in step would need them to land
-#: together; keep both until the platform settles on one.
-get_array_backend = get_backend
 
 
 def float_result_dtype(*arrays: xr.DataArray) -> np.dtype:

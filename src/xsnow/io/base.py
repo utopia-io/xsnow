@@ -373,8 +373,15 @@ def _open_any_as_text(filename: Union[str, Path], mode="rt", encoding="utf-8", *
         return open(filename, mode, encoding=encoding, **kwargs)
 
 
-def _round_coord(val: Any, ndigits: int = 6) -> float:
-    """Round coordinate-like value to `ndigits`, preserving NaN."""
+def _round_coord(val: Any, ndigits: int = 4) -> float:
+    """Round coordinate-like value to `ndigits`, preserving NaN.
+
+    Four decimals (~11 m) is the finest grid float32 storage resolves
+    unambiguously at every coordinate: the worst spacing is 1.5e-5 near
+    180 against a 5e-5 half grid step. It is also the granularity the
+    platform already identifies stations by, through the ``{lat:.4f}``
+    station ids adatahub builds.
+    """
     try:
         fval = float(val)
     except (TypeError, ValueError):
