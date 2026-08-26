@@ -48,7 +48,7 @@ from ..plugin import register_xsnowDataset_method
 from .profile_block_computation import (
     apply_profile_block,
     float_result_dtype,
-    get_array_backend,
+    get_backend,
 )
 from ..utils import latex_style
 
@@ -126,14 +126,14 @@ AVA_SIZE_ANCHORS = {
 def classify_stability(values: np.ndarray, classes) -> np.ndarray:
     """Class index per value from the ascending (label, upper_bound]
     steps; NaN maps to ``len(classes)``."""
-    xp = get_array_backend(values)
+    xp = get_backend(values)
     bounds = xp.asarray([b for _, b in classes])
     return xp.searchsorted(bounds, values, side='left')
 
 
 def classify_poor_or_worse(values: np.ndarray, classes) -> np.ndarray:
     """Per-entry ``POOR_OR_WORSE`` flag; independent of any grouping."""
-    xp = get_array_backend(values)
+    xp = get_backend(values)
     poor_ids = [i for i, (label, _) in enumerate(classes)
                 if label in POOR_OR_WORSE]
     return xp.isin(classify_stability(values, classes), xp.asarray(poor_ids))
@@ -143,7 +143,7 @@ def estimate_avalanche_size(depth, kind: str = 'McClung2009'):
     """Avalanche size 0..5 interpolated from the failure depth [m]."""
     if kind not in AVA_SIZE_ANCHORS:
         raise ValueError(f"Unknown avalanche size estimator: {kind!r}")
-    xp = get_array_backend(depth)
+    xp = get_backend(depth)
     return xp.interp(depth, xp.asarray(AVA_SIZE_ANCHORS[kind]), xp.arange(6.0))
 
 
@@ -975,7 +975,7 @@ def _index_label(index: str) -> str:
 
 def _argreduce_layer(values: np.ndarray, side: str):
     """NaN-safe argmax/argmin over the last axis with a validity flag."""
-    xp = get_array_backend(values)
+    xp = get_backend(values)
     fill = -np.inf if side == 'max' else np.inf
     filled = xp.where(xp.isnan(values), fill, values)
     idx = filled.argmax(-1) if side == 'max' else filled.argmin(-1)
@@ -983,7 +983,7 @@ def _argreduce_layer(values: np.ndarray, side: str):
 
 
 def _take_layer(values: np.ndarray, idx: np.ndarray) -> np.ndarray:
-    xp = get_array_backend(values)
+    xp = get_backend(values)
     return xp.take_along_axis(values, idx[..., None], -1)[..., 0]
 
 
@@ -994,7 +994,7 @@ def _hazard_chart_block(values, depths, gcodes=None, *, side, cls_steps,
 
     The layer axis is last; every output loses it.
     """
-    xp = get_array_backend(values)
+    xp = get_backend(values)
     if keep is not None:
         values = xp.where(xp.asarray(keep), values, np.nan)
     if flip_depth:
@@ -1028,7 +1028,7 @@ def _select_weak_and_deep(values: np.ndarray, side: str, cls_steps,
     ``poor`` skips the classification when the caller already has it (see
     ``classify_poor_or_worse``). Returns ``(weak_idx, valid, depth_idx)``.
     """
-    xp = get_array_backend(values)
+    xp = get_backend(values)
     weak_idx, valid = _argreduce_layer(values, side)
     if poor is None:
         poor = classify_poor_or_worse(values, cls_steps)

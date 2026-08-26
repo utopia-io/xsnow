@@ -37,7 +37,7 @@ from ..utils import (
 from .profile_block_computation import (
     apply_profile_block,
     float_result_dtype,
-    get_array_backend,
+    get_backend,
 )
 
 WEIBULL_SHAPE = 2.5          # shape of the depth weighting
@@ -46,6 +46,9 @@ CRUST_MIN_HARDNESS = 3.0     # hand hardness index of a supporting crust
 CRUST_MIN_THICKNESS = 1.0    # cm, thickness of a supporting crust
 CRUST_DECAY = 20.0           # cm, e-folding depth of the crust effect
 WEAK_GRAIN_CLASSES = (4.0, 5.0, 6.0, 9.0)   # FC, DH, SH, FCxr
+#: Default RTA below which a layer is no weak-layer candidate; the
+#: RTA-gated indices take it as their ``rta_threshold`` default.
+RTA_THRESHOLD = 0.8
 
 
 def _profile_mean(x, valid, xp):
@@ -77,7 +80,7 @@ def _minmax_span(z, valid, xp):
 
 def _compute_rta_block(height_m, hardness, gsize_m, gtype):
     """Compute RTA for an eager block containing complete profiles."""
-    xp = get_array_backend(height_m)
+    xp = get_backend(height_m)
     height_m = xp.asarray(height_m)
     hardness = xp.asarray(hardness)
     gsize_m = xp.asarray(gsize_m)

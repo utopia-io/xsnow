@@ -27,7 +27,7 @@ from ..utils import (
 from .profile_block_computation import (
     apply_profile_block,
     float_result_dtype,
-    get_array_backend,
+    get_backend,
 )
 
 # ---------------------------------------------------------------------------
@@ -395,7 +395,7 @@ def _compute_critical_crack_length_block(
     The outer axes may contain any number of profiles from chunks of times,
     locations, slopes, or other dimensions.
     """
-    xp = get_array_backend(density)
+    xp = get_backend(density)
 
     if inclination is None:
         density = xp.asarray(density)

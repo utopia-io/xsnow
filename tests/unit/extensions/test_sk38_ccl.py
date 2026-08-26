@@ -8,22 +8,21 @@ verified against the R/operational reference outputs, 2026-08-14).
 """
 from dataclasses import fields
 
-import numpy as np
-import pandas as pd
 import pytest
 import xarray as xr
+import numpy as np
+import pandas as pd
 import dask.array as da
 from dask.callbacks import Callback
 
 from xsnow import xsnowDataset
+# importing the module registers all methods on xsnowDataset
+from xsnow.extensions.critical_crack_length import compute_slab_mechanics
+from xsnow.extensions.sk38_ccl import INDEX_CAP, RTA_THRESHOLD
 from xsnow.extensions.sk38 import (
     _compute_skier_mechanics,
     compute_skier_penetration,
 )
-
-# importing the module registers all methods on xsnowDataset
-from xsnow.extensions.critical_crack_length import compute_slab_mechanics
-from xsnow.extensions.sk38_ccl import INDEX_CAP
 
 
 @pytest.fixture
@@ -293,21 +292,32 @@ def test_skier_penetration_excludes_unknown_density():
 
 
 def test_rta_gate_keeps_existing_sk38_ccl(analysis_ds):
-    """A pre-existing sk38_ccl survives the gate (recomputed); the
-    internally created intermediate is still dropped (see
-    test_compute_sk38_ccl_rta)."""
-    chained = analysis_ds.compute_sk38_ccl().compute_sk38_ccl_rta()
-    assert 'sk38_ccl' in chained.data
-    np.testing.assert_allclose(
-        chained['sk38_ccl'].values,
-        analysis_ds.compute_sk38_ccl()['sk38_ccl'].values,
+    """A precomputed index is reused without requiring raw mechanics inputs."""
+    with_index = analysis_ds.compute_sk38_ccl()
+    minimal = with_index.data[['sk38_ccl', 'rta']].copy()
+    minimal['rta'][0, 0, 0] = RTA_THRESHOLD / 2.0
+    precomputed = xsnowDataset(minimal)
+    expected = precomputed['sk38_ccl'].copy()
+    expected_gated = expected.where(
+        ~(np.isfinite(expected) & (precomputed['rta'] < RTA_THRESHOLD)),
+        INDEX_CAP,
     )
+
+    gated = precomputed.compute_sk38_ccl_rta()
+
+    xr.testing.assert_identical(gated['sk38_ccl'], expected)
+    xr.testing.assert_allclose(gated['sk38_ccl_rta'], expected_gated)
 
 
 def test_missing_variable_raises(analysis_ds):
-    broken = xsnowDataset(analysis_ds.data.drop_vars('shear_strength'))
-    with pytest.raises(ValueError, match='shear_strength'):
+    broken = xsnowDataset(
+        analysis_ds.data.drop_vars(['shear_strength', 'grain_size'])
+    )
+    with pytest.raises(ValueError) as exc_info:
         broken.compute_sk38_ccl()
+    message = str(exc_info.value)
+    assert "'shear_strength'" in message
+    assert "'grain_size'" in message
 
 
 def _profile_ds(**arrays):
@@ -378,9 +388,9 @@ def _gess2_2023_11_03():
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0, 10000.0,
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0, 10000.0,
         10000.0])
-    inputs = {'height': height, 'density': density,
-              'shear_strength': shear_strength, 'grain_size': grain_size,
-              'grain_type': grain_type, 'rta': rta}
+    inputs = dict(height=height, density=density,
+                  shear_strength=shear_strength, grain_size=grain_size,
+                  grain_type=grain_type, rta=rta)
     return inputs, r_reference
 
 
@@ -436,9 +446,9 @@ def _gess2_2023_12_01():
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0, 2.221101,
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0, 10000.0,
         10000.0, 10000.0, 10000.0, 10000.0, 10000.0])
-    inputs = {'height': height, 'density': density,
-              'shear_strength': shear_strength, 'grain_size': grain_size,
-              'grain_type': grain_type, 'rta': rta}
+    inputs = dict(height=height, density=density,
+                  shear_strength=shear_strength, grain_size=grain_size,
+                  grain_type=grain_type, rta=rta)
     return inputs, r_reference
 
 
@@ -476,10 +486,11 @@ def test_backend_stays_within_cupy_api(analysis_ds, monkeypatch):
                 raise AttributeError(f"cupy has no attribute {name!r}")
             return getattr(np, name)
 
-    from xsnow.extensions import critical_crack_length, rta, sk38, sk38_ccl
+    from xsnow.extensions import (critical_crack_length, rta, sk38,
+                                  sk38_ccl)
     for mod in (sk38, sk38_ccl, rta, critical_crack_length):
         monkeypatch.setattr(
-            mod, 'get_array_backend', lambda array: CupySurface()
+            mod, 'get_backend', lambda array: CupySurface()
         )
 
     assert 'sk38' in analysis_ds.compute_sk38().data

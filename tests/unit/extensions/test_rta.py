@@ -5,10 +5,10 @@ This test suite verifies the functionality of the structural
 instability index, ensuring it works correctly with the layer-based
 coordinate system and reproduces the verified reference values.
 """
-import numpy as np
-import pandas as pd
 import pytest
 import xarray as xr
+import numpy as np
+import pandas as pd
 import dask.array as da
 from dask.callbacks import Callback
 

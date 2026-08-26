@@ -11,7 +11,7 @@ import xarray as xr
 import xsnow.extensions.datetags  # noqa: F401
 from dask.callbacks import Callback
 from xsnow import xsnowDataset
-from xsnow.extensions import get_array_backend
+from xsnow.extensions import get_backend
 from xsnow.extensions.hazard_chart import HazardChart, _to_host
 
 T1, T2 = np.datetime64('2025-11-01', 'ns'), np.datetime64('2025-12-06', 'ns')
@@ -178,8 +178,8 @@ class TestGrouping:
 
 class TestArrayBackend:
     def test_numpy_arrays_stay_on_numpy(self):
-        assert get_array_backend(np.zeros(3)) is np
-        assert get_array_backend(0.5) is np
+        assert get_backend(np.zeros(3)) is np
+        assert get_backend(0.5) is np
 
     def test_cupy_arrays_dispatch_to_cupy(self):
         cupy = pytest.importorskip('cupy')
@@ -188,7 +188,7 @@ class TestArrayBackend:
             pass
 
         FakeDeviceArray.__module__ = 'cupy._core.core'
-        assert get_array_backend(FakeDeviceArray()) is cupy
+        assert get_backend(FakeDeviceArray()) is cupy
 
     def test_to_host_returns_numpy(self):
         values = np.arange(4)
@@ -214,7 +214,7 @@ def test_backend_stays_within_cupy_api(reduced, full, monkeypatch):
 
     from xsnow.extensions import hazard_chart
 
-    monkeypatch.setattr(hazard_chart, 'get_array_backend',
+    monkeypatch.setattr(hazard_chart, 'get_backend',
                         lambda values: CupySurface())
 
     out = HazardChart(full).compute_hazard_chart(

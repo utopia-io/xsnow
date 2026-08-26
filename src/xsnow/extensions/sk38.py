@@ -32,13 +32,13 @@ from ..utils import (
 from .profile_block_computation import (
     apply_profile_block,
     float_result_dtype,
-    get_array_backend,
+    get_backend,
 )
 from .critical_crack_length import (
     compute_slab_mechanics,
     slab_weighted_mean,
 )
-from .rta import compute_rta  # noqa: F401 (registers rta)
+from .rta import RTA_THRESHOLD, compute_rta  # noqa: F401 (registers rta)
 
 DEFAULT_INCLINATION = 38.0   # deg, virtual slope angle of the index
 # N m^-1, effective skier line load (~85 kg, 1.7 m skis, dynamic factor 2.5)
@@ -287,7 +287,7 @@ def _compute_skier_mechanics(
 
 def _compute_sk38_block(density, shear_strength, height, grain_type):
     """Compute SK38 for an eager block containing complete profiles."""
-    xp = get_array_backend(density)
+    xp = get_backend(density)
     mech = _compute_skier_mechanics(
         density, shear_strength, height, grain_type, xp
     )
@@ -363,7 +363,7 @@ STABLE_SK38 = 6.0   # SNOWPACK's SK38 cap, reported where the RTA gate closes
 
 @register_xsnowDataset_method
 def compute_sk38_rta(
-    ds: 'xsnowDataset', rta_threshold: float = 0.8
+    ds: 'xsnowDataset', rta_threshold: float = RTA_THRESHOLD
 ) -> 'xsnowDataset':
     """
     RTA-gated native SK38: layers that are no weak-layer candidates

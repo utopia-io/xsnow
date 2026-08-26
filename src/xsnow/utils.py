@@ -12,7 +12,7 @@ import os
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Union, Any, Literal, Optional, List, Sequence, overload
+from typing import Any, Literal, Optional, List, Sequence, Union, overload
 
 import numpy as np
 import pandas as pd
@@ -161,11 +161,12 @@ def require_vars(ds: xsnowDataset, names: Sequence[str], context: str) -> None:
     """Raise ``ValueError`` if ``ds`` is empty or misses any of ``names``."""
     if ds.data is None:
         raise ValueError("Cannot compute on an empty dataset.")
-    for var in names:
-        if var not in ds.data:
-            raise ValueError(
-                f"Missing required variable for {context}: '{var}'"
-            )
+    missing = [name for name in names if name not in ds.data]
+    if missing:
+        formatted = ", ".join(repr(name) for name in missing)
+        raise ValueError(
+            f"Missing required variables for {context}: {formatted}"
+        )
 
 
 def registry_attrs(name: str, default_long_name: str,

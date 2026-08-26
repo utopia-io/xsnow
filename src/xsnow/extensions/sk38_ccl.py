@@ -6,8 +6,16 @@ al. 2019, on a virtual 38 degree slope) to the length of the crack a
 skier can induce (Foehn 1987); values below 1 indicate that a skier can
 initiate a self-propagating crack.
 
+Both ``sk38_ccl`` and its RTA-gated variant ``sk38_ccl_rta`` follow the
+combined failure-initiation and crack-propagation framework described by
+Borsotti et al. (in preparation).
+
 References
 ----------
+- Borsotti, J., Mariani, A., Villa, G., Metzger, M., Mayer, S.,
+  Schweizer, J., Haegeli, P., & Monti, F. Assessing skier-induced
+  snowpack instability from simulated snow stratigraphy by combining
+  failure initiation and crack propagation. In preparation.
 - Gaume, J., & Reuter, B. (2017). Assessing snow instability in skier-
   triggered snow slab avalanches by combining failure initiation and
   crack propagation. Cold Reg. Sci. Technol., 144, 6-15.
@@ -27,10 +35,10 @@ from ..utils import registry_attrs, require_vars
 from .profile_block_computation import (
     apply_profile_block,
     float_result_dtype,
-    get_array_backend,
+    get_backend,
 )
 from .critical_crack_length import compute_rc_slope_richter2019
-from .rta import compute_rta
+from .rta import RTA_THRESHOLD, compute_rta
 from .sk38 import (
     _compute_skier_mechanics,
     alpha_max_skier_stress,
@@ -126,7 +134,7 @@ def _compute_sk38_ccl_block(
     grain_size,
 ):
     """Compute SK38-CCL for an eager block of complete profiles."""
-    xp = get_array_backend(density)
+    xp = get_backend(density)
     mech = _compute_skier_mechanics(
         density, shear_strength, height, grain_type, xp
     )
@@ -189,10 +197,16 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
     padding, and layers whose slab mechanics are undefined because of
     missing input data -- a missing value is never reported as stable).
     """
-    require_vars(ds, ['grain_size'], 'sk38_ccl calculation')
     require_vars(
-        ds, ['density', 'shear_strength', 'height', 'grain_type'],
-        'skier stability',
+        ds,
+        [
+            'density',
+            'shear_strength',
+            'height',
+            'grain_type',
+            'grain_size',
+        ],
+        'sk38_ccl calculation',
     )
     density_da = ds.data['density']
     shear_da = ds.data['shear_strength']
@@ -225,7 +239,7 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
 
 @register_xsnowDataset_method
 def compute_sk38_ccl_rta(
-    ds: 'xsnowDataset', rta_threshold: float = 0.8
+    ds: 'xsnowDataset', rta_threshold: float = RTA_THRESHOLD
 ) -> 'xsnowDataset':
     """
     Compute the RTA-gated stability index ``sk38_ccl_rta``.
@@ -243,9 +257,9 @@ def compute_sk38_ccl_rta(
     they conservatively count as weak-layer candidates. Uses the
     per-layer variable ``rta`` if present, otherwise computes it via
     :func:`xsnow.extensions.rta.compute_rta`; a computed ``rta`` stays
-    attached to the returned dataset. An existing ``sk38_ccl`` variable
-    is recomputed and retained; without one, the intermediate index is
-    not attached.
+    attached to the returned dataset. An existing ``sk38_ccl`` variable is
+    used directly and retained. Otherwise, ``sk38_ccl`` is computed only as
+    an intermediate and is not attached to the returned dataset.
     """
     if ds.data is None:
         raise ValueError("Cannot compute on an empty dataset.")
@@ -253,8 +267,13 @@ def compute_sk38_ccl_rta(
         ds = compute_rta(ds)
     rta_da = ds.data['rta']
 
-    pure = compute_sk38_ccl(ds)
-    index_da = pure['sk38_ccl']
+    keep_index = 'sk38_ccl' in ds.data
+    if keep_index:
+        ungated = ds
+        index_da = ds.data['sk38_ccl']
+    else:
+        ungated = compute_sk38_ccl(ds)
+        index_da = ungated['sk38_ccl']
 
     rta_da = rta_da.broadcast_like(index_da)
     gated = index_da.where(
@@ -271,7 +290,7 @@ def compute_sk38_ccl_rta(
     attrs['rta_threshold'] = rta_threshold
 
     gated.attrs = attrs
-    new_xr = pure.data.assign(sk38_ccl_rta=gated)
-    if 'sk38_ccl' not in ds.data:
+    new_xr = ungated.data.assign(sk38_ccl_rta=gated)
+    if not keep_index:
         new_xr = new_xr.drop_vars('sk38_ccl')
     return ds.__class__(new_xr)
