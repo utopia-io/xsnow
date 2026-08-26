@@ -25,7 +25,9 @@ from ..utils import get_logger
 
 from .base import (
     _apply_norm_slopes,
+    _apply_float_dtype,
     _handle_duplicate_names,
+    FloatDtypeLike,
     PRO_FILE_REGEX,
     SMET_FILE_REGEX,
 )
@@ -583,6 +585,7 @@ def _merge_and_finalize(
     realization: Optional[RealizationSelector],
     logger: logging.Logger,
     norm_slopes: Union[bool, Literal['auto']] = 'auto',
+    float_dtype: FloatDtypeLike = "float32",
 ) -> Optional[xsnowDataset]:
     """
     Merges, re-indexes, and applies final filters to the datasets.
@@ -611,6 +614,8 @@ def _merge_and_finalize(
             If recognized slope metadata cannot identify the local slope
             positions, normalization preserves the existing layout. It warns
             for True or an ambiguous multi-slope layout.
+        float_dtype: Floating-point storage dtype applied to the merged
+            dataset; see `read()`. None preserves source dtypes.
 
     Returns:
         A unified and filtered xsnowDataset, or None if no datasets were provided.
@@ -818,6 +823,7 @@ def _merge_and_finalize(
     
     from ..utils import reorder_dims
     final_xr_dataset = reorder_dims(final_xr_dataset)
+    final_xr_dataset = _apply_float_dtype(final_xr_dataset, float_dtype)
     final_dataset = xsnowDataset(final_xr_dataset)
     
     # Compute z-depth if not present
