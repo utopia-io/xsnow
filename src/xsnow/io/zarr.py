@@ -73,6 +73,7 @@ __all__ = [
     'is_snowpack_zarr',
     'open_snowpack_zarr',
     'read_snowpack_zarrs',
+    'repair_snowpack_zarr',
     'to_zarr',
     'write_snowpack_zarr',
 ]
@@ -903,6 +904,67 @@ def _attach_profile_status(ds: xr.Dataset) -> xr.Dataset:
     }
     ds['profile_status'] = status
     return ds
+
+
+def repair_snowpack_zarr(
+    path: Union[str, Path],
+    logger: Optional[logging.Logger] = None,
+) -> list[str]:
+    """
+    Restore the dimension names on archive arrays that lost them.
+
+    The ZarrIO plugin writes each array's ``.zattrs`` itself while GDAL
+    attaches ``_ARRAY_DIMENSIONS`` to the same file; with many parallel
+    writers the last write can win without the dimensions, leaving an array
+    xarray refuses to open. On this layout the names follow from the array
+    rank, so they are put back in place. Nothing else is touched.
+
+    Parameters
+    ----------
+    path
+        The archive directory.
+
+    Returns
+    -------
+    list of str
+        The arrays that were repaired.
+    """
+    import zarr
+
+    logger = get_logger(__name__, logger=logger)
+    path = Path(path)
+    group = zarr.open_group(str(path), mode='r')
+    n_times = group['time'].shape[0] if 'time' in group else None
+    n_slots = None
+    for _, arr in group.arrays():
+        if arr.ndim == 3:
+            n_slots = arr.shape[0]
+            break
+    repaired = []
+    for name, arr in group.arrays():
+        if '_ARRAY_DIMENSIONS' in arr.attrs:
+            continue
+        if arr.ndim == 3:
+            dims = ['location', 'time', 'layer']
+        elif arr.ndim == 2:
+            dims = ['location', 'time']
+        elif arr.shape == (n_times,):
+            dims = ['time']
+        elif arr.shape == (n_slots,):
+            dims = ['location']
+        else:
+            logger.warning("Cannot infer the dimensions of %r (shape %s); left "
+                           "as is", name, arr.shape)
+            continue
+        zattrs = path / name / '.zattrs'
+        attrs = json.loads(zattrs.read_text()) if zattrs.is_file() else {}
+        attrs['_ARRAY_DIMENSIONS'] = dims
+        zattrs.write_text(json.dumps(attrs, indent=4))
+        repaired.append(name)
+    if repaired:
+        logger.warning("Restored the dimension names of %d array(s) in %s: %s",
+                       len(repaired), path, ', '.join(repaired))
+    return repaired
 
 
 def write_snowpack_zarr(
