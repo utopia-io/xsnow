@@ -1,32 +1,24 @@
-"""Utilities for efficient blockwise snow-profile computations.
+"""Utilities for blockwise calculations on complete snow profiles.
 
-Large, lazy xarray datasets are commonly backed by Dask.  Evaluating such a
-dataset as one NumPy or CuPy array would materialize the entire dataset in
-memory.  Instead, Dask builds a lazy task graph and, when the result is
-requested, evaluates manageable array blocks eagerly.  For a profile-wide
-calculation, each block must contain the complete layer axis, but it can hold
-only a subset of the dataset's times, locations, slopes, or other outer
-dimensions.
+Dask evaluates large xarray datasets in manageable blocks.  A profile-wide
+calculation may split outer dimensions such as ``location`` or ``time``, but
+each block must contain every ``layer`` of its profiles.
 
-:func:`apply_profile_block` sets up this execution model: it aligns the xarray
-inputs, keeps only the profile axis in one chunk, and applies an eager NumPy-
-or CuPy-compatible function to each block.  The tools in this module therefore
-let built-in and third-party extensions process blocks of complete profiles
-efficiently and in parallel.
+:func:`apply_profile_block` aligns the inputs, combines chunks along dimensions
+needed in full, and calls an eager NumPy- or CuPy-compatible function on each
+block.  Its ``input_core_dims`` and ``output_core_dims`` use
+:func:`xarray.apply_ufunc` terminology: a *core dimension* is an axis consumed
+or produced as a complete vector by this particular function, not an xsnow
+dataset-dimension category.  Undeclared axes are *outer dimensions* that
+xarray broadcasts and Dask may split.
 
-A profile block function must:
+Normally, ``layer`` is the only core dimension.  A block function then receives
+an eager array shaped ``(..., n_layers)``: arbitrary leading axes contain one
+or more profiles and the complete layer axis is last.  The function must
+vectorize over those leading axes.
 
-* accept eager array blocks, not xarray or Dask objects;
-* treat its last axis as the complete layer axis; and
-* return an array with the same outer axes and complete layer axis.
-
-With eager input, one call may contain every profile in the dataset.  With
-Dask-backed input, one call receives one block containing one or more complete
-profiles.  Block functions should therefore be vectorized over all axes except
-the last rather than assuming that a call represents exactly one profile.
-
-For example, an external extension can implement a block function and retain
-lazy execution as follows::
+This example expresses each layer's density as a percentage of the maximum
+density in its profile::
 
     from xsnow.extensions import (
         apply_profile_block,
@@ -34,21 +26,26 @@ lazy execution as follows::
         get_backend,
     )
 
-    def _distance_from_profile_min_block(values):
-        xp = get_backend(values)
-        values = xp.asarray(values)
-        minimum = xp.nanmin(values, axis=-1)
-        return values - minimum[..., None]
+    def _percentage_of_profile_max_block(density_block):
+        # Shape: (..., n_layers); the complete layer axis is last.
+        xp = get_backend(density_block)
+        density_block = xp.asarray(density_block)
+        profile_maximum = xp.nanmax(
+            density_block, axis=-1, keepdims=True
+        )
+        return 100 * density_block / profile_maximum
 
+    density = ds.data["density"]
     result = apply_profile_block(
-        _distance_from_profile_min_block,
-        ds.data["grain_size"],
-        output_dtype=float_result_dtype(ds.data["grain_size"]),
+        _percentage_of_profile_max_block,
+        density,
+        output_dtype=float_result_dtype(density),
     )
 
-The returned :class:`xarray.DataArray` is eager for eager input and remains
-lazy for Dask-backed input.  Exceptions from a lazy block function are raised
-when the returned array is computed.
+For a block shaped ``(2, 8, 150)``, reducing the last axis gives
+``(2, 8, 1)``.  Division broadcasts each profile maximum over its 150 layers,
+returning percentages with shape ``(2, 8, 150)``.  The result retains xarray
+labels and, when the input is Dask-backed, stays lazy until computed.
 """
 
 from __future__ import annotations
@@ -162,39 +159,31 @@ def apply_profile_block(
     Parameters
     ----------
     block_function : callable
-        Function accepting one eager array per input plus ``kwargs``.  The
-        complete profile axis is last in every array supplied to the function.
-        The return value must have the same outer axes and one complete
-        profile axis (or the core axes named in ``output_core_dims``).
+        Function accepting eager arrays plus ``kwargs`` and vectorizing over
+        their leading outer axes.  Trailing input and output axes follow
+        ``input_core_dims`` and ``output_core_dims``, respectively.
     *arrays : xarray.DataArray
-        Inputs containing ``layer_dim``.  Xarray aligns and broadcasts their
-        labelled outer dimensions before invoking ``block_function``.
+        Inputs to align and broadcast.  By default, each must contain
+        ``layer_dim``; explicit ``input_core_dims`` may declare otherwise.
     output_dtype : dtype-like or sequence of dtype-like, optional
-        Block result dtype, one per output.  Default:
-        :func:`float_result_dtype` over ``arrays``, a single floating
-        output.  A dtype is never inferred by calling ``block_function``,
-        which would execute a lazy graph while it is being built: on the
-        Dask path it is the dtype the graph advertises, unverified, so a
-        block function returning another dtype makes the lazy and the
-        computed dtype disagree.  Eager input keeps the dtype the block
-        function actually returns.
+        Declared dtype, one per output.  Defaults to
+        :func:`float_result_dtype` over ``arrays`` for one output.  Dask trusts
+        this declaration without running ``block_function``, so it must match
+        the function's actual result.
     kwargs : dict, optional
         Keyword arguments forwarded unchanged to ``block_function``.
     layer_dim : str, default ``"layer"``
-        Name of the complete profile dimension.
+        Profile dimension used by the default core-dimension declarations.
     input_core_dims : sequence of sequences of str, optional
-        Core dimensions per input, for inputs that carry the profile axis
-        under another name or no profile axis at all (an empty sequence).
-        Default: ``layer_dim`` for every input.  Every named core dimension
-        is kept in one chunk.
+        Complete trailing axes passed to ``block_function``, one sequence per
+        input.  The default is ``[[layer_dim], ...]``.  Use an empty sequence
+        for an input that only broadcasts over outer dimensions.
     output_core_dims : sequence of sequences of str, optional
-        Core dimensions per output.  Default: ``[[layer_dim]]``, one output
-        with the input profile axis.  A reduction over the profile returns
-        ``[[]]``; a new axis of a different length is named here and sized
-        in ``output_sizes``.
+        Trailing axes returned per output.  The default ``[[layer_dim]]``
+        gives one layer-resolved output; ``[[]]`` gives one profile reduction.
+        A new axis such as ``[['group']]`` also requires ``output_sizes``.
     output_sizes : mapping, optional
-        Length of every output core dimension that does not exist on the
-        inputs.
+        Sizes of output core dimensions not present on an input.
 
     Returns
     -------
@@ -204,12 +193,10 @@ def apply_profile_block(
 
     Notes
     -----
-    If a Dask input splits a core dimension into multiple chunks, only that
-    core dimension is rechunked.  Outer chunks remain available for
-    parallelism.  Each scheduled block call can therefore contain multiple
-    profiles but always contains every layer belonging to them.  Inputs
-    without an outer dimension of another input reach the block function
-    with a size-1 axis there (NumPy broadcasting rules).
+    Each Dask input core dimension is rechunked as one complete axis; outer
+    chunks remain parallel.  For example, ``[['layer'], []]`` supplies a layer
+    vector and a broadcasting value.  Outputs ``[[]]`` reduce each profile,
+    while ``[['group']]`` creates a vector sized through ``output_sizes``.
     """
     if output_dtype is None:
         output_dtype = float_result_dtype(*arrays)
