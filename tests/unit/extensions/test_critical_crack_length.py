@@ -9,6 +9,8 @@ import pytest
 import xarray as xr
 import numpy as np
 import pandas as pd
+import dask.array as da
+from dask.callbacks import Callback
 
 from xsnow import xsnowDataset
 from xsnow.extensions import critical_crack_length  # all methods are now registered on xsnowDataset
@@ -46,3 +48,116 @@ def test_compute_critical_crack_length(analysis_ds):
     assert np.all(other_vals > 0)
     assert np.nanmax(other_vals) < 100
     assert ds_with_rc_cpu['rc_flat'].attrs['units'] == 'm'
+
+    # values of the verified implementation (2026-08-17); NaN = topmost
+    expected = np.array([3.8425, 4.2956, 3.1305, np.nan])
+    np.testing.assert_allclose(
+        ds_with_rc_cpu['rc_flat'].values[0, 0], expected, atol=1e-3
+    )
+
+
+def test_compute_critical_crack_length_slope(analysis_ds):
+    """Tests the slope formulation of the critical crack length."""
+    strong = xsnowDataset(analysis_ds.data.assign(
+        shear_strength=analysis_ds.data['shear_strength'] * 5,
+        grain_type=(analysis_ds.data['height'].dims,
+                    np.array([[[430.0, 330.0, 330.0, 330.0]]])),
+    ))
+    ds_rc = strong.compute_critical_crack_length(inclination=38.0)
+
+    assert 'rc_slope' in ds_rc.data
+    vals = ds_rc['rc_slope'].values[0, 0]
+    # values of the verified implementation (2026-08-14); NaN = topmost
+    expected = np.array([0.5286, 2.7814, 4.4009, np.nan])
+    np.testing.assert_allclose(vals, expected, atol=1e-3)
+
+    # the slope formulation additionally requires the grain type
+    with pytest.raises(ValueError, match='grain_type'):
+        analysis_ds.compute_critical_crack_length(inclination=38.0)
+
+    # without the strengthening the two lowest layers are in the
+    # spontaneous regime (slope-parallel load exceeds the corrected
+    # strength) and rc_slope is NaN there
+    weak = xsnowDataset(analysis_ds.data.assign(
+        grain_type=(analysis_ds.data['height'].dims,
+                    np.array([[[430.0, 330.0, 330.0, 330.0]]])),
+    ))
+    vals = weak.compute_critical_crack_length(
+        inclination=38.0)['rc_slope'].values[0, 0]
+    expected = np.array([np.nan, np.nan, 1.4774, np.nan])
+    np.testing.assert_allclose(vals, expected, atol=1e-3)
+
+
+def test_interior_nan_height_raises(analysis_ds):
+    """A NaN height below the surface breaks the layer contiguity the
+    slab sums rely on, so it is rejected; NaN at the top is padding.
+    Index 2 is the gap directly under the surface layer, whose derived
+    thicknesses look exactly like padding."""
+    grain_type = (analysis_ds.data['height'].dims,
+                  np.array([[[430.0, 330.0, 330.0, 330.0]]]))
+    for idx in (1, 2):
+        height = analysis_ds.data['height'].copy()
+        height[0, 0, idx] = np.nan
+        broken_xr = analysis_ds.data.assign(height=height)
+        with pytest.raises(ValueError, match='interior'):
+            xsnowDataset(broken_xr).compute_critical_crack_length()
+        # the slope path guards through the shared slab mechanics
+        with_gt = xsnowDataset(broken_xr.assign(grain_type=grain_type))
+        with pytest.raises(ValueError, match='interior'):
+            with_gt.compute_critical_crack_length(inclination=38.0)
+
+    padded = analysis_ds.data['height'].copy()
+    padded[0, 0, -1] = np.nan
+    ok = xsnowDataset(analysis_ds.data.assign(height=padded))
+    assert 'rc_flat' in ok.compute_critical_crack_length().data
+
+
+@pytest.mark.parametrize(
+    'inclination, out_name',
+    [(None, 'rc_flat'), (38.0, 'rc_slope')],
+)
+def test_critical_crack_length_remains_lazy(
+    analysis_ds, inclination, out_name
+):
+    source = analysis_ds
+    if inclination is not None:
+        source = xsnowDataset(source.data.assign(
+            shear_strength=source.data['shear_strength'] * 5,
+            grain_type=(
+                source.data['height'].dims,
+                np.array([[[430.0, 330.0, 330.0, 330.0]]]),
+            ),
+        ))
+
+    expected = source.compute_critical_crack_length(
+        inclination=inclination
+    )[out_name]
+    lazy = xsnowDataset(source.data.chunk({'layer': 2}))
+    started_tasks = []
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        actual = lazy.compute_critical_crack_length(
+            inclination=inclination
+        )[out_name]
+
+    assert started_tasks == []
+    assert isinstance(actual.data, da.Array)
+    assert actual.chunks[-1] == (actual.sizes['layer'],)
+    xr.testing.assert_allclose(actual.compute(), expected)
+
+
+def test_direct_slab_computation_rejects_lazy_arrays_without_computing():
+    values = da.from_array(np.ones((1, 4)), chunks=(1, 2))
+    started_tasks = []
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        with pytest.raises(TypeError, match='eager array blocks'):
+            critical_crack_length.compute_slab_mechanics(
+                values,
+                values,
+                values,
+                values,
+                values,
+                38.0,
+                np,
+            )
+
+    assert started_tasks == []

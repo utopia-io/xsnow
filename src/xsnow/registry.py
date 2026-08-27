@@ -329,6 +329,54 @@ registry = {
         'plot_units': 'm',
         'si_units': 'm',
     },
+    'rc_slope': {
+        "param_code": None,
+        "aliases": ['rc_slope', 'critical_crack_length_slope'],
+        'standard_name': 'critical_crack_length_on_slope',
+        'long_name': 'Critical Crack Length (Slope)',
+        'xsnow_units': 'm',
+        'pro_units': 'm',
+        'plot_units': 'm',
+        'si_units': 'm',
+    },
+    'rta': {
+        # SNOWPACK builds disagree on parameter code 0607 (rta vs.
+        # accumulated temperature gradient), so no code is claimed here.
+        # Pass an explicit code_map to read() for files that write RTA at
+        # 0607, e.g. code_map={**CODE_TO_NAME_MAP, '0607': 'rta'}.
+        "param_code": None,
+        "aliases": ['rta', 'relative threshold sum approach'],
+        'standard_name': 'relative_threshold_sum_approach',
+        'long_name': 'Relative Threshold Sum Approach (RTA)',
+        'xsnow_units': '1',
+        'pro_units': '1',
+        'plot_units': '1',
+        'si_units': '1',
+    },
+    'sk38_ccl': {
+        # 0608 is the free slot next to the custom AWSOME code 0609
+        # (punstable, registered at runtime by profsnow).
+        "param_code": "0608",
+        "aliases": ['sk38_ccl'],
+        'standard_name': 'stability_index_sk38_ccl',
+        'long_name': 'Skier Stability Index SK38-CCL '
+                     '(critical crack length / skier crack length)',
+        'xsnow_units': '1',
+        'pro_units': '1',
+        'plot_units': '1',
+        'si_units': '1',
+    },
+    'sk38_ccl_rta': {
+        # RTA-gated variant of sk38_ccl (0608); no code claimed yet.
+        "param_code": None,
+        "aliases": ['sk38_ccl_rta', 'rta_sk38_ccl'],
+        'standard_name': 'stability_index_sk38_ccl_rta',
+        'long_name': 'RTA-gated Skier Stability Index SK38-CCL',
+        'xsnow_units': '1',
+        'pro_units': '1',
+        'plot_units': '1',
+        'si_units': '1',
+    },
     'HS': {
         "param_code": None,
         "aliases": ['HS', 'snow_height', 'snow_depth'],
