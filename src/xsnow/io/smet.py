@@ -224,9 +224,52 @@ def _timestamp_from_smet_index(index_value: Any, index_names: List[Optional[str]
     return index_value
 
 
+def _format_smet_column(var_name: str, values: np.ndarray, nodata: float) -> np.ndarray | None:
+    """Format a whole numeric SMET column like _format_smet_value does per value.
+
+    Returns None for columns that need the per-value path (strings, objects,
+    datetimes).
+    """
+    if values.dtype.kind not in "fiub":
+        return None
+    numeric = values.astype(float)
+    missing = np.isnan(numeric)
+    safe = np.where(missing, 0.0, numeric)
+    if var_name in _SMET_INTEGER_VARS:
+        if np.isinf(safe).any():
+            raise OverflowError("cannot convert float infinity to integer")
+        # np.rint rounds half to even like the built-in round().
+        text = np.char.mod("%d", np.rint(safe).astype(np.int64)).astype(object)
+    else:
+        text = np.char.mod("%.3f", safe).astype(object)
+        magnitude = np.abs(safe)
+        wide = (magnitude != 0) & ((magnitude < 1e-3) | (magnitude >= 1e5))
+        if wide.any():
+            text[wide] = np.char.mod("%.6e", safe[wide])
+    text[missing] = f"{nodata:.1f}"
+    return text
+
+
 def _write_smet_data_rows(path: Union[str, Path], df: pd.DataFrame, nodata: float) -> None:
-    """Append SMET data rows using column-aware value formatting."""
+    """Append SMET data rows using column-aware value formatting.
+
+    Columns are formatted whole; a frame the vectorized path cannot take (a
+    multi-level index, a non-datetime index, an object column) is written
+    value by value instead.
+    """
+    columns = [_format_smet_column(name, df[name].to_numpy(), nodata) for name in df.columns]
+    timestamps = None
+    if df.index.nlevels == 1 and all(column is not None for column in columns):
+        try:
+            timestamps = pd.DatetimeIndex(df.index).strftime('%Y-%m-%dT%H:%M:%S')
+        except (TypeError, ValueError):
+            timestamps = None
+        if timestamps is not None and pd.isna(timestamps).any():
+            timestamps = None  # a NaT is reported by the per-value path
     with _open_any_as_text(path, 'at') as f:
+        if timestamps is not None:
+            f.writelines("\t".join(parts) + "\n" for parts in zip(timestamps, *columns))
+            return
         for timestamp, row in df.iterrows():
             timestamp = _timestamp_from_smet_index(timestamp, list(df.index.names))
             timestamp_str = pd.to_datetime(timestamp).strftime('%Y-%m-%dT%H:%M:%S')
@@ -822,8 +865,7 @@ def to_smet(
         if slope_azi is not None and slope_angle is None:
             raise ValueError("Cannot write SlopeAzi without a finite SlopeAngle.")
 
-    # Squeeze and convert to dataframe, keeping only data variables
-    df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()[smet_vars]
+    df = ds.data[smet_vars].reset_coords(drop=True).squeeze(drop=True).to_dataframe()[smet_vars]
     smet_units = {
         name: _target_smet_unit(name, ds.data[name], unit_type)
         for name in smet_vars
