@@ -57,6 +57,10 @@ WEAK_GRAIN_CLASSES = (4.0, 5.0, 6.0, 9.0)   # FC, DH, SH, FCxr
 #: Default RTA below which a layer is no weak-layer candidate; the
 #: RTA-gated indices take it as their ``rta_threshold`` default.
 RTA_THRESHOLD = 0.8
+#: Stability classes of the index: high values are unstable.
+RTA_WEAK = 'max'
+RTA_CLASSES = [('rather stable', RTA_THRESHOLD), ('poor', np.inf)]
+RTA_AXLIM = (0.0, 1.0)
 
 
 def _profile_mean(x, valid, xp):

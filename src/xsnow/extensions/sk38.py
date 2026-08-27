@@ -52,6 +52,17 @@ CRUST_MIN_DENSITY = 500.0    # kg m^-3, supporting crust density
 CRUST_MIN_THICKNESS = 0.03   # m, supporting crust thickness
 # treatment of the partially penetrated layer ('full' or 'residual')
 PENETRATED_LAYER = 'full'
+#: Stability classes of the SK38 family (sk38, sk38_rta, sk38_ccl,
+#: sk38_ccl_rta): ascending (label, upper bound] steps; low values are
+#: unstable. The hazard chart reads these.
+SK38_WEAK = 'min'
+SK38_CLASSES = [
+    ('very poor', 0.5),
+    ('poor', 0.95),
+    ('fair', 1.05),
+    ('rather stable', math.inf),
+]
+SK38_AXLIM = (0.0, 1.5)
 
 
 @dataclass(frozen=True, slots=True)
