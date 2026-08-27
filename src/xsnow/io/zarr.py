@@ -69,11 +69,12 @@ from .memory import (
 
 __all__ = [
     'ZarrIOLayoutError',
-    'adapt_snowpack_zarrio',
-    'is_snowpack_zarrio',
-    'open_snowpack_zarrio',
-    'read_snowpack_archives',
+    'adapt_snowpack_zarr',
+    'is_snowpack_zarr',
+    'open_snowpack_zarr',
+    'read_snowpack_zarrs',
     'to_zarr',
+    'write_snowpack_zarr',
 ]
 
 ZarrFlavour = Literal['auto', 'xsnow', 'snowpack']
@@ -171,7 +172,7 @@ def _read_zarr(
             ``'snowpack'`` for SNOWPACK ZarrIO archives (adapted lazily to
             the xsnow layout), ``'auto'`` (default) detects the layout.
         **flavour_kwargs: Options of
-            :func:`adapt_snowpack_zarrio`
+            :func:`adapt_snowpack_zarr`
             (``realization_label``, ``slope_metadata``, ``geo``, ``station_index``, ``layers``,
             ``mask_stale_layers``, ``time_chunk``).
 
@@ -217,20 +218,20 @@ def _read_zarr(
         # honoured by the guarded load below.
         open_lazily = lazy is not False
         if flavour == 'snowpack':
-            opened = open_snowpack_zarrio(path, chunks=chunks)
+            opened = open_snowpack_zarr(path, chunks=chunks)
         else:
             open_chunks = (
                 (chunks if chunks is not None else "auto")
                 if open_lazily else None
             )
             opened = _open_zarr_store(path, chunks=open_chunks)
-            if flavour == 'auto' and is_snowpack_zarrio(opened):
+            if flavour == 'auto' and is_snowpack_zarr(opened):
                 opened.close()
                 flavour = 'snowpack'
-                opened = open_snowpack_zarrio(path, chunks=chunks)
+                opened = open_snowpack_zarr(path, chunks=chunks)
         ds_raw = opened
         if flavour == 'snowpack':
-            ds_raw = adapt_snowpack_zarrio(
+            ds_raw = adapt_snowpack_zarr(
                 ds_raw, path=path, logger=logger, **flavour_kwargs
             )
             open_lazily = True
@@ -426,7 +427,7 @@ SlopeMetadata = Mapping[int, tuple[float, float]]
 GeoMetadata = Mapping[str, tuple[float, float, float]]
 
 
-def is_snowpack_zarrio(ds: xr.Dataset) -> bool:
+def is_snowpack_zarr(ds: xr.Dataset) -> bool:
     """Whether an opened Zarr store carries the SNOWPACK ZarrIO layout."""
     return (
         'snowpack_version' in ds.attrs
@@ -472,7 +473,7 @@ def _slot_labels(
     return labels
 
 
-def open_snowpack_zarrio(
+def open_snowpack_zarr(
     path: Union[str, Path],
     chunks: Any = None,
     group: Optional[str] = None,
@@ -552,7 +553,7 @@ def _read_checkpoint(path: Optional[Union[str, Path]]) -> Optional[xr.Dataset]:
     if not (Path(path) / _CHECKPOINT_GROUP / '.zgroup').exists():
         return None
     try:
-        return open_snowpack_zarrio(path, group=_CHECKPOINT_GROUP)
+        return open_snowpack_zarr(path, group=_CHECKPOINT_GROUP)
     except Exception:  # noqa: BLE001 - terrain is optional
         return None
 
@@ -653,7 +654,7 @@ def _convert_to_registry_units(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def adapt_snowpack_zarrio(
+def adapt_snowpack_zarr(
     ds: xr.Dataset,
     *,
     path: Optional[Union[str, Path]] = None,
@@ -672,7 +673,7 @@ def adapt_snowpack_zarrio(
     Parameters
     ----------
     ds
-        The archive as returned by :func:`open_snowpack_zarrio`.
+        The archive as returned by :func:`open_snowpack_zarr`.
     path
         Archive path; used to read the optional ``checkpoint/`` group for
         slope and position metadata.
@@ -714,7 +715,7 @@ def adapt_snowpack_zarrio(
         has no conversion to xsnow units.
     """
     logger = get_logger(__name__, logger=logger)
-    if not is_snowpack_zarrio(ds):
+    if not is_snowpack_zarr(ds):
         raise ZarrIOLayoutError(
             "Dataset does not carry the SNOWPACK ZarrIO layout "
             "(expected root attr 'snowpack_version' and a 'location' axis)."
@@ -739,6 +740,10 @@ def adapt_snowpack_zarrio(
 
     ds = ds.drop_vars([v for v in _SLOT_LABEL_VARS if v in ds])
     ds = ds.assign_coords(location=('location', labels))
+    # raw store positions, so derived variables computed on the adapted view
+    # can be written back onto the archive's pinned axes
+    ds = ds.assign_coords(
+        zarrio_time_slot=('time', np.arange(ds.sizes['time'], dtype='int64')))
 
     active, deepest = _scan_n_layers(ds)
     if not active.all():
@@ -758,6 +763,9 @@ def adapt_snowpack_zarrio(
         part = ds.isel(location=idx)
         part = part.assign_coords(location=('location', base[idx]))
         part = part.expand_dims(slope=[k])
+        part = part.assign_coords(
+            zarrio_slot=(('location', 'slope'),
+                         idx.astype('int64')[:, None]))
         if have_slopes:
             part = part.assign_coords(
                 inclination=(('location', 'slope'),
@@ -897,7 +905,136 @@ def _attach_profile_status(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def read_snowpack_archives(
+def write_snowpack_zarr(
+    path: Union[str, Path],
+    ds: xr.Dataset,
+    variables: Sequence[str],
+    logger: Optional[logging.Logger] = None,
+) -> list[str]:
+    """
+    Write computed per-layer variables back into a SNOWPACK ZarrIO archive.
+
+    The archive's raw layout (slot x pinned-time x padded-layer) differs from
+    the adapted dataset the variables were computed on; the provenance
+    coordinates the adapter attached (``zarrio_slot``, ``zarrio_time_slot``)
+    place every value back on its raw position. New arrays are created beside
+    SNOWPACK's own - same shape, chunking and dimension names, NaN fill - and
+    the store is never consolidated: the plugin runs without ``.zmetadata`` by
+    design, and a stale one would poison every GDAL open.
+
+    Parameters
+    ----------
+    path
+        The archive directory.
+    ds
+        Adapted dataset (or a location block of one) carrying the variables
+        and the adapter's provenance coordinates.
+    variables
+        Names of the per-layer variables to persist.
+
+    Returns
+    -------
+    list of str
+        The variable names actually written.
+
+    Raises
+    ------
+    ZarrIOLayoutError
+        If the dataset carries no provenance coordinates, the store is
+        consolidated, or no per-layer template array exists to copy the
+        layout from.
+    """
+    import zarr
+
+    logger = get_logger(__name__, logger=logger)
+    path = Path(path)
+    if (path / '.zmetadata').is_file():
+        raise ZarrIOLayoutError(
+            f"{path} carries consolidated metadata, which the ZarrIO plugin "
+            "deliberately runs without; refusing to add arrays behind it."
+        )
+    for coord in ('zarrio_slot', 'zarrio_time_slot'):
+        if coord not in ds.coords:
+            raise ZarrIOLayoutError(
+                f"Dataset has no {coord!r} coordinate; derived variables can "
+                "only be written back from a dataset the ZarrIO adapter "
+                "produced."
+            )
+
+    group = zarr.open_group(str(path), mode='r+')
+    template = None
+    for _, arr in group.arrays():
+        if arr.ndim == 3:
+            template = arr
+            break
+    if template is None:
+        raise ZarrIOLayoutError(
+            f"{path} holds no per-layer array to copy the layout from."
+        )
+    dim_names = list(template.attrs.get(
+        '_ARRAY_DIMENSIONS', ('location', 'time', 'layer')))
+
+    slots = np.asarray(ds['zarrio_slot'].values, dtype='int64')      # (L, S)
+    tslots = np.asarray(ds['zarrio_time_slot'].values, dtype='int64')  # (T,)
+    n_layers = ds.sizes.get('layer', template.shape[2])
+    if n_layers > template.shape[2]:
+        logger.warning(
+            "Dataset holds %d layers but the archive %d; the deepest %d "
+            "layer(s) are not written", n_layers, template.shape[2],
+            n_layers - template.shape[2])
+        n_layers = template.shape[2]
+    order = np.argsort(tslots)
+    tsorted = tslots[order]
+
+    written = []
+    for name in variables:
+        if name not in ds:
+            logger.warning("Derived variable %r not in the dataset; skipped",
+                           name)
+            continue
+        var = ds[name]
+        if 'realization' in var.dims:
+            var = var.isel(realization=0)
+        var = var.transpose('location', 'slope', 'time', 'layer')
+        values = np.asarray(var.values, dtype='float32')     # (L, S, T, nl)
+
+        if name in group:
+            arr = group[name]
+            if tuple(arr.shape) != tuple(template.shape):
+                raise ZarrIOLayoutError(
+                    f"Existing array {name!r} has shape {arr.shape}, the "
+                    f"archive's layout is {template.shape}; it was not "
+                    "written by this function and will not be overwritten."
+                )
+        else:
+            # dimension names live in the array metadata on a v3 store and in
+            # the _ARRAY_DIMENSIONS attribute on v2 (the plugin's own format)
+            v3 = group.metadata.zarr_format == 3
+            arr = group.create_array(
+                name, shape=template.shape, chunks=template.chunks,
+                dtype='float32', fill_value=np.nan,
+                dimension_names=dim_names if v3 else None)
+            arr.attrs.update({'derived_by': 'xsnow'})
+            if not v3:
+                arr.attrs.update({'_ARRAY_DIMENSIONS': dim_names})
+            arr.attrs.update({k: v for k, v in var.attrs.items()
+                              if isinstance(v, (str, int, float, bool))})
+
+        # one scatter for all slopes: flatten (location, slope) onto the raw
+        # slot axis, sorted as orthogonal indexing requires
+        flat_slots = slots.reshape(-1)
+        flat_vals = values.reshape(-1, values.shape[2], values.shape[3])
+        slot_order = np.argsort(flat_slots)
+        arr.oindex[flat_slots[slot_order], tsorted, 0:n_layers] = \
+            flat_vals[slot_order][:, order, :]
+        written.append(name)
+    if written:
+        logger.info("Derived variable(s) %s written into %s",
+                    ', '.join(written), path)
+    return written
+
+
+def read_snowpack_zarrs(
     stores: Iterable[Union[str, Path]],
     *,
     exclude: Iterable[str] = (),

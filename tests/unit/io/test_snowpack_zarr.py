@@ -13,10 +13,10 @@ from dask.callbacks import Callback
 import xsnow
 from xsnow.io.zarr import (
     ZarrIOLayoutError,
-    adapt_snowpack_zarrio,
-    is_snowpack_zarrio,
-    open_snowpack_zarrio,
-    read_snowpack_archives,
+    adapt_snowpack_zarr,
+    is_snowpack_zarr,
+    open_snowpack_zarr,
+    read_snowpack_zarrs,
 )
 from xsnow.units import validate_xsnow_unit_attrs
 
@@ -144,8 +144,8 @@ def _assert_layered_untouched(ds, started):
 
 
 def test_detection_and_read_dispatch(archive):
-    raw = open_snowpack_zarrio(archive)
-    assert is_snowpack_zarrio(raw)
+    raw = open_snowpack_zarr(archive)
+    assert is_snowpack_zarr(raw)
     xs, started = _no_tasks(lambda: xsnow.read(archive, lazy=True))
     _assert_layered_untouched(xs.data, started)
     assert isinstance(xs, xsnow.xsnowDataset)
@@ -231,7 +231,7 @@ def test_layers_pad_and_trim(archive):
 
 def test_pinned_time_grid_uses_data_presence(tmp_path):
     path = _write_archive(tmp_path / 'pinned.zarr', pinned=True)
-    raw = open_snowpack_zarrio(path)
+    raw = open_snowpack_zarr(path)
     assert not np.isnat(raw['time'].values).any()
     ds = xsnow.read(path, lazy=True).data
     assert ds.sizes['time'] == T - 1
@@ -299,13 +299,13 @@ def test_stale_layer_mask(archive):
         ).all()
 
 
-def test_read_snowpack_archives_concat_and_exclude(tmp_path):
+def test_read_snowpack_zarrs_concat_and_exclude(tmp_path):
     a = _write_archive(tmp_path / 'a.zarr', pinned=True,
                        ids=['A', 'A1', 'B', 'B1'])
     b = _write_archive(tmp_path / 'b.zarr', pinned=True,
                        ids=['C', 'C1', 'D', 'D1'])
     xs, started = _no_tasks(
-        lambda: read_snowpack_archives([a, b], exclude=['D'])
+        lambda: read_snowpack_zarrs([a, b], exclude=['D'])
     )
     _assert_layered_untouched(xs.data, started)
     assert list(xs.data['location'].values) == ['A', 'B', 'C']
@@ -320,7 +320,7 @@ def test_xsnow_layout_archive_is_untouched(tmp_path, archive):
     # string realization labels are stored as variable-length strings,
     # which the eager memory guard cannot size: open lazily
     back = xsnow.read(target, lazy=True)
-    assert not is_snowpack_zarrio(xr.open_zarr(target))
+    assert not is_snowpack_zarr(xr.open_zarr(target))
     xr.testing.assert_allclose(back.data['height'].compute(), ds['height'])
     with pytest.raises(ZarrIOLayoutError, match='ZarrIO reader options'):
         xsnow.read(target, layers=3)
@@ -363,7 +363,7 @@ def test_station_index_file_replaces_missing_labels(tmp_path):
 def test_adapt_rejects_foreign_layout():
     ds = xr.Dataset({'x': ('location', np.zeros(2))})
     with pytest.raises(ZarrIOLayoutError):
-        adapt_snowpack_zarrio(ds)
+        adapt_snowpack_zarr(ds)
 
 
 @pytest.mark.skipif(not REAL_ARCHIVE.exists(), reason='no real archive')
@@ -384,3 +384,80 @@ def test_real_archive_opens_lazily():
     assert float(hs.max()) > 1.5           # metres
     top = column.isel(time=int(hs.argmax())).compute()
     assert np.nanmax(top.values) == pytest.approx(float(hs.max()), rel=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+#          WRITING DERIVED VARIABLES BACK INTO A ZARRIO ARCHIVE               #
+# --------------------------------------------------------------------------- #
+
+from xsnow.io.zarr import write_snowpack_zarr  # noqa: E402
+
+
+def _derived(ds, name='punstable'):
+    """A computed-looking per-layer variable on the adapted dataset's axes,
+    valued so every cell encodes its own position."""
+    shape = tuple(ds.sizes[d] for d in ('location', 'time', 'slope',
+                                        'realization', 'layer'))
+    values = np.arange(np.prod(shape), dtype='float32').reshape(shape)
+    var = xr.DataArray(values, dims=('location', 'time', 'slope',
+                                     'realization', 'layer'),
+                       name=name, attrs={'units': '1', 'standard_name': name})
+    return ds.assign({name: var})[[name]]
+
+
+def test_derived_round_trips_exactly(archive):
+    ds = xsnow.read(archive, lazy=True).data
+    block = _derived(ds)
+    write_snowpack_zarr(archive, block, ['punstable'])
+
+    back = xsnow.read(archive, lazy=True).data['punstable']
+    got = back.transpose(*block['punstable'].dims).values
+    np.testing.assert_array_equal(got, block['punstable'].values)
+    assert back.attrs['units'] == '1'
+    assert back.attrs['derived_by'] == 'xsnow'
+    # the archive is still recognized as a ZarrIO store
+    assert is_snowpack_zarr(open_snowpack_zarr(archive))
+
+
+def test_derived_rewrite_is_idempotent(archive):
+    ds = xsnow.read(archive, lazy=True).data
+    block = _derived(ds)
+    write_snowpack_zarr(archive, block, ['punstable'])
+    write_snowpack_zarr(archive, block, ['punstable'])
+    back = xsnow.read(archive, lazy=True).data['punstable']
+    np.testing.assert_array_equal(
+        back.transpose(*block['punstable'].dims).values,
+        block['punstable'].values)
+
+
+def test_partial_block_leaves_the_rest_nan(archive):
+    ds = xsnow.read(archive, lazy=True).data
+    block = _derived(ds.isel(location=slice(0, 1)))
+    write_snowpack_zarr(archive, block, ['punstable'])
+    raw = zarr.open_group(str(archive), mode='r')['punstable'][:]
+    written = np.isfinite(raw).any(axis=(1, 2))
+    # one location = its slots only; the other location's slots stay NaN
+    assert 0 < written.sum() < raw.shape[0]
+
+
+def test_refuses_a_dataset_without_provenance(archive):
+    ds = xsnow.read(archive, lazy=True).data
+    block = _derived(ds).drop_vars(['zarrio_slot', 'zarrio_time_slot'])
+    with pytest.raises(ZarrIOLayoutError, match='zarrio_slot'):
+        write_snowpack_zarr(archive, block, ['punstable'])
+
+
+def test_refuses_a_consolidated_store(archive):
+    ds = xsnow.read(archive, lazy=True).data
+    (Path(archive) / '.zmetadata').write_text('{}')
+    with pytest.raises(ZarrIOLayoutError, match='consolidated'):
+        write_snowpack_zarr(archive, _derived(ds), ['punstable'])
+
+
+def test_refuses_a_shape_mismatched_existing_array(archive):
+    ds = xsnow.read(archive, lazy=True).data
+    g = zarr.open_group(str(archive), mode='r+')
+    g.create_array('punstable', shape=(2, 2), chunks=(2, 2), dtype='float32',
+                   fill_value=np.nan)
+    with pytest.raises(ZarrIOLayoutError, match='shape'):
+        write_snowpack_zarr(archive, _derived(ds), ['punstable'])

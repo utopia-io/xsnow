@@ -59,7 +59,7 @@ from .zarr import (
     _read_zarr,
     to_zarr,
     ZarrIOLayoutError,
-    read_snowpack_archives,
+    read_snowpack_zarrs,
 )
 
 
@@ -71,7 +71,7 @@ __all__ = [
     'to_netcdf',
     'to_zarr',
     'build_archive',
-    'read_snowpack_archives',
+    'read_snowpack_zarrs',
     'check_memory_budget',
     'MemoryLimitExceeded',
     'MemorySizeUnknown',
