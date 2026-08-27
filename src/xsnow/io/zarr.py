@@ -655,6 +655,27 @@ def _convert_to_registry_units(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
+def _normalize_hand_hardness(ds: xr.Dataset) -> xr.Dataset:
+    """Put hand hardness on the positive index scale.
+
+    The ZarrIO plugin writes the hand-hardness index with the sign flipped
+    (``-EMS[e].hard``): in a .pro file a negative value marks Newtons, but the
+    archive declares index steps and stores the 1..6 index negated. An archive
+    from a corrected plugin is already positive and passes through untouched.
+    """
+    if 'hand_hardness' not in ds:
+        return ds
+    da = ds['hand_hardness']
+    if 'index' not in str(da.attrs.get('long_name', '')).lower():
+        return ds
+    # negate only where negative: NaN padding and a corrected plugin's
+    # positive values stay as they are
+    fixed = da.where(~(da < 0), -da)
+    fixed.attrs = dict(da.attrs)
+    ds['hand_hardness'] = fixed
+    return ds
+
+
 def adapt_snowpack_zarr(
     ds: xr.Dataset,
     *,
@@ -800,6 +821,7 @@ def adapt_snowpack_zarr(
 
     ds = ds.rename({k: v for k, v in _ARCHIVE_RENAMES.items() if k in ds})
     ds = _convert_to_registry_units(ds)
+    ds = _normalize_hand_hardness(ds)
     ds = attach_registry_attrs(ds, units=False, long_name=False)
 
     if 'layer' in ds.dims:
