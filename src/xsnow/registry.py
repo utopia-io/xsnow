@@ -303,15 +303,6 @@ registry = {
         "plot_units": "ISO",
         "si_units": "ISO"
     },
-    "datetag": {
-        "param_code": None,
-        "aliases": [],
-        "standard_name": "deposition_datetag",
-        "xsnow_units": "ISO",
-        "pro_units": "ISO",
-        "plot_units": "ISO",
-        "si_units": "ISO"
-    },
     "bulk_salinity": {
         "param_code": "0540",
         "aliases": ["bulk salinity"],
