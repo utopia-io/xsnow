@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+import dask.array as da
+from dask.callbacks import Callback
 
 from xsnow.extensions import classification
 from xsnow import xsnowDataset
@@ -261,7 +263,7 @@ def test_classify_spatially_attach_coord_from_wkt_mapping(tiny_xsnow_geo: xsnowD
 def test_classify_spatially_return_mask(tiny_xsnow_geo: xsnowDataset):
     polys = {
         "zoneA": "POLYGON ((-1 -1, -1 1, 1 1, 1 -1, -1 -1))",
-        "zoneB": "POLYGON ((9 9, 9 11, 11 11, 11 9, 9 9))",
+        "zoneB": "POLYGON ((-2 -2, -2 11, 11 11, 11 -2, -2 -2))",
     }
     mask = tiny_xsnow_geo.classify_spatially(polys, name="in_zone", kind="mask", polygons_crs="EPSG:4326")
     assert isinstance(mask, xr.DataArray)
@@ -271,6 +273,98 @@ def test_classify_spatially_return_mask(tiny_xsnow_geo: xsnowDataset):
     assert bool(mask.sel(polygon="zoneA", location="A").item()) is True
     assert bool(mask.sel(polygon="zoneA", location="B").item()) is False
     assert bool(mask.sel(polygon="zoneB", location="B").item()) is True
+
+
+def test_classify_spatially_remains_lazy(tiny_xsnow_geo: xsnowDataset):
+    polys = {
+        "zoneA": "POLYGON ((-1 -1, -1 1, 1 1, 1 -1, -1 -1))",
+        "zoneB": "POLYGON ((9 9, 9 11, 11 11, 11 9, 9 9))",
+    }
+    lazy = xsnowDataset(tiny_xsnow_geo.data.chunk({"location": 1}))
+    assert isinstance(lazy.longitude.data, da.Array)
+    started_tasks = []
+
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        mask = lazy.classify_spatially(
+            polys,
+            name="in_zone",
+            kind="mask",
+            polygons_crs="EPSG:4326",
+        )
+        labeled = lazy.classify_spatially(
+            polys,
+            name="zone",
+            kind="coord",
+            polygons_crs="EPSG:4326",
+        )
+
+    assert started_tasks == []
+    assert isinstance(mask.data, da.Array)
+    assert isinstance(labeled.zone.data, da.Array)
+    assert mask.chunks[mask.get_axis_num("location")] == lazy.longitude.chunks[0]
+    assert labeled.zone.chunks == lazy.longitude.chunks
+
+    expected_mask = tiny_xsnow_geo.classify_spatially(
+        polys,
+        name="in_zone",
+        kind="mask",
+        polygons_crs="EPSG:4326",
+    )
+    expected_labeled = tiny_xsnow_geo.classify_spatially(
+        polys,
+        name="zone",
+        kind="coord",
+        polygons_crs="EPSG:4326",
+    )
+    computed_mask = mask.compute()
+    computed_labels = labeled.zone.compute()
+    xr.testing.assert_equal(computed_mask, expected_mask)
+    xr.testing.assert_equal(
+        computed_labels, expected_labeled.zone
+    )
+    assert computed_labels.sel(location="A").item() == "zoneA"
+
+
+def test_classify_spatially_processes_lazy_coordinate_grid_blockwise():
+    grid = xr.Dataset(
+        coords={
+            "y": [0, 1],
+            "x": [0, 1, 2],
+            "longitude": (
+                ("y", "x"),
+                np.array([[0.0, 2.0, 10.0], [0.0, 2.0, 10.0]]),
+            ),
+            "latitude": (
+                ("y", "x"),
+                np.array([[0.0, 0.0, 0.0], [2.0, 2.0, 2.0]]),
+            ),
+        },
+        attrs={"crs": "EPSG:4326"},
+    ).chunk({"y": 1, "x": 2})
+    lazy = xsnowDataset(grid)
+    started_tasks = []
+
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        labeled = lazy.classify_spatially(
+            {"zoneA": "POLYGON ((-1 -1, -1 3, 3 3, 3 -1, -1 -1))"},
+            name="zone",
+            kind="coord",
+            polygons_crs="EPSG:4326",
+        )
+
+    assert started_tasks == []
+    assert isinstance(labeled.zone.data, da.Array)
+    assert labeled.zone.chunks == lazy.longitude.chunks
+    expected = np.array(
+        [
+            ["zoneA", "zoneA", "outside"],
+            ["zoneA", "zoneA", "outside"],
+        ],
+        dtype=object,
+    )
+    computed = labeled.zone.compute()
+    assert computed.dims == ("y", "x")
+    np.testing.assert_array_equal(computed.values, expected)
 
 
 def test_classify_spatially_from_geojson_file(tmp_path, tiny_xsnow_geo: xsnowDataset):

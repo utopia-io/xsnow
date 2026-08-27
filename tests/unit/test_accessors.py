@@ -6,6 +6,8 @@ import pandas as pd
 import warnings
 import xarray as xr
 import xsnow
+import dask.array as da
+from dask.callbacks import Callback
 
 # In pandas 2, tz_localize throws pytz exceptions, but throws ValueError in pandas 3
 if pd.__version__ >= "3":
@@ -169,6 +171,20 @@ def test_labels_accessor_get(indexed_coord):
 
     assert isinstance(actual_da, xr.DataArray)
     xr.testing.assert_equal(actual_da, expected_da)
+
+
+def test_labels_accessor_get_remains_lazy(indexed_coord):
+    lazy = indexed_coord.chunk({"location": 2})
+    started_tasks = []
+
+    with Callback(pretask=lambda key, *_: started_tasks.append(key)):
+        actual = lazy.labels.get()
+
+    assert started_tasks == []
+    assert isinstance(actual.data, da.Array)
+    assert actual.chunks == lazy.chunks
+    xr.testing.assert_equal(actual.compute(), indexed_coord.labels.get())
+
 
 def test_labels_accessor_get_dict(indexed_coord):
     """
