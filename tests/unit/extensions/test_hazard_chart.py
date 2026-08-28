@@ -14,6 +14,7 @@ from xsnow.extensions import get_backend
 from xsnow.extensions.hazard_chart import (
     XAXIS_ANCHORS,
     HazardChart,
+    _compute_variant_timeseries,
     _to_host,
     register_stability_index,
     stability_index_info,
@@ -172,10 +173,142 @@ class TestVariants:
             HazardChart(reduced).compute_hazard_chart(indices=['foo'])
 
 
+class TestLayerContext:
+    def test_requested_values_create_one_variant_each(self, full):
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['sk38'], depth_var='z',
+            layer_context={'datetag': ['2025-11-01', '2025-12-06']},
+        )
+
+        assert hc.data.sizes['hc_variant'] == 2
+        assert [_flat(hc.data, 'hc_instability', i) for i in range(2)] == \
+            pytest.approx([0.8, 3.0])
+        assert [info.layer_context['value']
+                for info in hc.list_hc_variants()] == [
+                    '2025-11-01T00:00:00', '2025-12-06T00:00:00',
+                ]
+
+    def test_variable_name_enumerates_unique_nonmissing_values(self, full):
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['sk38'], depth_var='z', layer_context='datetag',
+        )
+        assert hc.data.sizes['hc_variant'] == 2
+        assert [info.layer_context['value']
+                for info in hc.list_hc_variants()] == [
+                    '2025-11-01T00:00:00', '2025-12-06T00:00:00',
+                ]
+
+    def test_contexts_expand_each_index_in_order(self, full):
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['punstable', 'sk38'], depth_var='z',
+            layer_context={'datetag': ['2025-11-01', '2025-12-06']},
+        )
+        infos = hc.list_hc_variants()
+        assert [info.stability_index for info in infos] == [
+            'punstable', 'punstable', 'sk38', 'sk38',
+        ]
+
+    def test_unmatched_value_is_an_empty_variant(self, full):
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['sk38'], depth_var='z',
+            layer_context={'datetag': ['2099-01-01']},
+        )
+        assert np.isnan(_flat(hc.data, 'hc_instability'))
+
+    def test_boolean_array_is_one_mask(self, full):
+        mask = xr.DataArray(
+            [False, False, True, False, False], dims=['layer'],
+            name='persistent_layers',
+        )
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['sk38'], depth_var='z', layer_context=mask,
+        )
+        assert _flat(hc.data, 'hc_instability') == pytest.approx(3.0)
+        assert hc.list_hc_variants()[0].layer_context == {
+            'kind': 'mask', 'variable': 'persistent_layers',
+        }
+
+    def test_categorical_array_creates_variants(self, full):
+        context = xr.DataArray(
+            ['old', 'old', 'persistent', None, None],
+            dims=['layer'], name='custom_problem',
+        )
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['sk38'], depth_var='z', layer_context=context,
+        )
+        assert [_flat(hc.data, 'hc_instability', i) for i in range(2)] == \
+            pytest.approx([0.8, 3.0])
+
+    def test_datetime_context_keeps_subsecond_values_distinct(self, full):
+        context = xr.DataArray(
+            np.array([
+                '2026-01-01T00:00:00.100',
+                '2026-01-01T00:00:00.200',
+                'NaT', 'NaT', 'NaT',
+            ], dtype='datetime64[ns]'),
+            dims=['layer'], name='event_time',
+        )
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['sk38'], depth_var='z', layer_context=context,
+        )
+        assert [info.layer_context['value']
+                for info in hc.list_hc_variants()] == [
+                    '2026-01-01T00:00:00.1',
+                    '2026-01-01T00:00:00.2',
+                ]
+
+    def test_only_one_context_variable_is_supported(self, full):
+        with pytest.raises(ValueError, match='exactly one context variable'):
+            HazardChart(full).compute_hazard_chart(
+                indices=['sk38'], depth_var='z',
+                layer_context={'datetag': [T1], 'other': ['x']},
+            )
+
+    def test_variant_timeseries_uses_selected_context_and_classes(self, full):
+        custom = [
+            ('very poor', 0.1), ('poor', 0.5),
+            ('fair', 1.0), ('rather stable', np.inf),
+        ]
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['sk38'], depth_var='z', classes={'sk38': custom},
+            layer_context={'datetag': ['2025-11-01', '2025-12-06']},
+        )
+        infos = hc.list_hc_variants()
+        assert infos[0].classes == tuple(custom)
+        medians = [
+            _compute_variant_timeseries(hc.data, info).data['sk38_median'].item()
+            for info in infos
+        ]
+        assert medians == pytest.approx([0.8, 3.0])
+        assert np.isnan(
+            _compute_variant_timeseries(hc.data, infos[0])
+            .data['sk38_depth'].item()
+        )
+        raw = hc.data.attrs['hc_variants']
+        assert 'Infinity' not in raw
+        json.loads(
+            raw,
+            parse_constant=lambda value: pytest.fail(
+                f'non-standard JSON constant: {value}'
+            ),
+        )
+
+
 class TestGrouping:
     @pytest.fixture
     def grouped(self, full):
         data = full.data.assign_coords(region=('location', ['R1']))
+        return xsnowDataset(data)
+
+    @pytest.fixture
+    def grouped_pair(self, reduced):
+        weaker = reduced.data.assign(
+            sk38=xr.full_like(reduced.data['sk38'], 0.4),
+        )
+        data = xr.concat([reduced.data, weaker], dim='location')
+        data = data.assign_coords(
+            location=['L1', 'L2'], region=('location', ['R1', 'R2']),
+        )
         return xsnowDataset(data)
 
     def test_group_id_and_mapping(self, grouped):
@@ -209,6 +342,40 @@ class TestGrouping:
         )
         with pytest.raises(ValueError, match='without .groupby.'):
             hc.subset_hazard_points(hc_variant=0, group='R1')
+
+    def test_ungrouped_variant_stays_ungrouped_after_grouped_variant(self, grouped):
+        hc = HazardChart(grouped).compute_hazard_chart(
+            indices=['punstable'], depth_var='z', groupby='region',
+        ).compute_hazard_chart(indices=['sk38'], depth_var='z')
+
+        assert 'hc_group_id' in hc.data
+        with pytest.raises(ValueError, match='without .groupby.'):
+            hc.subset_hazard_points(hc_variant=1, group='R1')
+
+    def test_variant_timeseries_aggregates_the_selected_group(self, grouped_pair):
+        hc = HazardChart(grouped_pair).compute_hazard_chart(
+            indices=['sk38'], groupby='region',
+        )
+        info = hc.list_hc_variants()[0]
+
+        all_points = _compute_variant_timeseries(hc.data, info).data
+        r1 = _compute_variant_timeseries(hc.data, info, group='R1').data
+        r2 = _compute_variant_timeseries(hc.data, info, group='R2').data
+        assert all_points['sk38_median'].item() == pytest.approx(0.6)
+        assert r1['sk38_median'].item() == pytest.approx(0.8)
+        assert r2['sk38_median'].item() == pytest.approx(0.4)
+
+    def test_slope_and_realization_remain_point_dimensions(self, full):
+        data = full.data.expand_dims(
+            slope=['north', 'south'], realization=['r1', 'r2', 'r3'],
+        )
+        hc = HazardChart(xsnowDataset(data)).compute_hazard_chart(
+            indices=['sk38'], depth_var='z',
+            groupby=['slope', 'realization'],
+        )
+        point = hc.data['hc_instability'].isel(hc_variant=0)
+        assert point.sizes['slope'] == 2
+        assert point.sizes['realization'] == 3
 
 
 class TestRegistry:
@@ -463,6 +630,22 @@ class TestPlots:
             y, stats.data['punstable_median'].values
         )
 
+    def test_group_applies_to_timeseries_and_two_panel_plot(self, reduced):
+        weaker = reduced.data.assign(
+            sk38=xr.full_like(reduced.data['sk38'], 0.4),
+        )
+        data = xr.concat([reduced.data, weaker], dim='location').assign_coords(
+            location=['L1', 'L2'], region=('location', ['R1', 'R2']),
+        )
+        hc = HazardChart(xsnowDataset(data)).compute_hazard_chart(
+            indices=['sk38'], groupby='region',
+        )
+
+        ax = hc.plot_hc_timeseries(hc_variant=0, group='R2')
+        np.testing.assert_allclose(ax.lines[0].get_ydata(), [0.4])
+        _, ax_ts = hc.plot_hc_with_timeseries(hc_variant=0, group='R1')
+        np.testing.assert_allclose(ax_ts.lines[0].get_ydata(), [0.8])
+
 
 def _chunk_data_vars(xs, **chunks):
     """Chunk the data variables only, as xsnow.read leaves the small
@@ -520,6 +703,17 @@ class TestLazyInput:
         sub = chart.subset_hazard_points(hc_variant=0, group='AT-07-01|alpine')
         assert sub['hc_instability'].values.ravel()[0] == pytest.approx(0.8)
 
+    def test_requested_layer_context_stays_lazy(self, full):
+        chunked = _chunk_data_vars(full, location=1, layer=-1)
+        started = []
+        with Callback(pretask=lambda key, *_: started.append(key)):
+            chart = HazardChart(chunked).compute_hazard_chart(
+                indices=['sk38'], depth_var='z',
+                layer_context={'datetag': ['2025-11-01']},
+            )
+        assert started == []
+        assert chart.data['hc_instability'].chunks is not None
+
 
 class TestAtTime:
     @pytest.fixture
@@ -541,3 +735,46 @@ class TestAtTime:
         assert both.data.sizes['hc_variant'] == 2
         assert (both.data['hc_instabilityDrivenBy'].isel(hc_variant=1).values
                 == 0).all()
+
+    def test_default_subset_uses_only_times_contained_in_variant(self, two_times):
+        hc = HazardChart(two_times).compute_hazard_chart(
+            indices=['punstable'], at_time='2026-01-16',
+        )
+        sub = hc.subset_hazard_points(hc_variant=0)
+        assert sub.sizes['time'] == 1
+        assert sub['time'].values[0] == np.datetime64('2026-01-16')
+
+    def test_scalar_slice_and_array_time_selection(self, two_times):
+        hc = HazardChart(two_times).compute_hazard_chart(indices=['punstable'])
+        scalar = hc.subset_hazard_points(
+            hc_variant=0, time=np.datetime64('2026-01-15'))
+        sliced = hc.subset_hazard_points(
+            hc_variant=0, time=slice('2026-01-15', '2026-01-16'))
+        array = hc.subset_hazard_points(
+            hc_variant=0, time=['2026-01-16', '2026-01-15'])
+        assert 'time' not in scalar.dims
+        assert sliced.sizes['time'] == 2
+        assert list(array['time'].dt.day.values) == [16, 15]
+
+    def test_marker_aggregation_can_limit_work_to_selected_time(self, two_times):
+        hc = HazardChart(two_times).compute_hazard_chart(indices=['punstable'])
+        info = hc.list_hc_variants()[0]
+        stats = _compute_variant_timeseries(
+            hc.data, info, time='2026-01-16',
+        ).data
+        assert stats.sizes['time'] == 1
+        assert stats['time'].values[0] == np.datetime64('2026-01-16')
+
+    def test_subsecond_at_time_round_trips_through_metadata(self, reduced):
+        data = xr.concat([reduced.data, reduced.data], dim='time')
+        data = data.assign_coords(time=np.array([
+            '2026-01-15T00:00:00.100',
+            '2026-01-15T00:00:00.200',
+        ], dtype='datetime64[ns]'))
+        hc = HazardChart(xsnowDataset(data)).compute_hazard_chart(
+            indices=['punstable'], at_time='2026-01-15T00:00:00.100',
+        )
+        info = hc.list_hc_variants()[0]
+        assert info.time == ('2026-01-15T00:00:00.1',)
+        sub = hc.subset_hazard_points(hc_variant=0)
+        assert sub.sizes['time'] == 1

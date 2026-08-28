@@ -7,7 +7,8 @@ stability class (x axis). The module holds one selection engine and
 three ways to use it:
 
 - :class:`HazardChart` (``compute_hazard_chart``) stacks one chart variant
-  per stability index on a new ``hc_variant`` dimension and plots it.
+  per stability-index/layer-context selection on a new ``hc_variant``
+  dimension and plots it.
 - ``compute_hc_points`` returns the same selection as flat per-index
   variables, the compact form that geojson writers and zarr stores consume.
 - ``compute_hc_timeseries`` pools those points per timestamp into a median,
@@ -69,11 +70,12 @@ from __future__ import annotations
 
 import importlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 from xsnow import DatasetDecorator
@@ -265,19 +267,27 @@ class HCVariantInfo:
     depth_var: str
     xaxis_scaling: str = "McClung2009"
     time: tuple[str, ...] | None = None
+    layer_context: dict[str, Any] | None = None
+    classes: tuple[tuple[str, float], ...] | None = None
+
+
+@dataclass(frozen=True)
+class _LayerContextSelection:
+    """One layer mask and the serializable context that produced it."""
+    mask: xr.DataArray | None
+    metadata: dict[str, Any] | None
 
 
 class HazardChart(DatasetDecorator):
     """
     Hazard-chart decorator that accumulates chart variants on a dataset.
 
-    A *variant* is one configuration of the chart: a stability index, a
-    grouping and a depth variable. ``compute_hazard_chart`` appends one entry
-    per index along a new ``hc_variant`` dimension, so several indices - or
-    the same index under different groupings - sit side by side in one
-    dataset and keep their own ``hc_instability``/``hc_depth``/... slices;
-    ``list_hc_variants`` reports what each entry holds. The base dataset is
-    never mutated: every method returns a new wrapped instance.
+    A *variant* is one coherent chart timeseries: a stability index, a layer
+    context, a grouping, a depth variable, and all selected timestamps.
+    ``compute_hazard_chart`` appends one entry per index/context combination
+    along a new ``hc_variant`` dimension. ``list_hc_variants`` reports what
+    each entry holds. The base dataset is never mutated: every method returns
+    a new wrapped instance.
 
     ``name`` aids introspection/registries, ``priority`` can order decorators
     in a pipeline.
@@ -298,10 +308,19 @@ class HazardChart(DatasetDecorator):
         classes: dict[str, Sequence] | None = None,
         xaxis_scaling: str = "McClung2009",
         at_time: Any | None = None,
+        layer_context: (
+            str
+            | Mapping[str, Any]
+            | xr.DataArray
+            | Sequence[Any]
+            | np.ndarray
+            | None
+        ) = None,
     ) -> HazardChart:
         """
-        Reduce every profile to one hazard-chart point per stability index
-        and append the result as new entries of the ``hc_variant`` dimension.
+        Reduce every profile to one hazard-chart point per stability-index /
+        layer-context combination and append the results as new entries of
+        the ``hc_variant`` dimension.
 
         Per index the weakest layer sets ``hc_instability``; ``hc_depth`` is
         the depth of the deepest layer in the poor-or-worse classes, falling
@@ -334,6 +353,17 @@ class HazardChart(DatasetDecorator):
             Anchor set of :data:`XAXIS_ANCHORS` behind ``hc_xaxis``.
         at_time
             Timestamp(s) to compute for; every timestamp by default.
+        layer_context
+            Layers eligible to drive the chart. A variable name, such as
+            ``"datetag"``, creates one variant per unique non-missing value.
+            A one-key mapping, such as
+            ``{"datetag": ["2026-01-14", "2026-01-20"]}``, creates one
+            variant per requested value, including an empty variant when no
+            layer matches. A custom DataArray or one-dimensional array
+            creates one variant per unique non-missing value; a boolean array
+            instead acts as one layer mask. Multiple context variables in one
+            call are not supported, but a custom array may encode a composite
+            context.
 
         Returns
         -------
@@ -355,6 +385,9 @@ class HazardChart(DatasetDecorator):
         ...     indices=['sk38', 'punstable'], depth_var='z',
         ...     groupby=['region_id', 'band'])
         >>> hc.plot_hazard_chart(hc_variant=1, group='AT-07-01|alpine')
+        >>> by_datetag = HazardChart(ds).compute_hazard_chart(
+        ...     indices=['sk38'],
+        ...     layer_context={'datetag': ['2026-01-14', '2026-01-20']})
         """
         base = self.data
         if layer_dim not in base.dims:
@@ -374,6 +407,10 @@ class HazardChart(DatasetDecorator):
             ds = base.sel(time=at_time)
             times = tuple(_to_timestr(t) for t in ds["time"].values)
 
+        context_selections = _layer_context_selections(
+            ds, layer_context=layer_context, layer_dim=layer_dim,
+        )
+
         out = base.copy()
         groupby_list = _normalize_groupby(groupby)
         start_idx = int(out.sizes.get("hc_variant", 0))
@@ -385,7 +422,8 @@ class HazardChart(DatasetDecorator):
             collected = {n: [out[n]] for n in out.data_vars if n.startswith("hc_")}
             out = out.drop_dims("hc_variant")
 
-        for offset, index_var in enumerate(indices):
+        variant_offset = 0
+        for index_var in indices:
             side, cls_steps = cfg[index_var]
             if index_var not in ds:
                 raise KeyError(f"Expected index variable '{index_var}' not found in dataset.")
@@ -405,23 +443,10 @@ class HazardChart(DatasetDecorator):
                 gvar = "grain_type"
             with_gcode = gvar in ds
 
-            inputs = [si, ds[dvar]] + ([ds[gvar]] if with_gcode else [])
             names = ["hc_instability", "hc_depth", "hc_xaxis",
                      "hc_instabilityDrivenBy", "hc_depthDrivenBy"]
             if with_gcode:
                 names.append("hc_gcode")
-            results = apply_profile_block(
-                _hazard_chart_block, *inputs,
-                output_dtype=[float_result_dtype(si)] * len(names),
-                layer_dim=layer_dim,
-                output_core_dims=[[]] * len(names),
-                kwargs={
-                    "side": side, "cls_steps": cls_steps,
-                    "xaxis_scaling": xaxis_scaling,
-                    "flip_depth": str(ds[dvar].attrs.get("positive", "")).lower() == "up",
-                    "with_gcode": with_gcode,
-                },
-            )
             attributes = {
                 "hc_instability": {
                     "description": "Weakest stability index value", "index": index_var,
@@ -447,37 +472,65 @@ class HazardChart(DatasetDecorator):
                              "description": "Grain code of the weakest layer"},
             }
 
-            new_idx = start_idx + offset
-            arrays = {
-                name: result.assign_attrs(attributes[name])
-                .expand_dims(hc_variant=[new_idx])
-                for name, result in zip(names, results)
-            }
-            mapping = {}
-            if groupby_list:
-                proto = arrays["hc_instability"].isel(hc_variant=0)
-                gid, mapping = _unique_labels_to_ids(
-                    _compose_group_labels(ds, groupby_list, proto_like=proto)
+            for context in context_selections:
+                inputs = [si, ds[dvar]] + ([ds[gvar]] if with_gcode else [])
+                if context.mask is not None:
+                    inputs = [value.where(context.mask) for value in inputs]
+
+                results = apply_profile_block(
+                    _hazard_chart_block, *inputs,
+                    output_dtype=[float_result_dtype(si)] * len(names),
+                    layer_dim=layer_dim,
+                    output_core_dims=[[]] * len(names),
+                    kwargs={
+                        "side": side, "cls_steps": cls_steps,
+                        "xaxis_scaling": xaxis_scaling,
+                        "flip_depth": str(
+                            ds[dvar].attrs.get("positive", "")
+                        ).lower() == "up",
+                        "with_gcode": with_gcode,
+                    },
                 )
-                gid = gid.where(proto.notnull())
-                arrays["hc_group_id"] = gid.assign_attrs(
-                    {"description": "Integer group id; see coordinate attrs for mapping"}
-                ).expand_dims(hc_variant=[new_idx])
+                new_idx = start_idx + variant_offset
+                variant_offset += 1
+                arrays = {
+                    name: result.assign_attrs(attributes[name])
+                    .expand_dims(hc_variant=[new_idx])
+                    for name, result in zip(names, results)
+                }
+                mapping = {}
+                if groupby_list:
+                    proto = arrays["hc_instability"].isel(hc_variant=0)
+                    gid, mapping = _unique_labels_to_ids(
+                        _compose_group_labels(ds, groupby_list, proto_like=proto)
+                    )
+                    gid = gid.where(proto.notnull())
+                    arrays["hc_group_id"] = gid.assign_attrs(
+                        {"description":
+                         "Integer group id; see coordinate attrs for mapping"}
+                    ).expand_dims(hc_variant=[new_idx])
 
-            for name, arr in arrays.items():
-                collected.setdefault(name, []).append(arr)
+                for name, arr in arrays.items():
+                    collected.setdefault(name, []).append(arr)
 
-            if groupby_list:
-                group_maps.append((new_idx, mapping))
-            _append_variant_info(out, HCVariantInfo(
-                idx=new_idx,
-                stability_index=index_var,
-                groupby=groupby_list,
-                depth_var=dvar,
-                xaxis_scaling=xaxis_scaling,
-                time=times,
-            ))
-            _append_history(out, f"hazard_chart:variant={new_idx},index={index_var}")
+                if groupby_list:
+                    group_maps.append((new_idx, mapping))
+                _append_variant_info(out, HCVariantInfo(
+                    idx=new_idx,
+                    stability_index=index_var,
+                    groupby=groupby_list,
+                    depth_var=dvar,
+                    xaxis_scaling=xaxis_scaling,
+                    time=times,
+                    layer_context=context.metadata,
+                    classes=tuple(
+                        (str(label), float(bound))
+                        for label, bound in cls_steps
+                    ),
+                ))
+                _append_history(
+                    out, f"hazard_chart:variant={new_idx},index={index_var}"
+                )
 
         for name, parts in collected.items():
             out[name] = parts[0] if len(parts) == 1 else xr.concat(parts, dim="hc_variant")
@@ -502,13 +555,15 @@ class HazardChart(DatasetDecorator):
         time: Any | None = None,
     ) -> xr.Dataset:
         """
-        The points of one variant, optionally of one group and/or timestamp.
+        The points of one variant, optionally of one group and/or time
+        selection.
 
         A variant holds every profile of the dataset; this changes the view
         onto it without recomputing anything: zoom into one region or
         elevation band (``group``, by id or by its label from the
-        ``hc_group_id`` mapping) or onto one timestamp. The plots use it to
-        pick what they draw.
+        ``hc_group_id`` mapping) or onto a scalar, slice, or array-like
+        ``time`` selection. With no time selector, all timestamps contained
+        in the variant are returned. The plots use it to pick what they draw.
 
         Returns
         -------
@@ -522,12 +577,15 @@ class HazardChart(DatasetDecorator):
 
         sub = ds.sel(hc_variant=hc_variant)
 
-        # optional time selection (preserve other dims)
+        meta = _variant_info(self.data, hc_variant, required=False)
+        if meta is not None and meta.time is not None and "time" in sub.dims:
+            sub = sub.sel(time=list(meta.time))
+
         if time is not None and "time" in sub.dims:
             sub = sub.sel(time=time)
 
         if group is not None:
-            if "hc_group_id" not in sub:
+            if (meta is not None and not meta.groupby) or "hc_group_id" not in sub:
                 raise ValueError(
                     f"Variant {hc_variant} was computed without 'groupby'; "
                     "there are no groups to select."
@@ -559,6 +617,7 @@ class HazardChart(DatasetDecorator):
         s: float = 7.0,
         alpha: float = 0.7,
         xaxis_scaling: str | None = None,
+        timeseries: xsnowDataset | None = None,
         pooled: xsnowDataset | None = None,
     ):
         """
@@ -568,7 +627,9 @@ class HazardChart(DatasetDecorator):
         Parameters
         ----------
         hc_variant, group, time
-            What to draw, see ``subset_hazard_points``.
+            What to draw, see ``subset_hazard_points``. By default every
+            timestamp contained in the variant is drawn; ``time`` accepts a
+            scalar, slice, or array-like xarray selector.
         ax
             Axes to draw into; a new figure otherwise.
         s, alpha
@@ -576,10 +637,14 @@ class HazardChart(DatasetDecorator):
         xaxis_scaling
             Anchor set of :data:`XAXIS_ANCHORS` spacing the depth axis;
             defaults to the variant's.
+        timeseries
+            Optional aggregated timeseries used for the marker at ``time``.
+            Without it, the timeseries is derived from the selected variant
+            and ``group``. Supplying one avoids repeated aggregation or lets
+            callers use an externally prepared subset.
         pooled
-            Precomputed ``compute_hc_timeseries`` result used for the
-            marker at ``time`` (e.g. one pooled over a subset); without
-            it the whole variant is pooled.
+            Deprecated compatibility alias for ``timeseries``. Passing both
+            raises ``ValueError``.
 
         Returns
         -------
@@ -587,12 +652,17 @@ class HazardChart(DatasetDecorator):
             A square chart when no ``ax`` is given. Points coloured by the
             grain type of the weakest layer
             (``GRAIN_COLORS['SARP']``), dashed class boundaries, and at a
-            given ``time`` a green diamond at the pooled median value and
-            median unstable depth of that timestamp.
+            selected ``time`` a green diamond at each selected timestamp's
+            aggregated median value and median unstable depth.
         """
         import matplotlib.pyplot as plt
 
-        meta = self.list_hc_variants()[hc_variant]
+        if timeseries is not None and pooled is not None:
+            raise ValueError("Pass either 'timeseries' or 'pooled', not both.")
+        if timeseries is None:
+            timeseries = pooled
+
+        meta = _variant_info(self.data, hc_variant)
         index = meta.stability_index
         cfg = stability_index_info(index)
         scaling = xaxis_scaling or meta.xaxis_scaling
@@ -621,14 +691,21 @@ class HazardChart(DatasetDecorator):
             ax.set_ylabel(_index_label(index))
             ax.set_ylim(*cfg["axlim"])
             ax.grid(True)
-            _draw_class_lines(ax, index)
+            _draw_class_lines(ax, index, classes=meta.classes)
 
             if time is not None:
-                stats = (pooled if pooled is not None
-                         else _pool_variant(self.data, meta)).data
+                stats = (
+                    timeseries if timeseries is not None
+                    else _compute_variant_timeseries(
+                        self.data, meta, group=group, time=time,
+                    )
+                ).data
                 at = stats.sel(time=time)
-                mark_x = scale_depth(float(at[f"{index}_depth"]), scaling)
-                ax.plot(float(mark_x), float(at[f"{index}_median"]),
+                mark_x = scale_depth(
+                    _to_host(at[f"{index}_depth"].data), scaling
+                ).reshape(-1)
+                mark_y = _to_host(at[f"{index}_median"].data).reshape(-1)
+                ax.plot(mark_x, mark_y,
                         "D", color="green", mec="black", mew=0.6,
                         ms=9, zorder=5)
         return ax
@@ -637,27 +714,31 @@ class HazardChart(DatasetDecorator):
         self,
         *,
         hc_variant: int,
+        group: int | str | None = None,
         time: Any | None = None,
         ax=None,
         timeseries: xsnowDataset | None = None,
         label_side: str = "left",
     ):
         """
-        Pooled timeseries of one variant's index: median line, 25-75 %
-        band (darker) and 10-90 % band (lighter) across all profiles per
-        timestamp, with the class boundaries and a dashed mark at ``time``.
+        Aggregated timeseries of one variant's index: median line, 25-75 %
+        band (darker) and 10-90 % band (lighter) across the selected profiles
+        per timestamp, with the class boundaries and marks at ``time``.
 
         Parameters
         ----------
         hc_variant
-            Variant whose index is pooled.
+            Variant whose index is aggregated.
+        group
+            Optional group id or label to aggregate; all points by default.
         time
-            Timestamp to mark; none by default.
+            Timestamp, slice, or array-like selection to mark; none by
+            default.
         ax
             Axes to draw into; a new figure otherwise.
         timeseries
-            Precomputed ``compute_hc_timeseries`` result (e.g. pooled over a
-            subset); without it the whole variant is pooled.
+            Optional pre-aggregated result. Without it, the timeseries is
+            derived directly from ``hc_variant`` and ``group``.
         label_side
             ``'left'`` or ``'right'``: where the y-axis label and tick
             labels sit.
@@ -669,10 +750,12 @@ class HazardChart(DatasetDecorator):
         import matplotlib.dates as mdates
         import matplotlib.pyplot as plt
 
-        meta = self.list_hc_variants()[hc_variant]
+        meta = _variant_info(self.data, hc_variant)
         index = meta.stability_index
-        stats = (timeseries if timeseries is not None
-                 else _pool_variant(self.data, meta)).data
+        stats = (
+            timeseries if timeseries is not None
+            else _compute_variant_timeseries(self.data, meta, group=group)
+        ).data
         if label_side not in ("left", "right"):
             raise ValueError("label_side must be 'left' or 'right'")
 
@@ -689,8 +772,9 @@ class HazardChart(DatasetDecorator):
             ax.plot(t, stats[f'{index}_median'].values, color='green',
                     label='median')
             if time is not None:
-                ax.axvline(self.data['time'].sel(time=time).values,
-                           color='k', lw=0.8, ls='--')
+                marked = np.atleast_1d(stats['time'].sel(time=time).values)
+                for timestamp in marked:
+                    ax.axvline(timestamp, color='k', lw=0.8, ls='--')
             if len(t) > 1:
                 ax.set_xlim(t[0], t[-1])
                 locator = mdates.AutoDateLocator(maxticks=6)
@@ -705,7 +789,7 @@ class HazardChart(DatasetDecorator):
             ax.set_ylabel(_index_label(index))
             ax.set_ylim(*stability_index_info(index)["axlim"])
             ax.grid(True)
-            _draw_class_lines(ax, index)
+            _draw_class_lines(ax, index, classes=meta.classes)
             ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
                       ncols=3, frameon=False, fontsize="small",
                       columnspacing=1.2, handlelength=1.6)
@@ -725,13 +809,15 @@ class HazardChart(DatasetDecorator):
     ):
         """
         Two-panel figure: the hazard chart (``plot_hazard_chart``, panel a)
-        next to its pooled timeseries (``plot_hc_timeseries``, panel b),
+        next to its aggregated timeseries (``plot_hc_timeseries``, panel b),
         sharing the y axis; the right panel keeps its labels on the right
         so the panels sit close together.
 
-        ``group`` only subsets the scatter panel; ``timeseries`` feeds both
-        the timeseries panel and the marker in the scatter panel. The
-        remaining parameters are those of the two plotters.
+        ``group`` selects the points drawn in the scatter panel and the same
+        points aggregated in the timeseries panel. An explicitly supplied
+        ``timeseries`` feeds both panels and is assumed to represent the
+        requested group. The remaining parameters are those of the two
+        plotters.
 
         Returns
         -------
@@ -740,9 +826,11 @@ class HazardChart(DatasetDecorator):
         """
         import matplotlib.pyplot as plt
 
-        meta = self.list_hc_variants()[hc_variant]
-        stats = (timeseries if timeseries is not None
-                 else _pool_variant(self.data, meta))
+        meta = _variant_info(self.data, hc_variant)
+        stats = (
+            timeseries if timeseries is not None
+            else _compute_variant_timeseries(self.data, meta, group=group)
+        )
 
         with plt.style.context(latex_style()):
             if axes is None:
@@ -758,10 +846,11 @@ class HazardChart(DatasetDecorator):
             self.plot_hazard_chart(hc_variant=hc_variant, group=group,
                                    time=time, ax=ax_hc, s=s, alpha=alpha,
                                    xaxis_scaling=xaxis_scaling,
-                                   pooled=stats)
-            self.plot_hc_timeseries(hc_variant=hc_variant, time=time,
-                                    ax=ax_ts, timeseries=stats,
-                                    label_side="right")
+                                   timeseries=stats)
+            self.plot_hc_timeseries(
+                hc_variant=hc_variant, group=group, time=time,
+                ax=ax_ts, timeseries=stats, label_side="right",
+            )
             for panel, label, lx in ((ax_hc, "a", 0.95), (ax_ts, "b", 0.96)):
                 panel.text(lx, 0.95, label, transform=panel.transAxes,
                            ha="right", va="top", fontweight="bold",
@@ -1025,6 +1114,166 @@ def compute_hc_timeseries(
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
+def _layer_context_selections(
+    ds: xr.Dataset,
+    *,
+    layer_context: Any,
+    layer_dim: str,
+) -> list[_LayerContextSelection]:
+    """Expand one context specification into layer masks and metadata."""
+    if layer_context is None:
+        return [_LayerContextSelection(mask=None, metadata=None)]
+
+    if isinstance(layer_context, (str, Mapping)):
+        if isinstance(layer_context, str):
+            variable = layer_context
+            requested = None
+        else:
+            if len(layer_context) != 1:
+                raise ValueError(
+                    "layer_context must contain exactly one context variable"
+                )
+            variable, raw_values = next(iter(layer_context.items()))
+            requested = _context_values(raw_values)
+            if not requested:
+                raise ValueError("layer_context must request at least one value")
+
+        if variable not in ds:
+            raise KeyError(f"layer_context variable '{variable}' not found")
+        context = ds[variable]
+        if layer_dim not in context.dims:
+            raise ValueError(
+                f"layer_context variable '{variable}' must depend on "
+                f"layer_dim='{layer_dim}'"
+            )
+        if requested is None:
+            requested = _unique_context_values(context)
+            if not requested:
+                raise ValueError(
+                    f"layer_context variable '{variable}' has no non-missing values"
+                )
+
+        selections = []
+        for value in requested:
+            coerced = _coerce_context_value(value, context.dtype, str(variable))
+            selections.append(_LayerContextSelection(
+                mask=(context == coerced).fillna(False).astype(bool),
+                metadata={
+                    "kind": "value",
+                    "variable": str(variable),
+                    "value": _context_metadata_value(coerced),
+                },
+            ))
+        return selections
+
+    if isinstance(layer_context, xr.DataArray):
+        context = layer_context
+        unknown = set(context.dims) - set(ds.dims)
+        if unknown:
+            raise ValueError(
+                "layer_context array has dimensions not in the dataset: "
+                f"{sorted(unknown)}"
+            )
+        if layer_dim not in context.dims:
+            raise ValueError(
+                f"layer_context array must depend on layer_dim='{layer_dim}'"
+            )
+        for dim in context.dims:
+            if dim in context.coords and dim in ds.coords:
+                try:
+                    context = context.sel({dim: ds.coords[dim]})
+                except (KeyError, ValueError) as exc:
+                    raise ValueError(
+                        f"layer_context array does not cover dataset dimension '{dim}'"
+                    ) from exc
+            if context.sizes[dim] != ds.sizes[dim]:
+                raise ValueError(
+                    f"layer_context array dimension '{dim}' has length "
+                    f"{context.sizes[dim]}; expected {ds.sizes[dim]}"
+                )
+        name = context.name or "custom_array"
+    else:
+        values = np.asarray(layer_context)
+        if values.ndim != 1 or values.size != ds.sizes[layer_dim]:
+            raise ValueError(
+                "layer_context custom array must be one-dimensional with "
+                f"length {ds.sizes[layer_dim]}"
+            )
+        coords = {layer_dim: ds.coords[layer_dim]} if layer_dim in ds.coords else None
+        context = xr.DataArray(values, dims=[layer_dim], coords=coords)
+        name = "custom_array"
+
+    if np.issubdtype(context.dtype, np.bool_):
+        return [_LayerContextSelection(
+            mask=context.fillna(False).astype(bool),
+            metadata={"kind": "mask", "variable": str(name)},
+        )]
+
+    requested = _unique_context_values(context)
+    if not requested:
+        raise ValueError("layer_context custom array has no non-missing values")
+    return [
+        _LayerContextSelection(
+            mask=(context == value).fillna(False).astype(bool),
+            metadata={
+                "kind": "value",
+                "variable": str(name),
+                "value": _context_metadata_value(value),
+            },
+        )
+        for value in requested
+    ]
+
+
+def _context_values(values: Any) -> list[Any]:
+    """Mapping value normalized to an ordered list; strings stay scalar."""
+    if isinstance(values, xr.DataArray):
+        values = values.values
+    if isinstance(values, (str, bytes)) or np.ndim(values) == 0:
+        return [values]
+    return list(values)
+
+
+def _unique_context_values(context: xr.DataArray) -> list[Any]:
+    """Unique non-missing values in first-occurrence order."""
+    out: list[Any] = []
+    seen: set[Any] = set()
+    for value in _to_host(context.data).reshape(-1):
+        if bool(pd.isna(value)):
+            continue
+        key = _context_metadata_value(value)
+        if key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
+def _coerce_context_value(value: Any, dtype, variable: str) -> Any:
+    """Make string date/timedelta selectors comparable to typed arrays."""
+    if np.dtype(dtype).kind not in "Mm":
+        return value
+    try:
+        return np.asarray(value).astype(dtype)[()]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"layer_context value {value!r} is invalid for '{variable}' "
+            f"with dtype {dtype}"
+        ) from exc
+
+
+def _context_metadata_value(value: Any) -> Any:
+    """JSON-friendly, stable representation of one selected value."""
+    if isinstance(value, (np.datetime64, pd.Timestamp)):
+        return _to_timestr(value)
+    if isinstance(value, np.timedelta64):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
 def _normalize_groupby(groupby: str | Sequence[str] | None) -> tuple[str, ...]:
     if groupby is None:
         return ()
@@ -1078,7 +1327,20 @@ def _append_variant_info(ds: xr.Dataset, info: HCVariantInfo) -> None:
         lst = []
     lst = [x for x in lst if int(x.get("idx", -1)) != info.idx]
     lst.append(asdict(info))
-    ds.attrs[key] = json.dumps(lst, default=str)
+    ds.attrs[key] = json.dumps(_json_safe(lst), allow_nan=False)
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively make metadata valid strict JSON, including infinities."""
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def _read_variant_info(ds: xr.Dataset) -> list[HCVariantInfo]:
@@ -1098,9 +1360,36 @@ def _read_variant_info(ds: xr.Dataset) -> list[HCVariantInfo]:
                 depth_var=str(r["depth_var"]),
                 xaxis_scaling=str(r.get("xaxis_scaling", "McClung2009")),
                 time=None if time is None else tuple(str(t) for t in time),
+                layer_context=(
+                    None if r.get("layer_context") is None
+                    else dict(r["layer_context"])
+                ),
+                classes=(
+                    None if r.get("classes") is None
+                    else tuple(
+                        (str(label), float(bound))
+                        for label, bound in r["classes"]
+                    )
+                ),
             )
         )
     return out
+
+
+def _variant_info(
+    ds: xr.Dataset,
+    hc_variant: int,
+    *,
+    required: bool = True,
+) -> HCVariantInfo | None:
+    """Metadata selected by the ``hc_variant`` coordinate value."""
+    wanted = int(hc_variant)
+    for info in _read_variant_info(ds):
+        if info.idx == wanted:
+            return info
+    if required:
+        raise KeyError(f"No metadata found for hc_variant={hc_variant}")
+    return None
 
 
 def _unique_labels_to_ids(labels_da: xr.DataArray) -> tuple[xr.DataArray, dict[int, str]]:
@@ -1137,8 +1426,10 @@ def _update_group_mapping_attr(
 
 
 def _to_timestr(value: Any) -> str:
-    """ISO string of one timestamp, at second resolution."""
-    return str(np.datetime_as_string(np.asarray(value).astype("datetime64[s]")))
+    """ISO timestamp preserving sub-second precision when it exists."""
+    timestamp = np.asarray(value).astype("datetime64[ns]")
+    text = str(np.datetime_as_string(timestamp, unit="ns"))
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def _to_host(values) -> np.ndarray:
@@ -1166,19 +1457,45 @@ def _depth_axis(ax, scaling: str) -> None:
     ax.set_xlabel("Depth / cm")
 
 
-def _pool_variant(data: xr.Dataset, meta: HCVariantInfo) -> xsnowDataset:
-    """The pooled timeseries of a variant's index, with its depth variable."""
+def _compute_variant_timeseries(
+    data: xr.Dataset,
+    meta: HCVariantInfo,
+    *,
+    group: int | str | None = None,
+    time: Any | None = None,
+) -> xsnowDataset:
+    """Aggregate the already-computed points of one variant and group."""
+    index = meta.stability_index
+    if time is not None and not isinstance(time, slice):
+        time = np.atleast_1d(time)
+    variant = HazardChart(xsnowDataset(data)).subset_hazard_points(
+        hc_variant=meta.idx, group=group, time=time,
+    )
+    points = xr.Dataset({
+        index: variant["hc_instability"].assign_attrs(
+            dict(variant["hc_instability"].attrs)
+        ),
+        f"{index}_depth": variant["hc_depth"].assign_attrs(
+            dict(variant["hc_depth"].attrs)
+        ),
+    })
     return compute_hc_timeseries(
-        xsnowDataset(data), indices=[meta.stability_index],
-        depth_var=meta.depth_var, xaxis_scaling=meta.xaxis_scaling,
+        xsnowDataset(points), indices=[index],
+        xaxis_scaling=meta.xaxis_scaling,
+        classes=(None if meta.classes is None else {index: meta.classes}),
     )
 
 
-def _draw_class_lines(ax, index: str) -> None:
+def _draw_class_lines(
+    ax,
+    index: str,
+    *,
+    classes: Sequence[tuple[str, float]] | None = None,
+) -> None:
     """Dashed lines on the class boundaries, coloured like the more
     unstable of the two classes each boundary separates."""
     cfg = stability_index_info(index)
-    classes = cfg["classes"]
+    classes = classes or cfg["classes"]
     for i, (label, bound) in enumerate(classes[:-1]):
         worse = classes[i + 1][0] if cfg["weak"] == "max" else label
         ax.axhline(bound, ls="--", lw=1.2, zorder=1.5,
