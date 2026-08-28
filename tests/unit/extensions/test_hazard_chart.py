@@ -376,14 +376,14 @@ class TestPlots:
         ax = hc.plot_hazard_chart(hc_variant=0)
         # the evenly spaced ticks are labelled with the anchor depths
         assert [t.get_text() for t in ax.get_xticklabels()] == \
-            ['0', '0.18', '0.35', '0.7', '1.5', '3']
-        assert ax.get_xlabel() == 'Depth / m'
+            ['0', '18', '35', '70', '150', '300']
+        assert ax.get_xlabel() == 'Depth / cm'
         assert not [c for c in ax.get_children()
                     if 'Secondary' in type(c).__name__]
         assert 'size' not in (ax.get_xlabel() + ax.get_ylabel()).lower()
         ax = hc.plot_hazard_chart(hc_variant=0, xaxis_scaling='Techel2023')
         assert [t.get_text() for t in ax.get_xticklabels()] == \
-            ['0', '0.3', '0.4', '0.5', '0.8', '1']
+            ['0', '30', '40', '50', '80', '100']
         with pytest.raises(ValueError, match='x-axis scaling'):
             hc.plot_hazard_chart(hc_variant=0, xaxis_scaling='foo')
 
@@ -395,9 +395,18 @@ class TestPlots:
         # one point per profile; its driving layer is the DH layer (550)
         assert [to_hex(c) for c in face] == ['#0078ff']
 
+    def test_single_chart_is_square(self, reduced):
+        hc = HazardChart(reduced).compute_hazard_chart(indices=['punstable'])
+        ax = hc.plot_hazard_chart(hc_variant=0)
+        assert ax.get_box_aspect() == pytest.approx(1.0)
+        w, h = ax.figure.get_size_inches()
+        assert w == pytest.approx(h)
+
     def test_timeseries_panel_alone(self, reduced):
         hc = HazardChart(reduced).compute_hazard_chart(indices=['punstable'])
         ax = hc.plot_hc_timeseries(hc_variant=0)
+        w, h = ax.figure.get_size_inches()
+        assert w / h > 1.6          # wide: a timeseries
         assert len(ax.collections) == 2  # 10-90 % and 25-75 % bands
         assert ax.lines, 'median line missing'
         assert ax.yaxis.get_label_position() == 'left'
@@ -410,14 +419,14 @@ class TestPlots:
 
     def test_two_panel_layout(self, reduced):
         hc = HazardChart(reduced).compute_hazard_chart(indices=['punstable'])
-        ax_hc, ax_ts = hc.plot_hazard_chart_timeseries(
+        ax_hc, ax_ts = hc.plot_hc_with_timeseries(
             hc_variant=0, time='2026-01-15',
         )
         assert ax_hc.get_ylim() == (0.0, 1.0) == ax_ts.get_ylim()
         assert ax_hc.get_ylabel() == 'Punstable / -' == ax_ts.get_ylabel()
         assert ax_hc.get_title() == '' == ax_ts.get_title()
         assert [t.get_text() for t in ax_hc.get_xticklabels()] == \
-            ['0', '0.18', '0.35', '0.7', '1.5', '3']
+            ['0', '18', '35', '70', '150', '300']
         assert ax_ts.yaxis.get_label_position() == 'right'
         assert [t.get_text() for t in ax_hc.texts] == ['a']
         assert [t.get_text() for t in ax_ts.texts] == ['b']
@@ -439,7 +448,7 @@ class TestPlots:
         hc = HazardChart(ds).compute_hazard_chart(
             stability_index='punstable', depth_var='below',
         )
-        ax_hc, ax_ts = hc.plot_hazard_chart_timeseries(
+        ax_hc, ax_ts = hc.plot_hc_with_timeseries(
             hc_variant=0, time='2026-01-15',
         )
         diamonds = [ln for ln in ax_hc.lines if ln.get_marker() == 'D']
@@ -448,8 +457,7 @@ class TestPlots:
     def test_precomputed_timeseries_is_used(self, reduced):
         hc = HazardChart(reduced).compute_hazard_chart(indices=['punstable'])
         stats = reduced.compute_hc_timeseries(indices=['punstable'])
-        _, ax_ts = hc.plot_hazard_chart_timeseries(hc_variant=0,
-                                                   timeseries=stats)
+        _, ax_ts = hc.plot_hc_with_timeseries(hc_variant=0, timeseries=stats)
         y = ax_ts.lines[0].get_ydata()
         np.testing.assert_allclose(
             y, stats.data['punstable_median'].values
@@ -509,6 +517,8 @@ class TestLazyInput:
         assert np.isfinite(chart.data['hc_group_id'].values).any()
         mapping = json.loads(chart.data['hc_group_id'].attrs['mapping'])
         assert mapping['0']['labels'] == {'0': 'AT-07-01|alpine'}
+        sub = chart.subset_hazard_points(hc_variant=0, group='AT-07-01|alpine')
+        assert sub['hc_instability'].values.ravel()[0] == pytest.approx(0.8)
 
 
 class TestAtTime:

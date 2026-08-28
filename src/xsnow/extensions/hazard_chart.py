@@ -560,7 +560,8 @@ class HazardChart(DatasetDecorator):
                 if group not in rev:
                     raise KeyError(f"group label '{group}' not found for variant {hc_variant}")
                 group = rev[group]
-            mask = sub["hc_group_id"] == int(group)
+            # the ids are point-level data; dropping needs an eager mask
+            mask = (sub["hc_group_id"] == int(group)).compute()
             sub = sub.where(mask, drop=True)
 
         keep = ["hc_instability", "hc_depth", "hc_xaxis", "hc_gcode",
@@ -603,7 +604,8 @@ class HazardChart(DatasetDecorator):
         Returns
         -------
         matplotlib.axes.Axes
-            Points coloured by the grain type of the weakest layer
+            A square chart when no ``ax`` is given. Points coloured by the
+            grain type of the weakest layer
             (``GRAIN_COLORS['SARP']``), dashed class boundaries, and at a
             given ``time`` a green diamond at the pooled median value and
             median unstable depth of that timestamp.
@@ -630,7 +632,8 @@ class HazardChart(DatasetDecorator):
 
         with plt.style.context(latex_style()):
             if ax is None:
-                _, ax = plt.subplots()
+                _, ax = plt.subplots(figsize=(4.8, 4.8))
+                ax.set_box_aspect(1)
 
             ax.scatter(scale_depth(x, scaling), y, s=s, alpha=alpha, c=colors,
                        edgecolors=(0, 0, 0, 0.3), linewidths=0.3)
@@ -695,7 +698,7 @@ class HazardChart(DatasetDecorator):
 
         with plt.style.context(latex_style()):
             if ax is None:
-                _, ax = plt.subplots()
+                _, ax = plt.subplots(figsize=(8.3, 4.8))
             t = stats['time'].values
             ax.fill_between(t, stats[f'{index}_p10'].values,
                             stats[f'{index}_p90'].values,
@@ -728,7 +731,7 @@ class HazardChart(DatasetDecorator):
                       columnspacing=1.2, handlelength=1.6)
         return ax
 
-    def plot_hazard_chart_timeseries(
+    def plot_hc_with_timeseries(
         self,
         *,
         hc_variant: int,
@@ -742,7 +745,7 @@ class HazardChart(DatasetDecorator):
     ):
         """
         Two-panel figure: the hazard chart (``plot_hazard_chart``, panel a)
-        next to the pooled timeseries (``plot_hc_timeseries``, panel b),
+        next to its pooled timeseries (``plot_hc_timeseries``, panel b),
         sharing the y axis; the right panel keeps its labels on the right
         so the panels sit close together.
 
@@ -1147,11 +1150,11 @@ def _to_host(values) -> np.ndarray:
 
 
 def _depth_axis(ax, scaling: str) -> None:
-    """Depth ticks at the evenly spaced anchors of ``scaling``."""
+    """Depth ticks [cm] at the evenly spaced anchors of ``scaling``."""
     anchors = XAXIS_ANCHORS[scaling]
-    ax.set_xticks(range(len(anchors)), labels=[f"{d:g}" for d in anchors])
+    ax.set_xticks(range(len(anchors)), labels=[f"{100 * d:g}" for d in anchors])
     ax.set_xlim(0, len(anchors) - 1)
-    ax.set_xlabel("Depth / m")
+    ax.set_xlabel("Depth / cm")
 
 
 def _pool_variant(data: xr.Dataset, meta: HCVariantInfo) -> xsnowDataset:
