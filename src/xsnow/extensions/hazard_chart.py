@@ -378,12 +378,10 @@ class HazardChart(DatasetDecorator):
             [m below surface], ``hc_xaxis`` (the depth on the chart's x
             axis), ``hc_instabilityDrivenBy`` / ``hc_depthDrivenBy`` (index
             of the driving layer along ``layer_dim``, NaN without a value or
-            outside ``at_time``), ``hc_gcode`` / ``hc_gcode_deep`` (SLF grain
-            codes of the weakest and of the depth-driving layer, from
-            ``<idx>_gcode_weak`` / ``<idx>_gcode_deep`` or ``grain_type``),
-            ``hc_layer_count`` (selected layers with a depth) and, with
-            ``groupby``, ``hc_group_id``. The variant configuration is listed
-            by ``list_hc_variants``.
+            outside ``at_time``), ``hc_gcode`` (SLF grain code of the
+            weakest layer, from ``<idx>_gcode_weak`` or ``grain_type``) and,
+            with ``groupby``, ``hc_group_id``. The variant configuration is
+            listed by ``list_hc_variants``.
 
         Examples
         --------
@@ -479,15 +477,11 @@ class HazardChart(DatasetDecorator):
             if gvar not in ds and "grain_type" in ds:
                 gvar = "grain_type"
             with_gcode = gvar in ds
-            gvar_deep = f"{index_var}_gcode_deep"
-            if gvar_deep not in ds:
-                gvar_deep = gvar
 
             names = ["hc_instability", "hc_depth", "hc_xaxis",
                      "hc_instabilityDrivenBy", "hc_depthDrivenBy"]
             if with_gcode:
-                names += ["hc_gcode", "hc_gcode_deep"]
-            names.append("hc_layer_count")
+                names.append("hc_gcode")
             attributes = {
                 "hc_instability": {
                     "description": "Weakest stability index value", "index": index_var,
@@ -511,21 +505,16 @@ class HazardChart(DatasetDecorator):
                 },
                 "hc_gcode": {"units": "Swiss Code F1F2F3",
                              "description": "Grain code of the weakest layer"},
-                "hc_gcode_deep": {"units": "Swiss Code F1F2F3",
-                                  "description": "Grain code of the layer that drove hc_depth"},
-                "hc_layer_count": {"units": "1",
-                                   "description": "Selected layers with a depth"},
             }
-            inputs += [si, ds[dvar]] + ([ds[gvar], ds[gvar_deep]] if with_gcode else [])
-            core += [[layer_dim]] * (4 if with_gcode else 2)
+            inputs += [si, ds[dvar]] + ([ds[gvar]] if with_gcode else [])
+            core += [[layer_dim]] * (3 if with_gcode else 2)
             # layer indices and the scaled depth are float64 like numpy makes
             # them; values, depth and codes keep the index dtype
             value_dtype = float_result_dtype(si)
             dtypes = [value_dtype, value_dtype, np.dtype("float64"), np.dtype("float64"),
                       np.dtype("float64")]
             if with_gcode:
-                dtypes += [value_dtype, value_dtype]
-            dtypes.append(np.dtype("int16"))
+                dtypes.append(value_dtype)
             index_specs.append({
                 "side": side, "classes": cls_steps, "with_gcode": with_gcode,
                 "flip_depth": str(ds[dvar].attrs.get("positive", "")).lower() == "up",
@@ -636,9 +625,8 @@ class HazardChart(DatasetDecorator):
         HazardChart
             The dataset with the new variant appended. Its
             ``hc_instabilityDrivenBy`` / ``hc_depthDrivenBy`` hold the
-            ``hc_variant`` id that drove the value / the depth,
-            ``hc_layer_count`` sums the variants' counts, and the metadata
-            records the combined variants under ``layer_context``.
+            ``hc_variant`` id that drove the value / the depth, and the
+            metadata records the combined variants under ``layer_context``.
         """
         ids = [int(v) for v in hc_variants]
         if not ids:
@@ -659,12 +647,9 @@ class HazardChart(DatasetDecorator):
 
         sub = self.data.sel(hc_variant=ids)
         names = ["hc_instability", "hc_depth"]
-        with_gcode = "hc_gcode" in sub and "hc_gcode_deep" in sub
+        with_gcode = "hc_gcode" in sub
         if with_gcode:
-            names += ["hc_gcode", "hc_gcode_deep"]
-        with_count = "hc_layer_count" in sub
-        if with_count:
-            names.append("hc_layer_count")
+            names.append("hc_gcode")
         arrays = []
         for name in names:
             da = sub[name]
@@ -674,13 +659,10 @@ class HazardChart(DatasetDecorator):
         out_names = ["hc_instability", "hc_depth", "hc_xaxis",
                      "hc_instabilityDrivenBy", "hc_depthDrivenBy"]
         if with_gcode:
-            out_names += ["hc_gcode", "hc_gcode_deep"]
-        if with_count:
-            out_names.append("hc_layer_count")
+            out_names.append("hc_gcode")
         value_dtype = float_result_dtype(sub["hc_instability"])
-        dtypes = [value_dtype] * (len(out_names) - with_count)
-        if with_count:
-            dtypes.append(np.dtype("int16"))
+        dtypes = [value_dtype, value_dtype, np.dtype("float64"), np.dtype("float64"),
+                  np.dtype("float64")] + ([value_dtype] if with_gcode else [])
         results = xr.apply_ufunc(
             _aggregate_block, *arrays,
             input_core_dims=[["hc_variant"]] * len(arrays),
@@ -688,7 +670,7 @@ class HazardChart(DatasetDecorator):
             dask="parallelized", output_dtypes=dtypes,
             kwargs={
                 "side": side, "classes": classes, "with_gcode": with_gcode,
-                "with_count": with_count, "variant_ids": np.asarray(ids, dtype=float),
+                "variant_ids": np.asarray(ids, dtype=float),
                 "xaxis_scaling": first.xaxis_scaling,
             },
         )
@@ -786,9 +768,8 @@ class HazardChart(DatasetDecorator):
             mask = (sub["hc_group_id"] == int(group)).compute()
             sub = sub.where(mask, drop=True)
 
-        keep = ["hc_instability", "hc_depth", "hc_xaxis", "hc_gcode", "hc_gcode_deep",
-                "hc_instabilityDrivenBy", "hc_depthDrivenBy", "hc_layer_count",
-                "hc_group_id"]
+        keep = ["hc_instability", "hc_depth", "hc_xaxis", "hc_gcode",
+                "hc_instabilityDrivenBy", "hc_depthDrivenBy", "hc_group_id"]
         keep = [k for k in keep if k in sub]
         return sub[keep]
 
@@ -1735,9 +1716,9 @@ def _hazard_chart_block(*arrays, n_context_vars, has_masks, contexts, index_spec
     every index for every context.
 
     ``arrays`` holds the context variables, the stacked masks
-    ``(..., mask, layer)`` if any, then per index the values, the depth
-    and, with grain codes, the codes of the weakest and the deepest layer.
-    The layer axis is last; every output gets the context axis instead.
+    ``(..., mask, layer)`` if any, then per index the values, the depth and,
+    if present, the grain codes. The layer axis is last; every output gets
+    the context axis instead.
     """
     pos = 0
     context_vars = arrays[:n_context_vars]
@@ -1762,29 +1743,26 @@ def _hazard_chart_block(*arrays, n_context_vars, has_masks, contexts, index_spec
     for spec in index_specs:
         values, depths = arrays[pos], arrays[pos + 1]
         pos += 2
-        gcodes = gcodes_deep = None
+        gcodes = None
         if spec["with_gcode"]:
-            gcodes, gcodes_deep = arrays[pos], arrays[pos + 1]
-            pos += 2
+            gcodes = arrays[pos]
+            pos += 1
         if spec["flip_depth"]:
             depths = -depths          # e.g. 'z' counts up from the surface
         # a layer's class does not depend on the context
         poor_all = classify_poor_or_worse(values, spec["classes"])
-        has_depth = xp.isfinite(depths)
         shape = values.shape[:-1] + (n_ctx,)
         dtypes = [values.dtype, values.dtype, "float64", "float64", "float64"]
         if spec["with_gcode"]:
-            dtypes += [values.dtype, values.dtype]
+            dtypes.append(values.dtype)
         outs = [xp.full(shape, np.nan, dtype=dtype) for dtype in dtypes]
-        count = xp.zeros(shape, dtype="int16")
         for k, mask in enumerate(layer_masks):
             if mask is None:
-                stab, poor, present = values, poor_all, has_depth
+                stab, poor = values, poor_all
             else:
                 mask = xp.asarray(mask)
                 stab = xp.where(mask, values, np.nan)
                 poor = poor_all & mask
-                present = has_depth & mask
             weak_idx, valid, deep_idx = select_weak_and_deep(
                 stab, spec["side"], None, poor=poor
             )
@@ -1796,24 +1774,15 @@ def _hazard_chart_block(*arrays, n_context_vars, has_masks, contexts, index_spec
             outs[4][..., k] = xp.where(valid, deep_idx, np.nan)
             if spec["with_gcode"]:
                 outs[5][..., k] = xp.where(valid, take_layer(gcodes, weak_idx), np.nan)
-                outs[6][..., k] = xp.where(valid, take_layer(gcodes_deep, deep_idx), np.nan)
-            count[..., k] = present.sum(-1)
-        outputs += outs + [count]
+        outputs += outs
     return tuple(outputs)
 
 
-def _aggregate_block(values, depths, *rest, side, classes, with_gcode, with_count,
+def _aggregate_block(values, depths, gcodes=None, *, side, classes, with_gcode,
                      variant_ids, xaxis_scaling):
     """Combine the points of several variants (last axis) by the selection:
     weakest value, deepest poor-or-worse depth by its value."""
     xp = get_backend(values)
-    gcodes = gcodes_deep = counts = None
-    rest = list(rest)
-    if with_gcode:
-        gcodes, gcodes_deep = rest[0], rest[1]
-        rest = rest[2:]
-    if with_count:
-        counts = rest[0]
     weak_idx, valid = _argreduce_layer(values, side)
     poor = classify_poor_or_worse(values, classes)
     candidates = xp.where(poor & xp.isfinite(depths), depths, -np.inf)
@@ -1828,10 +1797,7 @@ def _aggregate_block(values, depths, *rest, side, classes, with_gcode, with_coun
         xp.where(valid, ids[deep_idx], np.nan),
     ]
     if with_gcode:
-        outputs += [xp.where(valid, take_layer(gcodes, weak_idx), np.nan),
-                    xp.where(valid, take_layer(gcodes_deep, deep_idx), np.nan)]
-    if with_count:
-        outputs.append(counts.sum(-1).astype("int16"))
+        outputs.append(xp.where(valid, take_layer(gcodes, weak_idx), np.nan))
     return tuple(outputs)
 
 

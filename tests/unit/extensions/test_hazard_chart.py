@@ -268,22 +268,10 @@ class TestLayerContext:
         assert [i.layer_context['kind'] for i in infos] == ['value', 'value', 'mask']
         assert [_flat(hc.data, 'hc_instability', i) for i in range(3)] == \
             pytest.approx([0.8, 3.0, 4.0])
-        assert [_flat(hc.data, 'hc_layer_count', i) for i in range(3)] == [2, 1, 2]
         with pytest.raises(ValueError, match='selects a boolean'):
             HazardChart(full).compute_hazard_chart(
                 indices=['sk38'], depth_var='z', layer_context={'datetag': True},
             )
-
-    def test_deep_grain_code_and_count(self, full):
-        hc = HazardChart(full).compute_hazard_chart(
-            indices=['punstable', 'sk38'], depth_var='z',
-        )
-        # punstable: weakest and deepest poor layer are both layer 0 (DH)
-        assert _flat(hc.data, 'hc_gcode', 0) == 550 == _flat(hc.data, 'hc_gcode_deep', 0)
-        # sk38: weakest layer 1 (FC 440) is the only poor layer
-        assert _flat(hc.data, 'hc_gcode', 1) == 440 == _flat(hc.data, 'hc_gcode_deep', 1)
-        assert _flat(hc.data, 'hc_layer_count', 1) == 5
-        assert hc.data['hc_layer_count'].dtype == np.dtype('int16')
 
     def test_one_block_call_for_all_variants(self, full, monkeypatch):
         from xsnow.extensions import hazard_chart as module
@@ -346,7 +334,6 @@ class TestAggregate:
             float(points['punstable_depth'].values.ravel()[0]))
         assert _flat(hc.data, 'hc_gcode', 2) == 550
         assert _flat(hc.data, 'hc_instabilityDrivenBy', 2) == 0    # the T1 variant
-        assert _flat(hc.data, 'hc_layer_count', 2) == 3
         info = hc.list_hc_variants()[2]
         assert info.layer_context == {'kind': 'aggregate', 'variants': [0, 1]}
         assert info.stability_index == 'punstable'
