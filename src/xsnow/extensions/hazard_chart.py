@@ -14,12 +14,14 @@ three ways to use it:
   percentiles and the median unstable depth.
 
 Both entry points run on a full-layer stratigraphy (depth from a shared
-``depth_var``, driving layers reported by index) and on a dataset whose
-layer dimension carries a string ``datetag`` coordinate, one entry per
-layer group with per-index ``<idx>_depth`` (driving entries reported by
-label; e.g. the simplified stratigraphy of the ``datetags`` extension).
-Depths always count downwards from the snow surface, also for depth
-variables stored counting up.
+``depth_var``) and on a reduced one whose layer dimension holds one entry
+per layer group with per-index ``<idx>_depth`` (e.g. the simplified
+stratigraphy of the ``datetags`` package). The engine reports the driving
+layers by their index; ``compute_hc_points`` names them after a string
+``datetag`` coordinate on the layer dimension when there is one, and can
+restrict the selection to some of those datetags. Depths always count
+downwards from the snow surface, also for depth variables stored counting
+up.
 
 Stability classes are defined by the index extensions (``sk38``, ``rta``,
 ``critical_crack_length``) and imported here; an external index package
@@ -293,7 +295,6 @@ class HazardChart(DatasetDecorator):
         groupby: str | Sequence[str] | None = None,
         layer_dim: str = "layer",
         depth_var: str = "z",
-        datetags: Sequence[str] | None = None,
         classes: dict[str, Sequence] | None = None,
         xaxis_scaling: str = "McClung2009",
         at_time: Any | None = None,
@@ -322,13 +323,10 @@ class HazardChart(DatasetDecorator):
         layer_dim
             Name of the layer dimension.
         depth_var
-            Depth variable for full-layer input [m]. A variable marked
+            Depth variable [m] of the layers; an index that comes with its
+            own ``<idx>_depth`` uses that instead. A variable marked
             ``positive: 'up'`` (such as ``z``) is flipped, so ``hc_depth``
-            always counts downwards from the surface. Input with a string
-            ``datetag`` coordinate on the layer dimension uses the per-index
-            ``<idx>_depth`` instead.
-        datetags
-            Subset of datetag labels to consider; needs the datetag input.
+            always counts downwards from the surface.
         classes
             Per-index overrides of the registered stability classes
             (ascending ``(label, upper_bound]`` steps).
@@ -343,9 +341,9 @@ class HazardChart(DatasetDecorator):
             The dataset with, per new variant on ``hc_variant`` and per point
             (all dimensions but the layer): ``hc_instability``, ``hc_depth``
             [m below surface], ``hc_xaxis`` (the depth on the chart's x
-            axis), ``hc_instabilityDrivenBy`` / ``hc_depthDrivenBy`` (datetag
-            label, ``''`` without a value or outside ``at_time``; or layer
-            index, NaN without a value), ``hc_gcode`` (SLF grain code of the
+            axis), ``hc_instabilityDrivenBy`` / ``hc_depthDrivenBy`` (index
+            of the driving layer along ``layer_dim``, NaN without a value or
+            outside ``at_time``), ``hc_gcode`` (SLF grain code of the
             weakest layer, from
             ``<idx>_gcode_weak`` or ``grain_type``) and, with ``groupby``,
             ``hc_group_id``. The variant configuration is listed by
@@ -376,17 +374,6 @@ class HazardChart(DatasetDecorator):
             ds = base.sel(time=at_time)
             times = tuple(_to_timestr(t) for t in ds["time"].values)
 
-        # the datetag entries name the drivers; a full-layer dataset falls
-        # back to layer indices
-        labels = None
-        if "datetag" in ds.coords and layer_dim in ds["datetag"].dims:
-            labels = np.array([str(x) for x in ds["datetag"].values])
-        keep = None
-        if datetags is not None:
-            if labels is None:
-                raise ValueError("datetag filtering needs the reduced layer dimension.")
-            keep = np.isin(labels, list(datetags))
-
         out = base.copy()
         groupby_list = _normalize_groupby(groupby)
         start_idx = int(out.sizes.get("hc_variant", 0))
@@ -403,7 +390,7 @@ class HazardChart(DatasetDecorator):
             if index_var not in ds:
                 raise KeyError(f"Expected index variable '{index_var}' not found in dataset.")
             dvar = f"{index_var}_depth"
-            if labels is None or dvar not in ds:
+            if dvar not in ds:
                 dvar = depth_var
             if dvar not in ds:
                 raise KeyError(f"Expected depth variable '{dvar}' not found in dataset.")
@@ -419,26 +406,22 @@ class HazardChart(DatasetDecorator):
             with_gcode = gvar in ds
 
             inputs = [si, ds[dvar]] + ([ds[gvar]] if with_gcode else [])
-            label_dtype = labels.dtype if labels is not None else float_result_dtype(si)
-            dtypes = [float_result_dtype(si)] * 3 + [label_dtype] * 2
-            if with_gcode:
-                dtypes.append(float_result_dtype(si))
-            results = apply_profile_block(
-                _hazard_chart_block, *inputs,
-                output_dtype=dtypes,
-                layer_dim=layer_dim,
-                output_core_dims=[[]] * len(dtypes),
-                kwargs={
-                    "side": side, "cls_steps": cls_steps, "labels": labels,
-                    "keep": keep, "xaxis_scaling": xaxis_scaling,
-                    "flip_depth": str(ds[dvar].attrs.get("positive", "")).lower() == "up",
-                    "with_gcode": with_gcode,
-                },
-            )
             names = ["hc_instability", "hc_depth", "hc_xaxis",
                      "hc_instabilityDrivenBy", "hc_depthDrivenBy"]
             if with_gcode:
                 names.append("hc_gcode")
+            results = apply_profile_block(
+                _hazard_chart_block, *inputs,
+                output_dtype=[float_result_dtype(si)] * len(names),
+                layer_dim=layer_dim,
+                output_core_dims=[[]] * len(names),
+                kwargs={
+                    "side": side, "cls_steps": cls_steps,
+                    "xaxis_scaling": xaxis_scaling,
+                    "flip_depth": str(ds[dvar].attrs.get("positive", "")).lower() == "up",
+                    "with_gcode": with_gcode,
+                },
+            )
             attributes = {
                 "hc_instability": {
                     "description": "Weakest stability index value", "index": index_var,
@@ -455,10 +438,10 @@ class HazardChart(DatasetDecorator):
                     "xaxis_scaling": xaxis_scaling,
                 },
                 "hc_instabilityDrivenBy": {
-                    "description": "Datetag or layer index that drove hc_instability",
+                    "description": "Index of the layer that drove hc_instability",
                 },
                 "hc_depthDrivenBy": {
-                    "description": "Datetag or layer index that drove hc_depth",
+                    "description": "Index of the layer that drove hc_depth",
                 },
                 "hc_gcode": {"units": "Swiss Code F1F2F3",
                              "description": "Grain code of the weakest layer"},
@@ -498,9 +481,6 @@ class HazardChart(DatasetDecorator):
 
         for name, parts in collected.items():
             out[name] = parts[0] if len(parts) == 1 else xr.concat(parts, dim="hc_variant")
-            if out[name].dtype.kind in "OU":
-                # timestamps outside an at_time selection hold no value
-                out[name] = out[name].fillna("")
 
         # only now: assigning hc_group_id above replaces the variable attrs
         for variant_idx, mapping in group_maps:
@@ -850,9 +830,10 @@ def compute_hc_points(
 
     Notes
     -----
-    Thin adapter: the selection runs in ``compute_hazard_chart``; this
-    flattens its variants to the per-index variable names. A Dask-backed
-    dataset stays lazy.
+    Thin adapter: the selection runs in ``compute_hazard_chart``, on input
+    whose entries outside ``datetags`` are blanked; this flattens its
+    variants to the per-index variable names and names the driving layers
+    after the ``datetag`` coordinate. A Dask-backed dataset stays lazy.
     """
     xs = ds if isinstance(ds, xsnowDataset) else xsnowDataset(ds)
     if 'layer' not in xs.data.dims:
@@ -874,10 +855,24 @@ def compute_hc_points(
         raise ValueError(f"No variables for: {missing}")
     _index_config(indices, classes)      # unknown indices raise here
 
+    labels = None
+    if reduced:
+        labels = np.array([str(x) for x in xs.data['datetag'].values])
+    selectable = xs.data
+    if datetags is not None:
+        if labels is None:
+            raise ValueError("datetag filtering needs the reduced layer dimension.")
+        # an entry outside the datetags holds no value for the selection
+        keep = np.isin(labels, list(datetags))
+        selectable = selectable.assign({
+            idx: selectable[idx].where(xr.DataArray(
+                get_backend(selectable[idx]).asarray(keep), dims=['layer']))
+            for idx in indices})
+
     # the engine appends its variants after any the input already carries
     start = int(xs.data.sizes.get('hc_variant', 0))
-    hc = HazardChart(xs).compute_hazard_chart(
-        indices=indices, datetags=datetags, classes=classes,
+    hc = HazardChart(xs.__class__(selectable)).compute_hazard_chart(
+        indices=indices, classes=classes,
         xaxis_scaling=xaxis_scaling, depth_var=depth_var,
     ).data
 
@@ -900,7 +895,9 @@ def compute_hc_points(
             if source not in var:
                 continue
             da = var[source]
-            out[name] = da if attrs is None else da.assign_attrs(**attrs)
+            if labels is not None and source.endswith('DrivenBy'):
+                da = _label_layers(da, labels)
+            out[name] = da
             if attrs is not None:
                 out[name].attrs = dict(attrs)
     return xs.__class__(out)
@@ -1149,6 +1146,18 @@ def _to_host(values) -> np.ndarray:
     return values.get() if hasattr(values, 'get') else np.asarray(values)
 
 
+def _label_layers(index_da: xr.DataArray, labels: np.ndarray) -> xr.DataArray:
+    """Name the driving layers after their labels; ``''`` where there is none."""
+    def block(idx):
+        idx = _to_host(idx)
+        out = np.full(idx.shape, '', dtype=labels.dtype)
+        valid = np.isfinite(idx)
+        out[valid] = labels[idx[valid].astype(int)]
+        return out
+    return xr.apply_ufunc(block, index_da, dask='parallelized',
+                          output_dtypes=[labels.dtype])
+
+
 def _depth_axis(ax, scaling: str) -> None:
     """Depth ticks [cm] at the evenly spaced anchors of ``scaling``."""
     anchors = XAXIS_ANCHORS[scaling]
@@ -1197,15 +1206,13 @@ def take_layer(values: np.ndarray, idx: np.ndarray) -> np.ndarray:
 
 
 def _hazard_chart_block(values, depths, gcodes=None, *, side, cls_steps,
-                        labels=None, keep=None, xaxis_scaling='McClung2009',
-                        flip_depth=False, with_gcode=False):
+                        xaxis_scaling='McClung2009', flip_depth=False,
+                        with_gcode=False):
     """Reduce one block of complete profiles to the hazard-chart summary.
 
     The layer axis is last; every output loses it.
     """
     xp = get_backend(values)
-    if keep is not None:
-        values = xp.where(xp.asarray(keep), values, np.nan)
     if flip_depth:
         depths = -depths          # e.g. 'z' counts up from the surface
     weak_idx, valid, deep_idx = select_weak_and_deep(values, side, cls_steps)
@@ -1214,14 +1221,9 @@ def _hazard_chart_block(values, depths, gcodes=None, *, side, cls_steps,
         xp.where(valid, take_layer(values, weak_idx), np.nan),
         depth,
         xp.where(valid, scale_depth(depth, xaxis_scaling), np.nan),
+        xp.where(valid, weak_idx, np.nan),
+        xp.where(valid, deep_idx, np.nan),
     ]
-    if labels is not None:
-        host = (_to_host(valid), _to_host(weak_idx), _to_host(deep_idx))
-        outputs += [np.where(host[0], labels[host[1]], ""),
-                    np.where(host[0], labels[host[2]], "")]
-    else:
-        outputs += [xp.where(valid, weak_idx, np.nan),
-                    xp.where(valid, deep_idx, np.nan)]
     if with_gcode:
         outputs.append(xp.where(valid, take_layer(gcodes, weak_idx), np.nan))
     return tuple(outputs)

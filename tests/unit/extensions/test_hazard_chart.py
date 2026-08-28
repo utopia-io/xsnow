@@ -117,13 +117,6 @@ class TestFullLayerInput:
         )
         assert out['hc_xaxis'].attrs['xaxis_scaling'] == 'Techel2023'
 
-    def test_datetags_need_reduced(self, full):
-        with pytest.raises(ValueError, match='reduced layer dimension'):
-            HazardChart(full).compute_hazard_chart(
-                stability_index='punstable', depth_var='z',
-                datetags=['new_snow'],
-            )
-
     def test_variant_records_its_timestamps(self, full):
         hc = HazardChart(full).compute_hazard_chart(
             stability_index='punstable', depth_var='z',
@@ -138,27 +131,14 @@ class TestFullLayerInput:
 
 
 class TestReducedInput:
-    def test_datetag_provenance_and_per_index_depth(self, reduced):
+    def test_per_index_depth_and_layer_provenance(self, reduced):
         out = HazardChart(reduced).compute_hazard_chart(
             indices=['punstable'],
         ).data
-        # the reduced entries name their driver instead of a layer index
-        assert _flat(out, 'hc_instabilityDrivenBy') == '2025-11-01'
+        assert _flat(out, 'hc_instabilityDrivenBy') == 0
         assert out['hc_depth'].attrs['depth_var'] == 'punstable_depth'
         assert _flat(out, 'hc_gcode') == 550
 
-    def test_datetag_filter(self, reduced):
-        out = HazardChart(reduced).compute_hazard_chart(
-            indices=['punstable'], datetags=['new_snow'],
-        ).data
-        assert _flat(out, 'hc_instabilityDrivenBy') == 'new_snow'
-
-    def test_empty_profile_fills_empty_string(self, reduced):
-        out = HazardChart(reduced).compute_hazard_chart(
-            indices=['punstable'], datetags=['2099-01-01'],
-        ).data
-        assert _flat(out, 'hc_instabilityDrivenBy') == ''
-        assert np.isnan(_flat(out, 'hc_instability'))
 
 
 class TestVariants:
@@ -348,6 +328,26 @@ class TestPoints:
         assert float(d['sk38'].values[0, 0]) == pytest.approx(0.8)
         assert float(d['sk38_xaxis'].values[0, 0]) == pytest.approx(1 + 0.12 / 0.17)
 
+    def test_datetag_filter(self, reduced):
+        d = reduced.compute_hc_points(
+            indices=['punstable'], datetags=['new_snow'],
+        ).data
+        assert str(d['punstable_instability_drivenby'].values[0, 0]) == 'new_snow'
+        assert float(d['punstable'].values[0, 0]) == pytest.approx(0.2)
+
+    def test_all_filtered_gives_an_empty_label(self, reduced):
+        d = reduced.compute_hc_points(
+            indices=['punstable'], datetags=['2099-01-01'],
+        ).data
+        assert str(d['punstable_instability_drivenby'].values[0, 0]) == ''
+        assert np.isnan(d['punstable'].values[0, 0])
+
+    def test_datetags_need_reduced(self, full):
+        with pytest.raises(ValueError, match='reduced layer dimension'):
+            full.compute_hc_points(
+                indices=['punstable'], depth_var='z', datetags=['new_snow'],
+            )
+
     def test_full_layer_reports_layer_indices(self, full):
         d = full.compute_hc_points(indices=['punstable'], depth_var='z').data
         assert float(d['punstable_instability_drivenby'].values[0, 0]) == 0
@@ -494,7 +494,7 @@ class TestLazyInput:
             np.testing.assert_array_equal(
                 lazy.data[name].values, eager.data[name].values)
 
-    def test_datetag_provenance_stays_lazy(self, reduced):
+    def test_layer_provenance_stays_lazy(self, reduced):
         chunked = _chunk_data_vars(reduced, location=1, layer=-1)
         started = []
         with Callback(pretask=lambda key, *_: started.append(key)):
@@ -528,16 +528,16 @@ class TestAtTime:
         data = data.assign_coords(time=pd.to_datetime(['2026-01-15', '2026-01-16']))
         return xsnowDataset(data)
 
-    def test_subset_keeps_the_time_axis_and_empty_labels(self, two_times):
+    def test_subset_keeps_the_time_axis(self, two_times):
         hc = HazardChart(two_times).compute_hazard_chart(
             indices=['punstable'], at_time='2026-01-16',
         )
         drv = hc.data['hc_instabilityDrivenBy'].isel(hc_variant=0).values.ravel()
-        assert list(drv) == ['', '2025-11-01']
+        assert np.isnan(drv[0]) and drv[1] == 0
         assert np.isnan(hc.data['hc_instability'].values[0, 0, 0])
         assert hc.list_hc_variants()[0].time == ('2026-01-16T00:00:00',)
         # a full-time variant concatenates with it
         both = hc.compute_hazard_chart(indices=['sk38'])
         assert both.data.sizes['hc_variant'] == 2
         assert (both.data['hc_instabilityDrivenBy'].isel(hc_variant=1).values
-                == '2025-11-01').all()
+                == 0).all()
