@@ -13,6 +13,8 @@ Unit fields:
     xsnow_units: Canonical in-memory unit used by xsnow.
     pro_units: Expected storage unit in SNOWPACK .pro files, when applicable.
     smet_units: Expected storage unit(s) in SNOWPACK .smet files, when applicable.
+    smet_unit_aliases: Historical SMET unit labels whose values should be
+        interpreted as another unit without numerical conversion.
     smet_units_input: Optional SMET storage unit for forcing/input files.
     smet_units_output: Optional SMET storage unit for model-output files.
     plot_units: Preferred display unit, taken from SNOWPACK .smet plot_unit
@@ -458,19 +460,23 @@ registry = {
         "param_code": None,
         "aliases": ['dIntEnergySnow', 'snow_internal_energy_change'],
         'standard_name': 'snow_internal_energy_change',
-        'xsnow_units': 'W m-2',
-        'smet_units': 'W m-2',
-        'plot_units': 'W/m2',
-        'si_units': 'W m-2',
+        'xsnow_units': 'kJ m-2',
+        'smet_units': 'kJ m-2',
+        # SNOWPACK historically labeled these unchanged energy values W/m2.
+        'smet_unit_aliases': {'W m-2': 'kJ m-2'},
+        'plot_units': 'kJ/m2',
+        'si_units': 'kJ m-2',
     },
     'meltFreezeEnergySnow': {
         "param_code": None,
         "aliases": ['meltFreezeEnergySnow', 'snow_melt_freeze_energy'],
         'standard_name': 'snow_melt_freeze_energy',
-        'xsnow_units': 'W m-2',
-        'smet_units': 'W m-2',
-        'plot_units': 'W/m2',
-        'si_units': 'W m-2',
+        'xsnow_units': 'kJ m-2',
+        'smet_units': 'kJ m-2',
+        # SNOWPACK historically labeled these unchanged energy values W/m2.
+        'smet_unit_aliases': {'W m-2': 'kJ m-2'},
+        'plot_units': 'kJ/m2',
+        'si_units': 'kJ m-2',
     },
     'ColdContentSnow': {
         "param_code": None,

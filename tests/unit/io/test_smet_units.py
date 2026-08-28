@@ -6,7 +6,7 @@ import logging
 import numpy as np
 import pytest
 
-from xsnow import read
+from xsnow import read, xsnowDataset
 from xsnow.io.smet import infer_smet_storage_unit, parse_smet_unit_specs, read_smet
 from xsnow.registry import registry
 from xsnow.units import UnitConversionError
@@ -121,6 +121,52 @@ def test_registry_allows_observed_smet_storage_units():
     assert registry["VW_MAX"]["smet_units"] == "m s-1"
     assert registry["DW_MAX"]["smet_units"] == "degree"
     assert registry["zSn"]["smet_units"] == "m"
+
+
+@pytest.mark.parametrize("field", ["dIntEnergySnow", "meltFreezeEnergySnow"])
+def test_energy_change_registry_uses_corrected_snowpack_units(field):
+    """Energy-change fields are native kJ/m2 with the old label as an alias."""
+    entry = registry[field]
+
+    assert entry["xsnow_units"] == "kJ m-2"
+    assert entry["smet_units"] == "kJ m-2"
+    assert entry["smet_unit_aliases"] == {"W m-2": "kJ m-2"}
+
+
+@pytest.mark.synthetic
+@pytest.mark.parametrize("declared_unit", ["kJ/m2", "W/m2"])
+def test_read_smet_supports_corrected_and_legacy_energy_units(
+    tmp_path,
+    declared_unit,
+):
+    """Corrected and historically mislabeled values load natively as kJ/m2."""
+    smet_file = tmp_path / "energy_units.smet"
+    smet_file.write_text(
+        f"""SMET 1.1 ASCII
+[HEADER]
+station_name = UNIT_TEST
+fields = timestamp dIntEnergySnow meltFreezeEnergySnow
+plot_unit = - {declared_unit} {declared_unit}
+units_multiplier = 1 1 1
+[DATA]
+2024-01-01T00:00:00 12.5 -3.25
+2024-01-02T00:00:00 7.0 1.5
+"""
+    )
+
+    ds = read_smet(smet_file)
+
+    np.testing.assert_allclose(ds["dIntEnergySnow"].values.ravel(), [12.5, 7.0])
+    np.testing.assert_allclose(
+        ds["meltFreezeEnergySnow"].values.ravel(),
+        [-3.25, 1.5],
+    )
+    assert ds["dIntEnergySnow"].attrs["units"] == "kJ m-2"
+    assert ds["meltFreezeEnergySnow"].attrs["units"] == "kJ m-2"
+
+    output_file = tmp_path / "energy_units_roundtrip.smet"
+    xsnowDataset(ds).to_smet(output_file)
+    assert "units = ISO8601 kJ/m2 kJ/m2" in output_file.read_text()
 
 
 @pytest.mark.synthetic
@@ -326,7 +372,7 @@ class TestIncompatibleDeclaredUnits:
         path = tmp_path / 'TST.smet'
         path.write_text(self.SMET)
         ds = read(path, unit_validation='light')
-        assert ds.data['dIntEnergySnow'].attrs['units'] == 'kJ/m2'
+        assert ds.data['dIntEnergySnow'].attrs['units'] == 'kJ m-2'
         assert float(ds.data['dIntEnergySnow'].max()) == 5.0
         assert float(ds.data['HS_mod'].max()) == 1.5
 

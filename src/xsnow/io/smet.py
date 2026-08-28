@@ -72,6 +72,7 @@ _SMET_UNIT_TOKENS = {
     "Pa": "Pa",
     "kPa": "kPa",
     "W m-2": "W/m2",
+    "kJ m-2": "kJ/m2",
     "J m-2": "J/m2",
     "MJ m-2": "MJ/m2",
     "kg m-2": "kg/m2",
@@ -98,6 +99,19 @@ def _unit_allowed(unit: str, allowed_units: UnitLike) -> bool:
     if isinstance(normalized_allowed, list):
         return normalized_unit in normalized_allowed
     return normalized_unit == normalized_allowed
+
+
+def _smet_storage_unit(
+    source_unit: str,
+    reg_entry: Mapping[str, Any],
+) -> tuple[str, bool]:
+    """Resolve historically mislabeled SMET values to their physical unit."""
+    normalized_source = normalize_unit(source_unit) or "1"
+    aliases = reg_entry.get("smet_unit_aliases", {})
+    for legacy_unit, actual_unit in aliases.items():
+        if normalized_source == normalize_unit(legacy_unit):
+            return normalize_unit(actual_unit) or "1", True
+    return normalized_source, False
 
 
 def _fallback_smet_unit(reg_entry: Mapping[str, Any]) -> Optional[str]:
@@ -331,7 +345,15 @@ def _convert_smet_var_to_xsnow_units(
         )
 
     expected_smet_units = reg_entry.get("smet_units")
-    if expected_smet_units is not None and not _unit_allowed(source_unit, expected_smet_units):
+    conversion_source_unit, is_legacy_alias = _smet_storage_unit(
+        source_unit,
+        reg_entry,
+    )
+    if (
+        expected_smet_units is not None
+        and not _unit_allowed(source_unit, expected_smet_units)
+        and not is_legacy_alias
+    ):
         return _keep_declared(
             f"SMET variable {var_name!r} in {filepath.name} declares storage "
             f"unit {source_unit!r}, but xsnow expects {expected_smet_units!r}."
@@ -347,7 +369,11 @@ def _convert_smet_var_to_xsnow_units(
         )
 
     try:
-        converted = convert_units(ds[var_name].values, source_unit, target_unit)
+        converted = convert_units(
+            ds[var_name].values,
+            conversion_source_unit,
+            target_unit,
+        )
     except UnitConversionError:
         return _keep_declared(
             f"Cannot convert SMET variable {var_name!r} in {filepath.name} "
