@@ -52,6 +52,11 @@ _LOCATION_SOURCE_STATION_NAME = "StationName"
 _LOCATION_SOURCE_FILENAME_STEM = "filename_stem"
 
 
+def _is_datetime_var(var_name: str) -> bool:
+    """Registry variables stored as ISO datetimes rather than floats."""
+    return registry.get(var_name, {}).get("xsnow_units") == "ISO"
+
+
 def parse_pro_header_units(
     filepath: Union[str, Path],
     code_map: Optional[Mapping[str, str]] = None,
@@ -173,6 +178,10 @@ def _validate_pro_unit_map(
                 expected_pro_unit,
                 xsnow_unit,
             )
+
+        if _is_datetime_var(var_name):
+            # datetime rows are parsed or skipped, never unit-converted
+            continue
 
         _ensure_unit_conversion_supported(var_name, declared_unit, xsnow_unit, filepath)
 
@@ -402,6 +411,8 @@ def _format_pro_value(var_name: str, value: Any, index: int = 0) -> str:
     """Format one value using SNOWPACK-like PRO precision conventions."""
     if pd.isna(value):
         return "-999"
+    if isinstance(value, np.datetime64):
+        return np.datetime_as_string(value, unit='s')
     numeric = float(value)
     if var_name in _PRO_INTEGER_VARS or index in _PRO_INTEGER_VECTOR_ITEMS.get(var_name, set()):
         return str(int(round(numeric)))
@@ -963,6 +974,7 @@ def _parse_pro_profiles_from_lines(
     temp_profiles: List[Dict] = []
     in_data = False
     has_data = False
+    age_variant_warned = False
 
     start_ts = pd.to_datetime(datetime_start, format='mixed') if datetime_start else None
     end_ts = pd.to_datetime(datetime_end, format='mixed') if datetime_end else None
@@ -1004,6 +1016,7 @@ def _parse_pro_profiles_from_lines(
         temp_profiles.append(profile_data)
 
     def _parse_and_process_block(lines_block: List[str]):
+        nonlocal age_variant_warned
         if not lines_block:
             return
         profile_dict: Dict[str, Any] = {}
@@ -1022,7 +1035,27 @@ def _parse_pro_profiles_from_lines(
                 param_name = code_map_to_use.get(param_code)
                 if param_name:
                     data_values = data_parts[1:]  # skip declared layer count
-                    profile_dict[param_name] = np.array(data_values, dtype=float)
+                    if _is_datetime_var(param_name):
+                        dates = pd.to_datetime(
+                            data_values, format='ISO8601', errors='coerce'
+                        )
+                        no_dates = (
+                            dates.isna().all()
+                            and data_values
+                            and 'T' not in data_values[0]
+                        )
+                        if no_dates:
+                            # age variant (PROF_AGE_OR_DATE=AGE) or all-missing
+                            if not age_variant_warned:
+                                logger.warning(
+                                    f"{file_path.name}: {param_name} rows are not "
+                                    "ISO dates (element age variant?); skipping them."
+                                )
+                                age_variant_warned = True
+                        else:
+                            profile_dict[param_name] = dates.to_numpy()
+                    else:
+                        profile_dict[param_name] = np.array(data_values, dtype=float)
             except (ValueError, IndexError):
                 parse_error = True
                 logger.error(
@@ -1258,6 +1291,8 @@ def _create_pro_dataset(
     data_vars: Dict[str, Any] = {}
 
     for param in all_params:
+        is_datetime = _is_datetime_var(param)
+        fill_value = np.datetime64('NaT', 'ns') if is_datetime else np.nan
         profile_data = []
 
         for profile in profiles:
@@ -1282,7 +1317,7 @@ def _create_pro_dataset(
             final_values = list(param_data[:num_snow_layers])
 
             while len(final_values) < num_snow_layers:
-                final_values.append(np.nan)
+                final_values.append(fill_value)
 
             # Add surface hoar layer if needed
             if has_sh:
@@ -1302,28 +1337,39 @@ def _create_pro_dataset(
                     )
                     final_values.append(last_height + _surface_hoar_height_increment(pro_units))
                 else:
-                    final_values.append(np.nan)
+                    final_values.append(fill_value)
 
             # Pad to max_layers
             while len(final_values) < max_layers:
-                final_values.append(np.nan)
+                final_values.append(fill_value)
 
             final_values = final_values[:max_layers]
-            final_values = _convert_pro_values_to_xsnow_units(param, final_values, pro_units)
+            if not is_datetime:
+                final_values = _convert_pro_values_to_xsnow_units(
+                    param, final_values, pro_units
+                )
             profile_data.append(final_values)
 
-        np_array = np.full(
-            (1, len(profiles), 1, 1, max_layers),
-            np.nan,
-            dtype=np.float32
-        )
-
-        for i, profile_values in enumerate(profile_data):
-            np_array[0, i, 0, 0, :] = np.clip(
-                profile_values, 
-                np.finfo(np_array.dtype).min,
-                np.finfo(np_array.dtype).max
+        if is_datetime:
+            np_array = np.full(
+                (1, len(profiles), 1, 1, max_layers),
+                np.datetime64('NaT', 'ns'),
+                dtype='datetime64[ns]'
             )
+            for i, profile_values in enumerate(profile_data):
+                np_array[0, i, 0, 0, :] = profile_values
+        else:
+            np_array = np.full(
+                (1, len(profiles), 1, 1, max_layers),
+                np.nan,
+                dtype=np.float32
+            )
+            for i, profile_values in enumerate(profile_data):
+                np_array[0, i, 0, 0, :] = np.clip(
+                    profile_values,
+                    np.finfo(np_array.dtype).min,
+                    np.finfo(np_array.dtype).max
+                )
 
         if use_dask:
             chunk_spec = (1, chunks['time'], 1, 1, chunks['layer'])
@@ -1404,7 +1450,11 @@ def _create_pro_dataset(
     for var_name in ds.data_vars:
         if reg_entry := registry.get(str(var_name)):
             ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', str(var_name))
-            ds[var_name].attrs['units'] = reg_entry.get('xsnow_units', reg_entry.get('si_units', '1'))
+            # no 'units' attr on datetime vars: CF encoding raises on conflict
+            if not np.issubdtype(ds[var_name].dtype, np.datetime64):
+                ds[var_name].attrs['units'] = reg_entry.get(
+                    'xsnow_units', reg_entry.get('si_units', '1')
+                )
             ds[var_name].attrs['long_name'] = reg_entry.get('standard_name', str(var_name)).replace('_', ' ')
         else:
             if 'units' not in ds[var_name].attrs:

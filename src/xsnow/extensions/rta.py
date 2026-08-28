@@ -20,6 +20,14 @@ zero, and a single sum replaces the two interface variants. Agreement
 between the two is therefore only approximate (the weak-layer
 classification at 0.8 agrees for roughly 9 out of 10 layers).
 
+Difference to sarp.snowprofile::computeRTA():
+it reads the standard deviation of the below-interface hardness anomaly
+from a column that does not exist, so that anomaly ends up centred but not
+standardized, and it min-max scales the depth property of the
+above-interface variant a second time. Values therefore differ from R by
+up to ~0.13 on observed profiles, while the weakest layer and the
+weak-layer flags for the test dataset agree.
+
 References
 ----------
 - Monti, F., & Schweizer, J. (2013). A relative difference approach to
@@ -46,6 +54,13 @@ CRUST_MIN_HARDNESS = 3.0     # hand hardness index of a supporting crust
 CRUST_MIN_THICKNESS = 1.0    # cm, thickness of a supporting crust
 CRUST_DECAY = 20.0           # cm, e-folding depth of the crust effect
 WEAK_GRAIN_CLASSES = (4.0, 5.0, 6.0, 9.0)   # FC, DH, SH, FCxr
+#: Default RTA below which a layer is no weak-layer candidate; the
+#: RTA-gated indices take it as their ``rta_threshold`` default.
+RTA_THRESHOLD = 0.8
+#: Stability classes of the index: high values are unstable.
+RTA_WEAK = 'max'
+RTA_CLASSES = [('rather stable', RTA_THRESHOLD), ('poor', np.inf)]
+RTA_AXLIM = (0.0, 1.0)
 
 
 def _profile_mean(x, valid, xp):
@@ -142,15 +157,9 @@ def _compute_rta_block(height_m, hardness, gsize_m, gtype):
     z_h = (h - hbar[..., None]) / sd_h[..., None]
     z_g = (g - gbar[..., None]) / sd_g[..., None]
 
-    # Vectorized transcription of sarp.snowprofile::computeRTA()
-    # (layer target), reproducing its output exactly.
-    # SUSPECTED SLIP in computeRTA.R (kept for exact agreement): the
-    # standard deviation of this anomaly is taken from a non-existent
-    # column and thereby floored to 1, so the below-interface hardness
-    # difference is centred but not standardized. Corrected version:
-    # sd_dh_b = _population_sd(dh_b, dhbar, iface_b, xp)
-    # z_dh_b = (dh_b - dhbar[..., None]) / sd_dh_b[..., None]
-    z_dh_b = dh_b - dhbar[..., None]
+    # Vectorized after sarp.snowprofile::computeRTA() (layer target).
+    sd_dh_b = _population_sd(dh_b, dhbar, iface_b, xp)
+    z_dh_b = (dh_b - dhbar[..., None]) / sd_dh_b[..., None]
     z_dg_b = (dg_b - dgbar[..., None]) / sd_dg_b[..., None]
     z_dh_a = (dh_a - dhbar[..., None]) / sd_dh_a[..., None]
     z_dg_a = (dg_a - dgbar[..., None]) / sd_dg_a[..., None]
@@ -169,11 +178,7 @@ def _compute_rta_block(height_m, hardness, gsize_m, gtype):
     s_h = 1.0 - _scale(z_h, mn_h, span_h)
     s_g = _scale(z_g, mn_g, span_g)
     s_w = _scale(z_w, mn_w, span_w)
-    # SUSPECTED SLIP in computeRTA.R (kept for exact agreement): the
-    # depth property of the above-interface variant is min-max scaled a
-    # second time. Corrected version:
-    # s_w_above = s_w
-    s_w_above = _scale(s_w, mn_w, span_w)
+    s_w_above = s_w
 
     sum_b = (lem_gt + s_h + s_g + _scale(z_dh_b, mn_dh, span_dh)
              + _scale(z_dg_b, mn_dg, span_dg) + s_w)

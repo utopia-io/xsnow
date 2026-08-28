@@ -419,6 +419,22 @@ def _points_in_region(x: np.ndarray, y: np.ndarray, region: _Region) -> np.ndarr
     return inside_region
 
 
+def _points_in_region_block(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    region: _Region,
+) -> np.ndarray:
+    """Classify one eager coordinate block against a region."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    inside = np.zeros(x.shape, dtype=bool)
+    valid = np.isfinite(x) & np.isfinite(y)
+    if valid.any():
+        inside[valid] = _points_in_region(x[valid], y[valid], region)
+    return inside
+
+
 def _crs_equal(a: str, b: str) -> bool:
     """
     CRS equality test with a best-effort fallback if pyproj isn't available.
@@ -808,6 +824,12 @@ def classify_spatially(
     -------
     xr.DataArray | xsnowDataset
 
+    Notes
+    -----
+    Dask-backed horizontal coordinates are classified lazily and blockwise.
+    The polygon geometries remain small eager metadata, while each coordinate
+    block is evaluated only when the returned labels or masks are computed.
+
     Examples
     --------
     >>> import xarray as xr
@@ -891,34 +913,25 @@ def classify_spatially(
     if x_da.dims != y_da.dims or x_da.shape != y_da.shape:
         raise ValueError("Dataset horizontal coordinate arrays must have matching dims and shape.")
 
-    point_dims = x_da.dims
-    point_shape = x_da.shape
-    x = np.asarray(x_da.values, dtype=float).reshape(-1)
-    y = np.asarray(y_da.values, dtype=float).reshape(-1)
-
-    # Pre-filter invalid points; keep them as outside/False
-    valid = np.isfinite(x) & np.isfinite(y)
-    x_v = x[valid]
-    y_v = y[valid]
-
     region_names = [r.name for r in regions]
-    masks = np.zeros((len(regions), x.size), dtype=bool)
-    if x_v.size:
-        for i, region in enumerate(regions):
-            hit = _points_in_region(x_v, y_v, region)
-            masks[i, valid] = hit
-
-    # mask output: ('polygon', *point_dims)
-    mask_data = masks.reshape((len(regions),) + point_shape)
-    mask_da = xr.DataArray(
-        mask_data,
-        dims=("polygon",) + point_dims,
-        coords={
-            "polygon": np.asarray(region_names, dtype=object),
-            **{d: xds.coords[d] for d in point_dims if d in xds.coords},
-        },
-        name=name,
-    )
+    region_masks = [
+        xr.apply_ufunc(
+            _points_in_region_block,
+            x_da,
+            y_da,
+            kwargs={"region": region},
+            dask="parallelized",
+            vectorize=False,
+            output_dtypes=[bool],
+        )
+        for region in regions
+    ]
+    mask_da = xr.concat(
+        region_masks,
+        dim=xr.IndexVariable(
+            "polygon", np.asarray(region_names, dtype=object)
+        ),
+    ).rename(name)
 
     if kind == "mask":
         if attrs:
@@ -926,21 +939,18 @@ def classify_spatially(
             mask_da.attrs.update(attrs)
         return mask_da
 
-    # label output: per-point string label (first polygon match wins)
-    labels = np.full(x.size, str(outside_label), dtype=object)
-    any_hit = masks.any(axis=0)
-    if any_hit.any():
-        first_idx = np.argmax(masks, axis=0)
-        region_names_arr = np.asarray(region_names, dtype=object)
-        labels[any_hit] = region_names_arr[first_idx[any_hit]]
-    labels = labels.reshape(point_shape)
-
-    label_da = xr.DataArray(
-        labels,
-        dims=point_dims,
-        coords={d: xds.coords[d] for d in point_dims if d in xds.coords},
-        name=name,
+    # Apply in reverse order so an earlier polygon overwrites every later
+    # match, preserving the documented "first polygon match wins" rule.
+    label_da = xr.full_like(
+        x_da, fill_value=str(outside_label), dtype=object
     )
+    for i in range(len(region_names) - 1, -1, -1):
+        label_da = xr.where(
+            mask_da.isel(polygon=i, drop=True),
+            region_names[i],
+            label_da,
+        )
+    label_da = label_da.rename(name)
     label_da.attrs.update(
         {
             "outside_label": str(outside_label),

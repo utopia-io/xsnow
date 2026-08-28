@@ -1,264 +1,759 @@
 """
-Summary
--------
 Compute and plot hazard charts from xsnowDataset
 
-This extension module serves as a **template for demonstrating how to develop an extension** to xsnow
-that implements completely new functionality and adds a new dimension to the xsnowDataset class.
-This coincides with **application scenario 2** from the xsnow extension framework. 
+A hazard chart places every profile at the value of its weakest layer
+(y axis) and at the depth of the deepest layer in a poor-or-worse
+stability class (x axis). The module holds one selection engine and
+three ways to use it:
 
-As demonstrated in this module, the class definition of such an extension uses the xsnow 
-``DatasetDecorator`` class, which entirely handles the class configuration. A user can simply 
-**create their own extension class by subclassing the DatasetDecorator** and implementing class
-methods or module-level helper functions.
+- :class:`HazardChart` (``compute_hazard_chart``) stacks one chart variant
+  per stability-index/layer-context selection on a new ``hc_variant``
+  dimension and plots it.
+- ``compute_hc_points`` returns the same selection as flat per-index
+  variables, the compact form that geojson writers and zarr stores consume.
+- ``compute_hc_timeseries`` pools those points per timestamp into a median,
+  percentiles and the median unstable depth.
 
-Warnings
---------
-This extension is still work-in-progress. While the status quo is sufficient for demonstrating
-how to create an extension to satisfy application scenario 2, it is not entirely useful yet
-in terms of its snow and avalanche related content.
+Both entry points run on a full-layer stratigraphy (depth from a shared
+``depth_var``) and on a reduced one whose layer dimension holds one entry
+per layer group with per-index ``<idx>_depth`` (e.g. the simplified
+stratigraphy of the ``datetags`` package). The engine reports the driving
+layers by their index; ``compute_hc_points`` names them after a string
+``datetag`` coordinate on the layer dimension when there is one, and can
+restrict the selection to some of those datetags. Depths always count
+downwards from the snow surface, also for depth variables stored counting
+up.
 
-It will be updated to be generic and user-friendly, and to document the class and functions meaningfully.
+Stability classes are defined by the index extensions (``sk38``, ``rta``,
+``critical_crack_length``) and imported here; an external index package
+registers its classes with :func:`register_stability_index`, and an index
+missing from the table is looked up as a package of that name. ``lwc`` is
+a native SNOWPACK variable and therefore configured in this module.
+
+The x axis is the failure depth on a non-linear scale: the anchor depths
+of :data:`XAXIS_ANCHORS` are spaced evenly, so the axis resolves the
+shallow depths where most profiles sit (the axis of the QMAH hazard
+chart, Herla et al. 2025). The anchors are typical failure depths per
+avalanche size class - the midpoints of the slab-depth ranges McClung
+(2009, table 2) derives per size, or the median observed failure depths
+per size of Mayer et al. (2023) - which is why the scaled depth
+(``hc_xaxis``) reads as a first-order size estimate. Approximating
+avalanche size by failure depth alone is far too coarse to report as a
+size, so the figures label the axis with the depths, not with sizes.
+
+This extension doubles as a **template for developing an extension** to
+xsnow that adds a new dimension to the xsnowDataset class (**application
+scenario 2** of the extension framework): the class subclasses the xsnow
+``DatasetDecorator``, which handles the class configuration entirely,
+while the module-level functions are attached with
+``register_xsnowDataset_method``.
+
+References
+----------
+- Herla, F., Haegeli, P., Horton, S., & Mair, P. (2025). A quantitative
+  module of avalanche hazard - comparing forecaster assessments of storm
+  and persistent slab avalanche problems with information derived from
+  distributed snowpack simulations. Nat. Hazards Earth Syst. Sci., 25,
+  625-646. https://doi.org/10.5194/nhess-25-625-2025
+- McClung, D. M. (2009). Dimensions of dry snow slab avalanches from
+  field measurements. J. Geophys. Res., 114, F01006.
+  https://doi.org/10.1029/2007JF000941
+- Mayer, S., Techel, F., Schweizer, J., & van Herwijnen, A. (2023).
+  Prediction of natural dry-snow avalanche activity using physics-based
+  snowpack simulations. Nat. Hazards Earth Syst. Sci., 23, 3445-3465.
+  https://doi.org/10.5194/nhess-23-3445-2023
 """
-# Author(s): Florian Herla
+# Author(s): Florian Herla, Michi Binder
 # License: https://gitlab.com/avacollabra/postprocessing/xsnow/-/raw/main/LICENSE?ref_type=heads
 
 from __future__ import annotations
 
+import importlib
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 from xsnow import DatasetDecorator
 
-
-# TODO:
-#  * fix z minus issues
-#  * create axes limits per stability index
-#  * add timeseries plot
-
+from ..core import xsnowDataset
+from ..graincode_converter import GRAIN_COLORS, slf_graincode_to_ICSSG_primary
+from ..plugin import register_xsnowDataset_method
+from ..utils import latex_style
+from .critical_crack_length import RC_AXLIM, RC_CLASSES, RC_WEAK
+from .profile_block_computation import (
+    apply_profile_block,
+    float_result_dtype,
+    get_backend,
+)
+from .rta import RTA_AXLIM, RTA_CLASSES, RTA_WEAK
+from .sk38 import SK38_AXLIM, SK38_CLASSES, SK38_WEAK
 
 # ---------------------------------------------------------------------
-# Stability index configuration
+# Configuration
 # ---------------------------------------------------------------------
-_STABILITY_INDEX_INFO: Dict[str, Dict[str, Any]] = {
-    "sk38": dict(
-        var="sk38",  # variable name holding the index (per-layer)
-        weak="min",  # weakest = min value
-        thresholds=[  # (label, upper_bound]
-            ("very poor", 0.5),
-            ("poor", 0.95),
-            ("fair", 1.05),
-            ("rather stable", np.inf),
-        ],
-        poor_or_worse=("very poor", "poor"),
-    ),
-    # add more indices here
+#: The shared class labels, from unstable to stable; an index with a single
+#: threshold uses only 'poor' and 'rather stable'.
+CLASS_LABELS = ("very poor", "poor", "fair", "rather stable")
+POOR_OR_WORSE = ("very poor", "poor")
+CLASS_COLORS = {
+    "very poor": "#d7191c",
+    "poor": "#fdae61",
+    "fair": "#ffffbf",
+    "rather stable": "#a6d96a",
+}
+#: Liquid water content is a native SNOWPACK variable [volume fraction];
+#: 3 % is the wet-snow instability threshold.
+LWC_WEAK = "max"
+LWC_CLASSES = [("rather stable", 0.03), ("poor", np.inf)]
+LWC_AXLIM = (0.0, 0.1)
+
+#: Per index: the weak side ('min': low values are unstable, 'max': high
+#: values are), the classes as ascending ``(label, upper_bound]`` steps in
+#: xsnow units, the y-axis range and the display label.
+_STABILITY_INDEX_INFO: dict[str, dict[str, Any]] = {}
+
+
+def register_stability_index(
+    name: str,
+    *,
+    weak: str,
+    classes: Sequence[tuple[str, float]],
+    axlim: tuple[float, float],
+    label: str | None = None,
+) -> None:
+    """
+    Make a stability index known to the hazard chart.
+
+    Built-in indices are registered on import; an external index package
+    calls this when it is imported (the ``punstable`` package does), so
+    the classes live next to the index they describe.
+
+    Parameters
+    ----------
+    name
+        Index name as used in ``indices=``, also the dataset variable.
+    weak
+        ``'min'`` if low values are unstable, ``'max'`` if high values are.
+    classes
+        Ascending ``(label, upper_bound]`` steps in xsnow units, the last
+        bound being ``inf``, with labels from :data:`CLASS_LABELS`.
+    axlim
+        Y-axis range of the plots.
+    label
+        Display name, by default ``name``.
+    """
+    if weak not in ("min", "max"):
+        raise ValueError(f"weak must be 'min' or 'max', got {weak!r}")
+    unknown = [lbl for lbl, _ in classes if lbl not in CLASS_LABELS]
+    if unknown:
+        raise ValueError(f"Unknown class labels {unknown}; use {CLASS_LABELS}")
+    _STABILITY_INDEX_INFO[name] = {
+        "weak": weak, "classes": list(classes),
+        "axlim": tuple(axlim), "label": label or name,
+    }
+
+
+for _name in ("sk38", "sk38_rta", "sk38_ccl", "sk38_ccl_rta"):
+    register_stability_index(_name, weak=SK38_WEAK, classes=SK38_CLASSES,
+                             axlim=SK38_AXLIM)
+register_stability_index("rta", weak=RTA_WEAK, classes=RTA_CLASSES, axlim=RTA_AXLIM)
+register_stability_index("rc_flat", weak=RC_WEAK, classes=RC_CLASSES, axlim=RC_AXLIM)
+register_stability_index("lwc", weak=LWC_WEAK, classes=LWC_CLASSES, axlim=LWC_AXLIM)
+
+
+def stability_index_info(name: str) -> dict[str, Any]:
+    """
+    Configuration of one stability index (see :func:`register_stability_index`).
+
+    A name missing from the table is imported as a package of that name
+    first, which lets an external index register itself (e.g.
+    ``punstable``); only the absence of such a package is tolerated.
+
+    Returns
+    -------
+    dict
+        ``weak``, ``classes``, ``axlim`` and ``label`` of the index; KeyError
+        for an unknown name.
+    """
+    if name not in _STABILITY_INDEX_INFO:
+        try:
+            importlib.import_module(name)
+        except ModuleNotFoundError as exc:
+            if exc.name != name:
+                raise
+    if name not in _STABILITY_INDEX_INFO:
+        raise KeyError(
+            f"Unknown stability index {name!r}. Known: {sorted(_STABILITY_INDEX_INFO)}"
+        )
+    return _STABILITY_INDEX_INFO[name]
+
+
+def stability_indices() -> list[str]:
+    """Names of the registered stability indices. An external index joins
+    the list when its package is imported or once it is named explicitly
+    (see :func:`stability_index_info`)."""
+    return list(_STABILITY_INDEX_INFO)
+
+
+def _index_config(indices: Sequence[str], classes: dict | None) -> dict[str, tuple]:
+    """``{index: (weak, classes)}`` with the caller's class overrides."""
+    return {
+        name: (
+            stability_index_info(name)["weak"],
+            (classes or {}).get(name, stability_index_info(name)["classes"]),
+        )
+        for name in indices
+    }
+
+
+#: Anchor depths [m] of the x axis, spaced evenly: typical failure depths
+#: of avalanche sizes 0-5 after McClung (2009, midpoints of the slab-depth
+#: ranges of table 2) and Mayer et al. (2023, medians per size; the key
+#: names the co-first author). Size 0 is the axis origin.
+XAXIS_ANCHORS = {
+    'McClung2009': (0.0, 0.18, 0.35, 0.70, 1.50, 3.00),
+    'Techel2023': (0.0, 0.30, 0.40, 0.50, 0.80, 1.00),
 }
 
 
+# ---------------------------------------------------------------------
+# Stability classes and x-axis scaling
+# ---------------------------------------------------------------------
+def classify_stability(values: np.ndarray, classes) -> np.ndarray:
+    """Class index per value from the ascending (label, upper_bound]
+    steps; NaN maps to ``len(classes)``."""
+    xp = get_backend(values)
+    bounds = xp.asarray([b for _, b in classes])
+    return xp.searchsorted(bounds, values, side='left')
+
+
+def classify_poor_or_worse(values: np.ndarray, classes) -> np.ndarray:
+    """Per-entry ``POOR_OR_WORSE`` flag; independent of any grouping."""
+    xp = get_backend(values)
+    poor_ids = [i for i, (label, _) in enumerate(classes)
+                if label in POOR_OR_WORSE]
+    return xp.isin(classify_stability(values, classes), xp.asarray(poor_ids))
+
+
+def scale_depth(depth, scaling: str = 'McClung2009'):
+    """
+    Depth [m] on the hazard-chart x axis: piecewise linear between the
+    anchors of :data:`XAXIS_ANCHORS`, which sit at 0, 1, ..., 5.
+    """
+    if scaling not in XAXIS_ANCHORS:
+        raise ValueError(f"Unknown x-axis scaling: {scaling!r}")
+    xp = get_backend(depth)
+    return xp.interp(depth, xp.asarray(XAXIS_ANCHORS[scaling]), xp.arange(6.0))
+
+
+# ---------------------------------------------------------------------
+# Hazard chart variants
+# ---------------------------------------------------------------------
 @dataclass(frozen=True)
 class HCVariantInfo:
     """
-    Metadata describing one hazard-chart variant stored in the dataset.
-    Note: time is *not* part of the variant. Variants represent configuration
-    (stability index, grouping keys, chosen depth var).
+    Metadata of one hazard-chart variant stored in the dataset: its
+    configuration and, when it was computed for selected timestamps,
+    those timestamps (``None`` means every timestamp of the dataset).
     """
     idx: int
     stability_index: str
-    groupby: Tuple[str, ...]   # grouping variables actually used (no 'time' added)
-    depth_var: str             # depth variable used
+    groupby: tuple[str, ...]
+    depth_var: str
+    xaxis_scaling: str = "McClung2009"
+    time: tuple[str, ...] | None = None
+    layer_context: dict[str, Any] | None = None
+    classes: tuple[tuple[str, float], ...] | None = None
+
+
+@dataclass(frozen=True)
+class _LayerContextSelection:
+    """One selected layer set - every layer, one value of a context variable,
+    or a boolean mask - and the serializable context that describes it."""
+    kind: str                            # 'all' | 'value' | 'mask'
+    source: xr.DataArray | None = None   # the context variable, or the mask
+    code: Any = None                     # the value ('value' only)
+    metadata: dict[str, Any] | None = None
 
 
 class HazardChart(DatasetDecorator):
     """
-    Hazard chart decorator that can accumulate multiple computed variants
-    along a new `hc_variant` dimension. It never mutates the base dataset;
-    instead, each method returns a *new* wrapped instance via `_rewrap()`.
+    Hazard-chart decorator that accumulates chart variants on a dataset.
 
-    name/priority:
-      - name helps introspection/registries.
-      - priority can be used by your pipeline to order decorators if needed.
+    A *variant* is one coherent chart timeseries: a stability index, a layer
+    context, a grouping, a depth variable, and all selected timestamps.
+    ``compute_hazard_chart`` appends one entry per index/context combination
+    along a new ``hc_variant`` dimension. ``list_hc_variants`` reports what
+    each entry holds. The base dataset is never mutated: every method returns
+    a new wrapped instance.
+
+    ``name`` aids introspection/registries, ``priority`` can order decorators
+    in a pipeline.
     """
     name = "hazard_chart"
     priority = 20
 
     # ------------------------------ public API ------------------------------
 
-    def compute_hazard_chart_data(
+    def compute_hazard_chart(
         self,
         *,
-        stability_index: str = "sk38",
-        groupby: Optional[Union[str, Sequence[str]]] = None,
+        stability_index: str | None = None,
+        indices: Sequence[str] | None = None,
+        groupby: str | Sequence[str] | None = None,
         layer_dim: str = "layer",
         depth_var: str = "z",
-        at_time: Optional[Any] = None,
-    ) -> "HazardChart":
+        classes: dict[str, Sequence] | None = None,
+        xaxis_scaling: str = "McClung2009",
+        at_time: Any | None = None,
+        layer_context: (
+            str
+            | Mapping[str, Any]
+            | xr.DataArray
+            | Sequence[Any]
+            | np.ndarray
+            | None
+        ) = None,
+    ) -> HazardChart:
         """
-        Compute hazard-chart summary variables across time (or at a specific time
-        if `at_time` is provided) and append them as a new entry on the `hc_variant`
-        dimension.
+        Reduce every profile to one hazard-chart point per stability-index /
+        layer-context combination and append the results as new entries of
+        the ``hc_variant`` dimension.
 
-        Notes
-        -----
-        Depth selection is dynamic per point:
-          - depth @ weakest layer (min/max of stability index), and
-          - deepest depth with qualitative class ∈ poor-or-worse
-        are both computed; the *deeper* is chosen. Provenance for the chosen
-        depth's driver layer is stored in `hc_depthDrivenBy`.
+        Per index the weakest layer sets ``hc_instability``; ``hc_depth`` is
+        the depth of the deepest layer in the poor-or-worse classes, falling
+        back to the weakest layer's depth. Both drivers are recorded in
+        ``hc_instabilityDrivenBy`` / ``hc_depthDrivenBy``.
 
-        The output variables have dims (hc_variant, <points dims incl. time>).
+        Parameters
+        ----------
+        stability_index, indices
+            One index, or several (one variant each). Names are resolved
+            with :func:`stability_index_info`.
+        groupby
+            Coordinates or variables without the layer dimension that label
+            the points, e.g. ``"region"`` or ``["region", "band"]``; their
+            values are joined into one label per point and stored as integer
+            ids in ``hc_group_id`` (id-to-label mapping in its ``mapping``
+            attribute). Nothing is aggregated: the ids let
+            ``subset_hazard_points`` and the plots pick one group.
+        layer_dim
+            Name of the layer dimension.
+        depth_var
+            Depth variable [m] of the layers; an index that comes with its
+            own ``<idx>_depth`` uses that instead. A variable marked
+            ``positive: 'up'`` (such as ``z``) is flipped, so ``hc_depth``
+            always counts downwards from the surface.
+        classes
+            Per-index overrides of the registered stability classes
+            (ascending ``(label, upper_bound]`` steps).
+        xaxis_scaling
+            Anchor set of :data:`XAXIS_ANCHORS` behind ``hc_xaxis``.
+        at_time
+            Timestamp(s) to compute for; every timestamp by default.
+        layer_context
+            Layers eligible to drive the chart. A variable name, such as
+            ``"datetag"``, creates one variant per unique non-missing value
+            (found by a scan of the variable). A mapping creates, per key in
+            order, one variant per listed value
+            (``{"datetag": ["2026-01-14", "2026-01-20"]}``, an unmatched
+            value giving an empty variant), per unique value for ``None``,
+            and one variant from a boolean variable for ``True``
+            (``{"datetag": tags, "new_snow": True}``); the keys concatenate,
+            they do not combine. A custom DataArray or one-dimensional array
+            creates one variant per unique non-missing value; a boolean array
+            acts as one layer mask. Every variant of one call comes out of a
+            single pass over the profiles.
+
+        Returns
+        -------
+        HazardChart
+            The dataset with, per new variant on ``hc_variant`` and per point
+            (all dimensions but the layer): ``hc_instability``, ``hc_depth``
+            [m below surface], ``hc_xaxis`` (the depth on the chart's x
+            axis), ``hc_instabilityDrivenBy`` / ``hc_depthDrivenBy`` (index
+            of the driving layer along ``layer_dim``, NaN without a value or
+            outside ``at_time``), ``hc_gcode`` / ``hc_gcode_deep`` (SLF grain
+            codes of the weakest and of the depth-driving layer, from
+            ``<idx>_gcode_weak`` / ``<idx>_gcode_deep`` or ``grain_type``),
+            ``hc_layer_count`` (selected layers with a depth) and, with
+            ``groupby``, ``hc_group_id``. The variant configuration is listed
+            by ``list_hc_variants``.
+
+        Examples
+        --------
+        >>> hc = HazardChart(ds).compute_hazard_chart(
+        ...     indices=['sk38', 'punstable'], depth_var='z',
+        ...     groupby=['region_id', 'band'])
+        >>> hc.plot_hazard_chart(hc_variant=1, group='AT-07-01|alpine')
+        >>> by_datetag = HazardChart(ds).compute_hazard_chart(
+        ...     indices=['sk38'],
+        ...     layer_context={'datetag': ['2026-01-14', '2026-01-20']})
         """
         base = self.data
-
-        # --- resolve index config ---
-        if stability_index not in _STABILITY_INDEX_INFO:
-            raise KeyError(f"Unknown stability_index '{stability_index}'. "
-                           f"Known: {list(_STABILITY_INDEX_INFO)}")
-        cfg = _STABILITY_INDEX_INFO[stability_index]
-        index_var = cfg["var"]
-        weak_is_min = cfg["weak"] == "min"
-        thresholds: List[Tuple[str, float]] = cfg["thresholds"]
-        poor_or_worse: Tuple[str, ...] = cfg.get("poor_or_worse", ("very poor", "poor"))
-
-        if index_var not in base:
-            raise KeyError(f"Expected index variable '{index_var}' not found in dataset.")
-        if depth_var not in base:
-            raise KeyError(f"Expected depth variable '{depth_var}' not found in dataset.")
         if layer_dim not in base.dims:
             raise KeyError(f"Expected layer dimension '{layer_dim}' not found in dataset.")
+        if indices is not None and stability_index is not None:
+            raise ValueError("Pass either 'stability_index' or 'indices', not both.")
+        if indices is None:
+            indices = [stability_index if stability_index is not None else "sk38"]
+        cfg = _index_config(indices, classes)
 
-        # --- restrict to time if requested (but keep 'time' as a dim) ---
-        ds = base if at_time is None else base.sel(time=at_time)
+        # the time dimension survives a selection, so variants of different
+        # timestamps concatenate; points outside the selection are NaN
+        ds, times = base, None
+        if at_time is not None:
+            if not isinstance(at_time, slice):
+                at_time = np.atleast_1d(at_time)
+            ds = base.sel(time=at_time)
+            times = tuple(_to_timestr(t) for t in ds["time"].values)
 
-        # --- inputs (per-layer) ---
-        si = ds[index_var]           # dims: (..., layer)
-        depth_da = ds[depth_var]     # dims include layer
-        if layer_dim not in si.dims or layer_dim not in depth_da.dims:
-            raise ValueError(f"Both '{index_var}' and '{depth_var}' must have layer_dim='{layer_dim}'")
-
-        # we operate on points grid = all dims except 'layer'
-        points_dims = tuple(d for d in si.dims if d != layer_dim)
-
-        # at least one finite layer per point?
-        valid_point = si.count(dim=layer_dim) > 0
-
-        # --- weakest stability & driver (guarded) ---
-        if weak_is_min:
-            hc_instability = si.min(dim=layer_dim, skipna=True)
-            hc_instabilityDrivenBy = _safe_argreduce(si, dim=layer_dim, func="min")
-        else:
-            hc_instability = si.max(dim=layer_dim, skipna=True)
-            hc_instabilityDrivenBy = _safe_argreduce(si, dim=layer_dim, func="max")
-
-        # depth at weakest layer (NaN-safe)
-        weakest_depth = _isel_with_nan_index(depth_da, layer_dim, hc_instabilityDrivenBy)
-
-        # compare depths using a metric that increases with depth (sign-agnostic)
-        z_metric = _depth_metric(depth_da, layer_dim)
-
-        # --- deepest depth among "poor or worse" layers ---
-        class_bins = _classify_layers(si, thresholds)           # per-layer string labels
-        poor_mask = _is_any_of(class_bins, poor_or_worse)       # bool like si
-        depth_metric_masked = xr.where(poor_mask, z_metric, -np.inf)  # invalid -> -inf
-        deepest_poor_metric = depth_metric_masked.max(dim=layer_dim, skipna=True)
-        arg_poor = depth_metric_masked.argmax(dim=layer_dim, skipna=True)
-        valid_poor = np.isfinite(deepest_poor_metric)
-        arg_poor = arg_poor.where(valid_poor)
-        deepest_poor = _isel_with_nan_index(depth_da, layer_dim, arg_poor)
-
-        weakest_depth_metric = _isel_with_nan_index(z_metric, layer_dim, hc_instabilityDrivenBy)
-
-        use_poor = valid_poor & (deepest_poor_metric > weakest_depth_metric)
-        hc_depth = xr.where(use_poor, deepest_poor, weakest_depth)
-        hc_depthDrivenBy = xr.where(use_poor, arg_poor, hc_instabilityDrivenBy)
-
-        # mask outputs where profile is entirely invalid
-        hc_instability = hc_instability.where(valid_point)
-        hc_instabilityDrivenBy = hc_instabilityDrivenBy.where(valid_point)
-        hc_depth = hc_depth.where(valid_point)
-        hc_depthDrivenBy = hc_depthDrivenBy.where(valid_point)
-
-        # --- grouping (NO time in the label; time remains a dim on outputs) ---
-        groupby_list = _normalize_groupby(groupby)  # may be empty/None
-        # Build labels against the proto grid of hc_instability (no layer, includes time if present)
-        hc_group_labels = _compose_group_labels(ds, groupby_list, proto_like=hc_instability)
-        hc_group_id, mapping = _unique_labels_to_ids(hc_group_labels)
-        hc_group_id = hc_group_id.where(valid_point)  # NaN out invalid points
-
-        # --- append as a new variant over existing dataset (keep time dim) ---
-        out = self.data
-        existing_variants = int(out.sizes.get("hc_variant", 0))
-        new_idx = existing_variants  # next integer
-
-        def _with_variant(arr: xr.DataArray) -> xr.DataArray:
-            return arr if "hc_variant" in arr.dims else arr.expand_dims(hc_variant=[new_idx])
-
-        new_vars = {
-            "hc_instability": _with_variant(hc_instability).assign_attrs(
-                dict(description="Weakest stability index value", index=stability_index)
-            ),
-            "hc_depth": _with_variant(hc_depth).assign_attrs(
-                dict(
-                    description="Relevant depth (deeper of weakest vs deepest-poor)",
-                    units=depth_da.attrs.get("units", "m"),
-                    positive=depth_da.attrs.get("positive", ""),
-                    depth_var=depth_var,
-                )
-            ),
-            "hc_instabilityDrivenBy": _with_variant(hc_instabilityDrivenBy).assign_attrs(
-                dict(description="Layer index that drove hc_instability", layer_dim=layer_dim)
-            ),
-            "hc_depthDrivenBy": _with_variant(hc_depthDrivenBy).assign_attrs(
-                dict(description="Layer index that drove hc_depth", layer_dim=layer_dim)
-            ),
-            "hc_group_id": _with_variant(hc_group_id).assign_attrs(
-                dict(description="Integer group id; see coordinate attrs for mapping")
-            ),
-        }
-
-        for name, arr in new_vars.items():
-            if name in out:
-                out[name] = xr.concat([out[name], arr], dim="hc_variant")
-            else:
-                out[name] = arr
-
-        if "hc_variant" not in out.coords:
-            out = out.assign_coords(hc_variant=np.arange(out.sizes["hc_variant"], dtype=int))
-
-        # --- store/update mapping in the hc_group_id variable attrs (per-variant) ---
-        out = _update_group_mapping_attr(out, variant_idx=new_idx, keys=groupby_list, labels_map=mapping)
-
-        # --- store/append variant metadata ---
-        info = HCVariantInfo(
-            idx=new_idx,
-            stability_index=stability_index,
-            groupby=groupby_list,
-            depth_var=depth_var,
+        selections = _layer_context_selections(
+            ds, layer_context=layer_context, layer_dim=layer_dim,
         )
-        _append_variant_info(out, info)
+        n_ctx = len(selections)
 
-        # provenance
-        _append_history(out, f"hazard_chart:variant={new_idx},index={stability_index}")
+        out = base.copy()
+        groupby_list = _normalize_groupby(groupby)
+        start_idx = int(out.sizes.get("hc_variant", 0))
+        # collect the variants and concatenate once: assigning a longer
+        # hc_variant into an indexed dataset would align it away
+        collected: dict[str, list[xr.DataArray]] = {}
+        group_maps: list[tuple[int, dict]] = []
+        if "hc_variant" in out.dims:
+            collected = {n: [out[n]] for n in out.data_vars if n.startswith("hc_")}
+            out = out.drop_dims("hc_variant")
+
+        # one pass over the profiles: the context variables and masks go in
+        # once, the block resolves every context for every index
+        inputs: list[xr.DataArray] = []
+        core: list[list[str]] = []
+        context_vars: list[xr.DataArray] = []
+        masks: list[xr.DataArray] = []
+        contexts: list[tuple] = []
+        for sel in selections:
+            if sel.kind == "value":
+                pos = next((i for i, v in enumerate(context_vars) if v is sel.source), None)
+                if pos is None:
+                    context_vars.append(sel.source)
+                    pos = len(context_vars) - 1
+                contexts.append(("value", pos, _context_code(sel.code, sel.source.dtype)))
+            elif sel.kind == "mask":
+                masks.append(sel.source)
+                contexts.append(("mask", len(masks) - 1))
+            else:
+                contexts.append(("all",))
+        # the derived inputs carry no auxiliary coordinates: the index
+        # variables bring them, and comparing lazy ones would compute them
+        inputs += [v.reset_coords(drop=True) for v in context_vars]
+        core += [[layer_dim]] * len(context_vars)
+        if masks:
+            inputs.append(xr.concat(
+                [m.reset_coords(drop=True) for m in masks], dim="hc_mask",
+            ))
+            core.append(["hc_mask", layer_dim])
+
+        index_specs: list[dict[str, Any]] = []
+        per_index: list[tuple] = []
+        for index_var in indices:
+            side, cls_steps = cfg[index_var]
+            if index_var not in ds:
+                raise KeyError(f"Expected index variable '{index_var}' not found in dataset.")
+            dvar = f"{index_var}_depth"
+            if dvar not in ds:
+                dvar = depth_var
+            if dvar not in ds:
+                raise KeyError(f"Expected depth variable '{dvar}' not found in dataset.")
+
+            si = ds[index_var]
+            if layer_dim not in si.dims or layer_dim not in ds[dvar].dims:
+                raise ValueError(
+                    f"Both '{index_var}' and '{dvar}' must have layer_dim='{layer_dim}'"
+                )
+            gvar = f"{index_var}_gcode_weak"
+            if gvar not in ds and "grain_type" in ds:
+                gvar = "grain_type"
+            with_gcode = gvar in ds
+            gvar_deep = f"{index_var}_gcode_deep"
+            if gvar_deep not in ds:
+                gvar_deep = gvar
+
+            names = ["hc_instability", "hc_depth", "hc_xaxis",
+                     "hc_instabilityDrivenBy", "hc_depthDrivenBy"]
+            if with_gcode:
+                names += ["hc_gcode", "hc_gcode_deep"]
+            names.append("hc_layer_count")
+            attributes = {
+                "hc_instability": {
+                    "description": "Weakest stability index value", "index": index_var,
+                },
+                "hc_depth": {
+                    "description": "Depth of the deepest poor-or-worse layer",
+                    "units": ds[dvar].attrs.get("units", "m"),
+                    "positive": "down",
+                    "depth_var": dvar,
+                },
+                "hc_xaxis": {
+                    "units": "1",
+                    "long_name": f"hc_depth on the {xaxis_scaling} x-axis scale",
+                    "xaxis_scaling": xaxis_scaling,
+                },
+                "hc_instabilityDrivenBy": {
+                    "description": "Index of the layer that drove hc_instability",
+                },
+                "hc_depthDrivenBy": {
+                    "description": "Index of the layer that drove hc_depth",
+                },
+                "hc_gcode": {"units": "Swiss Code F1F2F3",
+                             "description": "Grain code of the weakest layer"},
+                "hc_gcode_deep": {"units": "Swiss Code F1F2F3",
+                                  "description": "Grain code of the layer that drove hc_depth"},
+                "hc_layer_count": {"units": "1",
+                                   "description": "Selected layers with a depth"},
+            }
+            inputs += [si, ds[dvar]] + ([ds[gvar], ds[gvar_deep]] if with_gcode else [])
+            core += [[layer_dim]] * (4 if with_gcode else 2)
+            # layer indices and the scaled depth are float64 like numpy makes
+            # them; values, depth and codes keep the index dtype
+            value_dtype = float_result_dtype(si)
+            dtypes = [value_dtype, value_dtype, np.dtype("float64"), np.dtype("float64"),
+                      np.dtype("float64")]
+            if with_gcode:
+                dtypes += [value_dtype, value_dtype]
+            dtypes.append(np.dtype("int16"))
+            index_specs.append({
+                "side": side, "classes": cls_steps, "with_gcode": with_gcode,
+                "flip_depth": str(ds[dvar].attrs.get("positive", "")).lower() == "up",
+            })
+            per_index.append((index_var, dvar, names, attributes, dtypes))
+
+        results = apply_profile_block(
+            _hazard_chart_block, *inputs,
+            output_dtype=[d for *_, dtypes in per_index for d in dtypes],
+            layer_dim=layer_dim,
+            input_core_dims=core,
+            output_core_dims=[["hc_context"]] * sum(len(n) for _, _, n, _, _ in per_index),
+            output_sizes={"hc_context": n_ctx},
+            kwargs={
+                "n_context_vars": len(context_vars), "has_masks": bool(masks),
+                "contexts": contexts, "index_specs": index_specs,
+                "xaxis_scaling": xaxis_scaling,
+            },
+        )
+
+        pos = 0
+        gid = mapping = None
+        for i, (index_var, dvar, names, attributes, _) in enumerate(per_index):
+            variant_ids = [start_idx + i * n_ctx + k for k in range(n_ctx)]
+            arrays = {}
+            for name in names:
+                arrays[name] = (
+                    results[pos].rename({"hc_context": "hc_variant"})
+                    .transpose("hc_variant", ...)
+                    .assign_coords(hc_variant=variant_ids)
+                    .assign_attrs(attributes[name])
+                )
+                pos += 1
+            if groupby_list:
+                if gid is None:
+                    proto = arrays["hc_instability"].isel(hc_variant=0, drop=True)
+                    gid, mapping = _unique_labels_to_ids(
+                        _compose_group_labels(ds, groupby_list, proto_like=proto)
+                    )
+                arrays["hc_group_id"] = gid.where(
+                    arrays["hc_instability"].notnull()
+                ).transpose("hc_variant", ...).assign_attrs(
+                    {"description": "Integer group id; see coordinate attrs for mapping"}
+                )
+            for name, arr in arrays.items():
+                collected.setdefault(name, []).append(arr)
+
+            for k, sel in enumerate(selections):
+                new_idx = variant_ids[k]
+                if groupby_list:
+                    group_maps.append((new_idx, mapping))
+                _append_variant_info(out, HCVariantInfo(
+                    idx=new_idx,
+                    stability_index=index_var,
+                    groupby=groupby_list,
+                    depth_var=dvar,
+                    xaxis_scaling=xaxis_scaling,
+                    time=times,
+                    layer_context=sel.metadata,
+                    classes=tuple(
+                        (str(label), float(bound))
+                        for label, bound in cfg[index_var][1]
+                    ),
+                ))
+                _append_history(
+                    out, f"hazard_chart:variant={new_idx},index={index_var}"
+                )
+
+        for name, parts in collected.items():
+            out[name] = parts[0] if len(parts) == 1 else xr.concat(parts, dim="hc_variant")
+
+        # only now: assigning hc_group_id above replaces the variable attrs
+        for variant_idx, mapping in group_maps:
+            out = _update_group_mapping_attr(
+                out, variant_idx=variant_idx, keys=groupby_list, labels_map=mapping
+            )
 
         return self._rewrap(out)
 
-    def list_hc_variants(self) -> List[HCVariantInfo]:
-        """Return metadata for all stored hazard-chart variants."""
+    def list_hc_variants(self) -> list[HCVariantInfo]:
+        """Metadata of every stored variant, in ``hc_variant`` order."""
         return _read_variant_info(self.data)
+
+    def aggregate_hc_variants(
+        self,
+        *,
+        hc_variants: Sequence[int],
+    ) -> HazardChart:
+        """
+        Combine stored variants of one index into a new variant by the
+        hazard-chart selection: per point the weakest value across the
+        variants, and the depth of the deepest variant in the poor-or-worse
+        classes (falling back to the weakest variant's depth), both by their
+        actual values, not by order.
+
+        Turns a chart per datetag into the chart of several datetags, or any
+        other set of layer contexts into their union, without touching the
+        layers again: it works on the stored points, lazily.
+
+        Parameters
+        ----------
+        hc_variants
+            Variants to combine; they must share the index, grouping, depth
+            variable, x-axis scaling and classes.
+
+        Returns
+        -------
+        HazardChart
+            The dataset with the new variant appended. Its
+            ``hc_instabilityDrivenBy`` / ``hc_depthDrivenBy`` hold the
+            ``hc_variant`` id that drove the value / the depth,
+            ``hc_layer_count`` sums the variants' counts, and the metadata
+            records the combined variants under ``layer_context``.
+        """
+        ids = [int(v) for v in hc_variants]
+        if not ids:
+            raise ValueError("aggregate_hc_variants needs at least one variant")
+        infos = [_variant_info(self.data, v) for v in ids]
+        first = infos[0]
+        for info in infos[1:]:
+            for field in ("stability_index", "groupby", "depth_var", "xaxis_scaling",
+                          "classes"):
+                if getattr(info, field) != getattr(first, field):
+                    raise ValueError(
+                        f"Variants {ids} differ in '{field}'; only variants of one "
+                        "configuration combine."
+                    )
+        index = first.stability_index
+        side = stability_index_info(index)["weak"]
+        classes = first.classes or stability_index_info(index)["classes"]
+
+        sub = self.data.sel(hc_variant=ids)
+        names = ["hc_instability", "hc_depth"]
+        with_gcode = "hc_gcode" in sub and "hc_gcode_deep" in sub
+        if with_gcode:
+            names += ["hc_gcode", "hc_gcode_deep"]
+        with_count = "hc_layer_count" in sub
+        if with_count:
+            names.append("hc_layer_count")
+        arrays = []
+        for name in names:
+            da = sub[name]
+            if da.chunks is not None:
+                da = da.chunk({"hc_variant": -1})
+            arrays.append(da)
+        out_names = ["hc_instability", "hc_depth", "hc_xaxis",
+                     "hc_instabilityDrivenBy", "hc_depthDrivenBy"]
+        if with_gcode:
+            out_names += ["hc_gcode", "hc_gcode_deep"]
+        if with_count:
+            out_names.append("hc_layer_count")
+        value_dtype = float_result_dtype(sub["hc_instability"])
+        dtypes = [value_dtype] * (len(out_names) - with_count)
+        if with_count:
+            dtypes.append(np.dtype("int16"))
+        results = xr.apply_ufunc(
+            _aggregate_block, *arrays,
+            input_core_dims=[["hc_variant"]] * len(arrays),
+            output_core_dims=[[]] * len(out_names),
+            dask="parallelized", output_dtypes=dtypes,
+            kwargs={
+                "side": side, "classes": classes, "with_gcode": with_gcode,
+                "with_count": with_count, "variant_ids": np.asarray(ids, dtype=float),
+                "xaxis_scaling": first.xaxis_scaling,
+            },
+        )
+        known = {info.idx for info in _read_variant_info(self.data)}
+        new_idx = max(known) + 1 if known else int(self.data.sizes["hc_variant"])
+        out = self.data.drop_dims("hc_variant")
+        collected = {n: [self.data[n]] for n in self.data.data_vars if n.startswith("hc_")}
+        first_variant = sub.isel(hc_variant=0, drop=True)
+        for name, result in zip(out_names, results):
+            attrs = dict(first_variant[name].attrs) if name in first_variant else {}
+            if name.endswith("DrivenBy"):
+                attrs = {"description": f"hc_variant that drove {name[3:-8]}"}
+            collected.setdefault(name, []).append(
+                result.assign_attrs(attrs).expand_dims(hc_variant=[new_idx])
+            )
+        if "hc_group_id" in first_variant:
+            collected["hc_group_id"].append(
+                first_variant["hc_group_id"].expand_dims(hc_variant=[new_idx])
+            )
+        for name, parts in collected.items():
+            out[name] = xr.concat(parts, dim="hc_variant") if len(parts) > 1 else parts[0]
+        if "hc_group_id" in first_variant and first.groupby:
+            maps = json.loads(self.data["hc_group_id"].attrs.get("mapping", "{}"))
+            entry = maps.get(str(first.idx))
+            if entry is not None:
+                out = _update_group_mapping_attr(
+                    out, variant_idx=new_idx, keys=entry["keys"],
+                    labels_map={int(k): v for k, v in entry["labels"].items()},
+                )
+        times = None
+        if all(info.time is not None for info in infos):
+            times = tuple(sorted({t for info in infos for t in info.time}))
+        _append_variant_info(out, HCVariantInfo(
+            idx=new_idx, stability_index=index, groupby=first.groupby,
+            depth_var=first.depth_var, xaxis_scaling=first.xaxis_scaling,
+            time=times,
+            layer_context={"kind": "aggregate", "variants": ids},
+            classes=first.classes,
+        ))
+        _append_history(out, f"hazard_chart:variant={new_idx},aggregate={ids}")
+        return self._rewrap(out)
 
     def subset_hazard_points(
         self,
         *,
         hc_variant: int,
-        group: Optional[Union[int, str]] = None,
-        time: Optional[Any] = None,
+        group: int | str | None = None,
+        time: Any | None = None,
     ) -> xr.Dataset:
         """
-        Return per-point hazard variables for a single variant, optionally restricted
-        to one group (by id or label) and/or time (scalar value).
+        The points of one variant, optionally of one group and/or time
+        selection.
+
+        A variant holds every profile of the dataset; this changes the view
+        onto it without recomputing anything: zoom into one region or
+        elevation band (``group``, by id or by its label from the
+        ``hc_group_id`` mapping) or onto a scalar, slice, or array-like
+        ``time`` selection. With no time selector, all timestamps contained
+        in the variant are returned. The plots use it to pick what they draw.
+
+        Returns
+        -------
+        xarray.Dataset
+            The ``hc_*`` variables of the variant, with the points outside
+            the selection dropped.
         """
         ds = self.data
         if "hc_variant" not in ds.dims:
@@ -266,24 +761,34 @@ class HazardChart(DatasetDecorator):
 
         sub = ds.sel(hc_variant=hc_variant)
 
-        # optional time selection (preserve other dims)
+        meta = _variant_info(self.data, hc_variant, required=False)
+        if meta is not None and meta.time is not None and "time" in sub.dims:
+            sub = sub.sel(time=list(meta.time))
+
         if time is not None and "time" in sub.dims:
             sub = sub.sel(time=time)
 
         if group is not None:
+            if (meta is not None and not meta.groupby) or "hc_group_id" not in sub:
+                raise ValueError(
+                    f"Variant {hc_variant} was computed without 'groupby'; "
+                    "there are no groups to select."
+                )
             if isinstance(group, str):
                 gid = sub["hc_group_id"]
-                import json
                 maps = json.loads(gid.attrs.get("mapping", "{}"))
                 mapping = maps.get(str(hc_variant), {}).get("labels", {})
                 rev = {v: int(k) for k, v in mapping.items()}
                 if group not in rev:
                     raise KeyError(f"group label '{group}' not found for variant {hc_variant}")
                 group = rev[group]
-            mask = sub["hc_group_id"] == int(group)
+            # the ids are point-level data; dropping needs an eager mask
+            mask = (sub["hc_group_id"] == int(group)).compute()
             sub = sub.where(mask, drop=True)
 
-        keep = ["hc_instability", "hc_depth", "hc_instabilityDrivenBy", "hc_depthDrivenBy", "hc_group_id"]
+        keep = ["hc_instability", "hc_depth", "hc_xaxis", "hc_gcode", "hc_gcode_deep",
+                "hc_instabilityDrivenBy", "hc_depthDrivenBy", "hc_layer_count",
+                "hc_group_id"]
         keep = [k for k in keep if k in sub]
         return sub[keep]
 
@@ -291,66 +796,711 @@ class HazardChart(DatasetDecorator):
         self,
         *,
         hc_variant: int,
-        group: Optional[Union[int, str]] = None,
-        time: Optional[Any] = None,
+        group: int | str | None = None,
+        time: Any | None = None,
         ax=None,
-        s: float = 18.0,
+        s: float = 7.0,
         alpha: float = 0.7,
+        xaxis_scaling: str | None = None,
+        timeseries: xsnowDataset | None = None,
+        pooled: xsnowDataset | None = None,
     ):
         """
-        Scatter-plot for one variant, optionally for a single group and/or time.
-        X = hc_depth, Y = hc_instability.
+        Scatter plot of one variant: depth of the driving layer against the
+        weakest index value, one point per profile.
+
+        Parameters
+        ----------
+        hc_variant, group, time
+            What to draw, see ``subset_hazard_points``. By default every
+            timestamp contained in the variant is drawn; ``time`` accepts a
+            scalar, slice, or array-like xarray selector.
+        ax
+            Axes to draw into; a new figure otherwise.
+        s, alpha
+            Marker size and opacity.
+        xaxis_scaling
+            Anchor set of :data:`XAXIS_ANCHORS` spacing the depth axis;
+            defaults to the variant's.
+        timeseries
+            Optional aggregated timeseries used for the marker at ``time``.
+            Without it, the timeseries is derived from the selected variant
+            and ``group``. Supplying one avoids repeated aggregation or lets
+            callers use an externally prepared subset.
+        pooled
+            Deprecated compatibility alias for ``timeseries``. Passing both
+            raises ``ValueError``.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            A square chart when no ``ax`` is given. Points coloured by the
+            grain type of the weakest layer
+            (``GRAIN_COLORS['SARP']``), dashed class boundaries, and at a
+            selected ``time`` a green diamond at each selected timestamp's
+            aggregated median value and median unstable depth.
         """
         import matplotlib.pyplot as plt
 
+        if timeseries is not None and pooled is not None:
+            raise ValueError("Pass either 'timeseries' or 'pooled', not both.")
+        if timeseries is None:
+            timeseries = pooled
+
+        meta = _variant_info(self.data, hc_variant)
+        index = meta.stability_index
+        cfg = stability_index_info(index)
+        scaling = xaxis_scaling or meta.xaxis_scaling
+        if scaling not in XAXIS_ANCHORS:
+            raise ValueError(f"Unknown x-axis scaling: {scaling!r}")
+
         sub = self.subset_hazard_points(hc_variant=hc_variant, group=group, time=time)
-        x = sub["hc_depth"].values.ravel()
-        y = sub["hc_instability"].values.ravel()
+        x = _to_host(sub["hc_depth"].data).ravel()
+        y = _to_host(sub["hc_instability"].data).ravel()
+        colors = "black"
+        if "hc_gcode" in sub:
+            grains = slf_graincode_to_ICSSG_primary(
+                _to_host(sub["hc_gcode"].data).ravel()
+            ).values
+            palette = GRAIN_COLORS["SARP"]
+            colors = [palette.get(g, "black") for g in grains]
 
-        if ax is None:
-            _, ax = plt.subplots()
+        with plt.style.context(latex_style()):
+            if ax is None:
+                _, ax = plt.subplots(figsize=(4.8, 4.8))
+                ax.set_box_aspect(1)
 
-        ax.scatter(x, y, s=s, alpha=alpha)
-        ax.set_xlabel("Depth")
-        ax.set_ylabel("Instability index (weakest)")
-        # Decide whether to invert axis depending on your depth convention
-        # ax.invert_xaxis()
+            ax.scatter(scale_depth(x, scaling), y, s=s, alpha=alpha, c=colors,
+                       edgecolors=(0, 0, 0, 0.3), linewidths=0.3)
+            _depth_axis(ax, scaling)
+            ax.set_ylabel(_index_label(index))
+            ax.set_ylim(*cfg["axlim"])
+            ax.grid(True)
+            _draw_class_lines(ax, index, classes=meta.classes)
 
-        # Title with basic info
-        infos = self.list_hc_variants()
-        title = f"Hazard chart (variant {hc_variant})"
-        if hc_variant < len(infos):
-            meta = infos[hc_variant]
-            title += f" — {meta.stability_index}"
-            if meta.groupby:
-                title += f" grouped by {','.join(meta.groupby)}"
             if time is not None:
-                title += f" @ time={_to_timestr(time)}"
-        ax.set_title(title)
+                stats = (
+                    timeseries if timeseries is not None
+                    else _compute_variant_timeseries(
+                        self.data, meta, group=group, time=time,
+                    )
+                ).data
+                at = stats.sel(time=time)
+                mark_x = scale_depth(
+                    _to_host(at[f"{index}_depth"].data), scaling
+                ).reshape(-1)
+                mark_y = _to_host(at[f"{index}_median"].data).reshape(-1)
+                ax.plot(mark_x, mark_y,
+                        "D", color="green", mec="black", mew=0.6,
+                        ms=9, zorder=5)
         return ax
 
+    def plot_hc_timeseries(
+        self,
+        *,
+        hc_variant: int,
+        group: int | str | None = None,
+        time: Any | None = None,
+        ax=None,
+        timeseries: xsnowDataset | None = None,
+        label_side: str = "left",
+    ):
+        """
+        Aggregated timeseries of one variant's index: median line, 25-75 %
+        band (darker) and 10-90 % band (lighter) across the selected profiles
+        per timestamp, with the class boundaries and marks at ``time``.
 
-# ------------------------------ helpers ------------------------------
+        Parameters
+        ----------
+        hc_variant
+            Variant whose index is aggregated.
+        group
+            Optional group id or label to aggregate; all points by default.
+        time
+            Timestamp, slice, or array-like selection to mark; none by
+            default.
+        ax
+            Axes to draw into; a new figure otherwise.
+        timeseries
+            Optional pre-aggregated result. Without it, the timeseries is
+            derived directly from ``hc_variant`` and ``group``.
+        label_side
+            ``'left'`` or ``'right'``: where the y-axis label and tick
+            labels sit.
 
-def _normalize_groupby(groupby: Optional[Union[str, Sequence[str]]]) -> Tuple[str, ...]:
+        Returns
+        -------
+        matplotlib.axes.Axes
+        """
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+
+        meta = _variant_info(self.data, hc_variant)
+        index = meta.stability_index
+        stats = (
+            timeseries if timeseries is not None
+            else _compute_variant_timeseries(self.data, meta, group=group)
+        ).data
+        if label_side not in ("left", "right"):
+            raise ValueError("label_side must be 'left' or 'right'")
+
+        with plt.style.context(latex_style()):
+            if ax is None:
+                _, ax = plt.subplots(figsize=(8.3, 4.8))
+            t = stats['time'].values
+            ax.fill_between(t, stats[f'{index}_p10'].values,
+                            stats[f'{index}_p90'].values,
+                            color='#ddd', label='10-90 %')
+            ax.fill_between(t, stats[f'{index}_p25'].values,
+                            stats[f'{index}_p75'].values,
+                            color='#bbb', label='25-75 %')
+            ax.plot(t, stats[f'{index}_median'].values, color='green',
+                    label='median')
+            if time is not None:
+                marked = np.atleast_1d(stats['time'].sel(time=time).values)
+                for timestamp in marked:
+                    ax.axvline(timestamp, color='k', lw=0.8, ls='--')
+            if len(t) > 1:
+                ax.set_xlim(t[0], t[-1])
+                locator = mdates.AutoDateLocator(maxticks=6)
+                ax.xaxis.set_major_locator(locator)
+                ax.xaxis.set_major_formatter(
+                    mdates.ConciseDateFormatter(locator)
+                )
+            right = label_side == "right"
+            ax.tick_params(axis='y', which='both', left=True, right=True,
+                           labelleft=not right, labelright=right)
+            ax.yaxis.set_label_position(label_side)
+            ax.set_ylabel(_index_label(index))
+            ax.set_ylim(*stability_index_info(index)["axlim"])
+            ax.grid(True)
+            _draw_class_lines(ax, index, classes=meta.classes)
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                      ncols=3, frameon=False, fontsize="small",
+                      columnspacing=1.2, handlelength=1.6)
+        return ax
+
+    def plot_hc_with_timeseries(
+        self,
+        *,
+        hc_variant: int,
+        group: int | str | None = None,
+        time: Any | None = None,
+        axes=None,
+        s: float = 7.0,
+        alpha: float = 0.7,
+        xaxis_scaling: str | None = None,
+        timeseries: xsnowDataset | None = None,
+    ):
+        """
+        Two-panel figure: the hazard chart (``plot_hazard_chart``, panel a)
+        next to its aggregated timeseries (``plot_hc_timeseries``, panel b),
+        sharing the y axis; the right panel keeps its labels on the right
+        so the panels sit close together.
+
+        ``group`` selects the points drawn in the scatter panel and the same
+        points aggregated in the timeseries panel. An explicitly supplied
+        ``timeseries`` feeds both panels and is assumed to represent the
+        requested group. The remaining parameters are those of the two
+        plotters.
+
+        Returns
+        -------
+        tuple[matplotlib.axes.Axes, matplotlib.axes.Axes]
+            The scatter and the timeseries axes.
+        """
+        import matplotlib.pyplot as plt
+
+        meta = _variant_info(self.data, hc_variant)
+        stats = (
+            timeseries if timeseries is not None
+            else _compute_variant_timeseries(self.data, meta, group=group)
+        )
+
+        with plt.style.context(latex_style()):
+            if axes is None:
+                fig, axes = plt.subplots(
+                    1, 2, figsize=(7.5, 3.4), layout="constrained",
+                    sharey=True,
+                    gridspec_kw={"width_ratios": [1.0, 1.3]},
+                )
+                # constrained layout ignores gridspec wspace; tighten the
+                # engine's inter-panel spacing instead
+                fig.get_layout_engine().set(wspace=0.0, w_pad=0.02)
+            ax_hc, ax_ts = axes
+            self.plot_hazard_chart(hc_variant=hc_variant, group=group,
+                                   time=time, ax=ax_hc, s=s, alpha=alpha,
+                                   xaxis_scaling=xaxis_scaling,
+                                   timeseries=stats)
+            self.plot_hc_timeseries(
+                hc_variant=hc_variant, group=group, time=time,
+                ax=ax_ts, timeseries=stats, label_side="right",
+            )
+            for panel, label, lx in ((ax_hc, "a", 0.95), (ax_ts, "b", 0.96)):
+                panel.text(lx, 0.95, label, transform=panel.transAxes,
+                           ha="right", va="top", fontweight="bold",
+                           bbox={"boxstyle": "circle", "facecolor": "white",
+                                 "edgecolor": "black", "linewidth": 0.8})
+        return ax_hc, ax_ts
+
+
+# ---------------------------------------------------------------------
+# Hazard-chart points and pooled timeseries
+# ---------------------------------------------------------------------
+@register_xsnowDataset_method
+def compute_hc_points(
+    ds: xsnowDataset,
+    indices: Sequence[str] | None = None,
+    datetags: Sequence[str] | None = None,
+    xaxis_scaling: str = 'McClung2009',
+    classes: dict[str, Sequence] | None = None,
+    depth_var: str = 'z',
+) -> xsnowDataset:
+    """
+    Reduce a stratigraphy to one hazard-chart point per profile and index.
+
+    The compact form of the hazard chart: the layer dimension is dropped
+    and every index gets a handful of flat variables, which is what geojson
+    writers and zarr stores consume and what ``compute_hc_timeseries``
+    pools. Runs on a full-layer stratigraphy and on a dataset whose layer
+    dimension carries a string ``datetag`` coordinate (one entry per layer
+    group with per-index ``<idx>_depth``, e.g. the simplified stratigraphy
+    of the ``datetags`` extension).
+
+    Per index this picks the weakest value across the entries and the
+    depth of the deepest entry in the poor-or-worse classes (falling back
+    to the weakest entry's depth), and records what drives each of the two.
+
+    Parameters
+    ----------
+    indices
+        Indices to summarize; defaults to the registered indices present
+        (an external index such as ``punstable`` is registered once its
+        package is imported, or when named here).
+    datetags
+        Subset of datetag labels to consider; needs the datetag input.
+    xaxis_scaling
+        Anchor set of :data:`XAXIS_ANCHORS` behind ``<idx>_xaxis``.
+    classes
+        Per-index overrides of the registered stability classes
+        (ascending ``(label, upper_bound]`` steps).
+    depth_var
+        Depth variable for full-layer input, counted downwards from the
+        surface (flipped when stored counting up); datetag input uses its
+        per-index ``<idx>_depth`` instead.
+
+    Returns
+    -------
+    xsnowDataset
+        Layer-free dataset with, per index ``<idx>``: the weakest value
+        ``<idx>``, ``<idx>_depth`` [m below the surface], ``<idx>_xaxis``
+        (that depth on the chart's x axis), ``<idx>_gcode`` (SLF code of
+        the weakest layer, from ``<idx>_gcode_weak`` on datetag input and
+        from ``grain_type`` on full-layer input) and
+        ``<idx>_instability_drivenby`` / ``<idx>_depth_drivenby``, which
+        name the driving datetag on datetag input ('' where no value
+        exists) and carry layer indices on full-layer input (NaN where no
+        value exists). Non-layer variables are carried over.
+
+    Notes
+    -----
+    Thin adapter: the selection runs in ``compute_hazard_chart``, with the
+    ``datetags`` as one boolean layer context; this flattens its variants
+    to the per-index variable names and names the driving layers after the
+    ``datetag`` coordinate. A Dask-backed dataset stays lazy.
+    """
+    xs = ds if isinstance(ds, xsnowDataset) else xsnowDataset(ds)
+    if 'layer' not in xs.data.dims:
+        raise ValueError("compute_hc_points needs a 'layer' dimension.")
+    reduced = ('datetag' in xs.data.coords
+               and 'layer' in xs.data['datetag'].dims)
+    if not reduced and depth_var not in xs.data:
+        raise ValueError(
+            f"Full-layer input needs the depth variable '{depth_var}'."
+        )
+
+    def _usable(name):
+        return name in xs.data and (not reduced or f'{name}_depth' in xs.data)
+
+    if indices is None:
+        indices = [v for v in stability_indices() if _usable(v)]
+    missing = [i for i in indices if not _usable(i)]
+    if missing:
+        raise ValueError(f"No variables for: {missing}")
+    _index_config(indices, classes)      # unknown indices raise here
+
+    labels = None
+    if reduced:
+        labels = np.array([str(x) for x in xs.data['datetag'].values])
+    context = None
+    if datetags is not None:
+        if labels is None:
+            raise ValueError("datetag filtering needs the reduced layer dimension.")
+        context = xr.DataArray(np.isin(labels, list(datetags)), dims=['layer'],
+                               name='datetags')
+
+    # the engine appends its variants after any the input already carries
+    start = int(xs.data.sizes.get('hc_variant', 0))
+    hc = HazardChart(xs).compute_hazard_chart(
+        indices=indices, classes=classes, layer_context=context,
+        xaxis_scaling=xaxis_scaling, depth_var=depth_var,
+    ).data
+
+    out = xs.data.drop_dims('layer')
+    for offset, idx in enumerate(indices):
+        var = hc.isel(hc_variant=start + offset).drop_vars('hc_variant')
+        renames = {
+            idx: ('hc_instability', dict(xs.data[idx].attrs)),
+            f'{idx}_depth': (
+                'hc_depth',
+                {'units': 'm',
+                 'long_name': f'{idx} driving depth below surface'},
+            ),
+            f'{idx}_xaxis': ('hc_xaxis', None),
+            f'{idx}_gcode': ('hc_gcode', {'units': 'Swiss Code F1F2F3'}),
+            f'{idx}_instability_drivenby': ('hc_instabilityDrivenBy', {}),
+            f'{idx}_depth_drivenby': ('hc_depthDrivenBy', {}),
+        }
+        for name, (source, attrs) in renames.items():
+            if source not in var:
+                continue
+            da = var[source]
+            if labels is not None and source.endswith('DrivenBy'):
+                da = _label_layers(da, labels)
+            out[name] = da
+            if attrs is not None:
+                out[name].attrs = dict(attrs)
+    return xs.__class__(out)
+
+
+@register_xsnowDataset_method
+def compute_hc_timeseries(
+    ds: xsnowDataset,
+    indices: Sequence[str] | None = None,
+    datetags: Sequence[str] | None = None,
+    classes: dict[str, Sequence] | None = None,
+    xaxis_scaling: str = 'McClung2009',
+    depth_var: str = 'z',
+    at_time: Any | None = None,
+) -> xsnowDataset:
+    """
+    Pooled per-timestamp statistics of stability indices.
+
+    Runs on a full-layer stratigraphy or a datetag dataset (both summarized
+    internally via ``compute_hc_points``) or on an already summarized
+    dataset. Per index and timestamp this pools every other dimension
+    (locations, slopes, realizations) and derives the median, the 25/75 and
+    10/90 percentiles, the median depth of the entries in the
+    ``POOR_OR_WORSE`` classes, and that depth on the chart's x axis.
+
+    Parameters
+    ----------
+    indices
+        Indices to pool; defaults to the registered indices present (an
+        external index such as ``punstable`` is registered once its package
+        is imported, or when named here).
+    datetags
+        Subset of datetag labels to consider; needs the datetag input.
+    classes
+        Per-index overrides of the registered stability classes
+        (ascending ``(label, upper_bound]`` steps).
+    xaxis_scaling
+        Anchor set of :data:`XAXIS_ANCHORS` behind ``<idx>_xaxis``.
+    depth_var
+        Depth variable for full-layer input, see ``compute_hc_points``.
+    at_time
+        Timestamp(s) to pool (a value, list or slice for ``sel``); every
+        timestamp by default.
+
+    Returns
+    -------
+    xsnowDataset
+        Time-indexed dataset with, per index ``<idx>``:
+        ``<idx>_median``, ``<idx>_p25``, ``<idx>_p75``, ``<idx>_p10``,
+        ``<idx>_p90``, ``<idx>_depth`` [m] and ``<idx>_xaxis``.
+    """
+    xs = ds if isinstance(ds, xsnowDataset) else xsnowDataset(ds)
+    if 'time' not in xs.data.dims:
+        raise ValueError(
+            "compute_hc_timeseries needs a 'time' dimension."
+        )
+    if at_time is not None:
+        if not isinstance(at_time, slice):
+            at_time = np.atleast_1d(at_time)
+        xs = xsnowDataset(xs.data.sel(time=at_time))
+    if 'layer' in xs.data.dims:
+        xs = compute_hc_points(
+            xs, indices=indices, datetags=datetags,
+            xaxis_scaling=xaxis_scaling, classes=classes,
+            depth_var=depth_var,
+        )
+    elif datetags is not None:
+        raise ValueError(
+            "datetag filtering needs the reduced layer dimension."
+        )
+    if indices is None:
+        indices = [
+            v for v in stability_indices()
+            if v in xs.data and f'{v}_depth' in xs.data
+        ]
+    missing = [
+        i for i in indices if i not in xs.data or f'{i}_depth' not in xs.data
+    ]
+    if missing:
+        raise ValueError(f"No summarized variables for: {missing}")
+    cfg = _index_config(indices, classes)
+
+    out = xr.Dataset(coords={'time': xs.data['time']})
+    n_time = xs.data.sizes['time']
+    for idx in indices:
+        _, cls_steps = cfg[idx]
+        poor = [
+            i for i, (label, _) in enumerate(cls_steps)
+            if label in POOR_OR_WORSE
+        ]
+        # pooled percentiles run on the host: cupy has no nanpercentile
+        vals = _to_host(
+            xs.data[idx].transpose('time', ...).data
+        ).reshape(n_time, -1)
+        deps = _to_host(
+            xs.data[f'{idx}_depth'].transpose('time', ...).data
+        ).reshape(n_time, -1)
+        unstable = np.isin(classify_stability(vals, cls_steps), poor)
+        stats = np.full((5, n_time), np.nan)
+        depth = np.full(n_time, np.nan)
+        with np.errstate(all='ignore'):
+            for t in range(n_time):
+                if np.isfinite(vals[t]).any():
+                    stats[:, t] = np.nanpercentile(
+                        vals[t], (50, 25, 75, 10, 90)
+                    )
+                if unstable[t].any():
+                    depth[t] = np.nanmedian(deps[t][unstable[t]])
+        attrs = dict(xs.data[idx].attrs)
+        for name, row in zip(('median', 'p25', 'p75', 'p10', 'p90'), stats):
+            out[f'{idx}_{name}'] = (('time',), row, dict(attrs))
+        out[f'{idx}_depth'] = (
+            ('time',), depth,
+            {'units': 'm', 'long_name': f'median unstable {idx} depth'},
+        )
+        out[f'{idx}_xaxis'] = (
+            ('time',), scale_depth(depth, xaxis_scaling),
+            {'units': '1',
+             'long_name': f'{idx}_depth on the {xaxis_scaling} x-axis scale',
+             'xaxis_scaling': xaxis_scaling},
+        )
+    return xs.__class__(out)
+
+
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
+def _layer_context_selections(
+    ds: xr.Dataset,
+    *,
+    layer_context: Any,
+    layer_dim: str,
+) -> list[_LayerContextSelection]:
+    """Expand one context specification into selections, in order."""
+    if layer_context is None:
+        return [_LayerContextSelection(kind="all")]
+
+    if isinstance(layer_context, str):
+        layer_context = {layer_context: None}
+    if isinstance(layer_context, Mapping):
+        if not layer_context:
+            raise ValueError("layer_context must name at least one context variable")
+        selections: list[_LayerContextSelection] = []
+        for variable, raw_values in layer_context.items():
+            if variable not in ds:
+                raise KeyError(f"layer_context variable '{variable}' not found")
+            context = ds[variable]
+            if layer_dim not in context.dims:
+                raise ValueError(
+                    f"layer_context variable '{variable}' must depend on "
+                    f"layer_dim='{layer_dim}'"
+                )
+            if raw_values is True:
+                if not np.issubdtype(context.dtype, np.bool_):
+                    raise ValueError(
+                        f"layer_context {variable!r}: True selects a boolean variable"
+                    )
+                selections.append(_LayerContextSelection(
+                    kind="mask", source=context.fillna(False).astype(bool),
+                    metadata={"kind": "mask", "variable": str(variable)},
+                ))
+                continue
+            if raw_values is None:
+                requested = _unique_context_values(context)
+                if not requested:
+                    raise ValueError(
+                        f"layer_context variable '{variable}' has no non-missing values"
+                    )
+            else:
+                requested = _context_values(raw_values)
+                if not requested:
+                    raise ValueError("layer_context must request at least one value")
+            for value in requested:
+                coerced = _coerce_context_value(value, context.dtype, str(variable))
+                selections.append(_LayerContextSelection(
+                    kind="value", source=context, code=coerced,
+                    metadata={
+                        "kind": "value",
+                        "variable": str(variable),
+                        "value": _context_metadata_value(coerced),
+                    },
+                ))
+        return selections
+
+    if isinstance(layer_context, xr.DataArray):
+        context = layer_context
+        unknown = set(context.dims) - set(ds.dims)
+        if unknown:
+            raise ValueError(
+                "layer_context array has dimensions not in the dataset: "
+                f"{sorted(unknown)}"
+            )
+        if layer_dim not in context.dims:
+            raise ValueError(
+                f"layer_context array must depend on layer_dim='{layer_dim}'"
+            )
+        for dim in context.dims:
+            if dim in context.coords and dim in ds.coords:
+                try:
+                    context = context.sel({dim: ds.coords[dim]})
+                except (KeyError, ValueError) as exc:
+                    raise ValueError(
+                        f"layer_context array does not cover dataset dimension '{dim}'"
+                    ) from exc
+            if context.sizes[dim] != ds.sizes[dim]:
+                raise ValueError(
+                    f"layer_context array dimension '{dim}' has length "
+                    f"{context.sizes[dim]}; expected {ds.sizes[dim]}"
+                )
+        name = context.name or "custom_array"
+    else:
+        values = np.asarray(layer_context)
+        if values.ndim != 1 or values.size != ds.sizes[layer_dim]:
+            raise ValueError(
+                "layer_context custom array must be one-dimensional with "
+                f"length {ds.sizes[layer_dim]}"
+            )
+        coords = {layer_dim: ds.coords[layer_dim]} if layer_dim in ds.coords else None
+        context = xr.DataArray(values, dims=[layer_dim], coords=coords)
+        name = "custom_array"
+
+    if np.issubdtype(context.dtype, np.bool_):
+        return [_LayerContextSelection(
+            kind="mask", source=context.fillna(False).astype(bool),
+            metadata={"kind": "mask", "variable": str(name)},
+        )]
+
+    requested = _unique_context_values(context)
+    if not requested:
+        raise ValueError("layer_context custom array has no non-missing values")
+    return [
+        _LayerContextSelection(
+            kind="value", source=context, code=value,
+            metadata={
+                "kind": "value",
+                "variable": str(name),
+                "value": _context_metadata_value(value),
+            },
+        )
+        for value in requested
+    ]
+
+
+def _context_code(value: Any, dtype) -> Any:
+    """The value as the block compares it: datetimes as int64 nanoseconds."""
+    kind = np.dtype(dtype).kind
+    if kind == "M":
+        return int(np.asarray(value).astype("datetime64[ns]").astype("int64"))
+    if kind == "m":
+        return int(np.asarray(value).astype("timedelta64[ns]").astype("int64"))
+    return value
+
+
+def _context_coded(context):
+    """The context array as the block compares it (see ``_context_code``);
+    missing datetimes become the int64 minimum, which no code equals."""
+    kind = context.dtype.kind
+    if kind == "M":
+        return context.astype("datetime64[ns]").astype("int64")
+    if kind == "m":
+        return context.astype("timedelta64[ns]").astype("int64")
+    return context
+
+
+def _context_values(values: Any) -> list[Any]:
+    """Mapping value normalized to an ordered list; strings stay scalar."""
+    if isinstance(values, xr.DataArray):
+        values = values.values
+    if isinstance(values, (str, bytes)) or np.ndim(values) == 0:
+        return [values]
+    return list(values)
+
+
+def _unique_context_values(context: xr.DataArray) -> list[Any]:
+    """Unique non-missing values in first-occurrence order."""
+    out: list[Any] = []
+    seen: set[Any] = set()
+    for value in _to_host(context.data).reshape(-1):
+        if bool(pd.isna(value)):
+            continue
+        key = _context_metadata_value(value)
+        if key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
+def _coerce_context_value(value: Any, dtype, variable: str) -> Any:
+    """Make string date/timedelta selectors comparable to typed arrays."""
+    if np.dtype(dtype).kind not in "Mm":
+        return value
+    try:
+        return np.asarray(value).astype(dtype)[()]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"layer_context value {value!r} is invalid for '{variable}' "
+            f"with dtype {dtype}"
+        ) from exc
+
+
+def _context_metadata_value(value: Any) -> Any:
+    """JSON-friendly, stable representation of one selected value."""
+    if isinstance(value, (np.datetime64, pd.Timestamp)):
+        return _to_timestr(value)
+    if isinstance(value, np.timedelta64):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _normalize_groupby(groupby: str | Sequence[str] | None) -> tuple[str, ...]:
     if groupby is None:
-        return tuple()
+        return ()
     if isinstance(groupby, str):
         return (groupby,)
     return tuple(groupby)
 
 
-def _compose_group_labels(ds: xr.Dataset, keys: Sequence[str], *, proto_like: xr.DataArray) -> xr.DataArray:
-    """
-    Create a string label per point for the dims of `proto_like`
-    (no 'layer', may include 'time' if present; we *don't* inject 'time').
-    """
+def _compose_group_labels(
+    ds: xr.Dataset, keys: Sequence[str], *, proto_like: xr.DataArray
+) -> xr.DataArray:
+    """One string label per point of ``proto_like`` (no layer; time is
+    kept if present, never injected)."""
     if not keys:
         return xr.full_like(proto_like, "all", dtype=object).rename("hc_group")
 
     proto = xr.full_like(proto_like, "", dtype=object)
 
-    pieces: List[xr.DataArray] = []
+    # the keys are point-level coordinates, small enough to compose on the host
+    pieces: list[np.ndarray] = []
     for key in keys:
         if key in ds.coords:
             val = ds.coords[key]
@@ -360,30 +1510,14 @@ def _compose_group_labels(ds: xr.Dataset, keys: Sequence[str], *, proto_like: xr
             raise KeyError(f"groupby key '{key}' not found as coord or data_var.")
         if "layer" in getattr(val, "dims", ()):
             raise ValueError(f"groupby key '{key}' must not depend on 'layer'.")
-        pieces.append(val.astype(str).broadcast_like(proto))
+        pieces.append(
+            np.asarray(val.astype(str).broadcast_like(proto).values, dtype=object)
+        )
 
     label = pieces[0]
-    for p in pieces[1:]:
-        label = (label.astype(object) + "|" + p.astype(object))
-    return label.rename("hc_group")
-
-
-def _classify_layers(si: xr.DataArray, thresholds: Sequence[Tuple[str, float]]) -> xr.DataArray:
-    """Map numeric stability index to qualitative class labels per layer."""
-    out = xr.full_like(si, "", dtype=object)
-    prev = -np.inf
-    for label, upper in thresholds:
-        mask = (si > prev) & (si <= upper)
-        out = xr.where(mask, label, out)
-        prev = upper
-    return out
-
-
-def _is_any_of(arr: xr.DataArray, labels: Sequence[str]) -> xr.DataArray:
-    mask = False
-    for lab in labels:
-        mask = mask | (arr == lab)
-    return mask
+    for piece in pieces[1:]:
+        label = label + "|" + piece
+    return xr.DataArray(label, dims=proto.dims, coords=proto.coords, name="hc_group")
 
 
 def _append_history(ds: xr.Dataset, line: str) -> None:
@@ -394,123 +1528,94 @@ def _append_history(ds: xr.Dataset, line: str) -> None:
 
 def _append_variant_info(ds: xr.Dataset, info: HCVariantInfo) -> None:
     key = "hc_variants"
-    import json
-
     try:
         lst = json.loads(ds.attrs.get(key, "[]"))
     except Exception:
         lst = []
     lst = [x for x in lst if int(x.get("idx", -1)) != info.idx]
     lst.append(asdict(info))
-    ds.attrs[key] = json.dumps(lst, default=str)
+    ds.attrs[key] = json.dumps(_json_safe(lst), allow_nan=False)
 
 
-def _read_variant_info(ds: xr.Dataset) -> List[HCVariantInfo]:
-    import json
+def _json_safe(value: Any) -> Any:
+    """Recursively make metadata valid strict JSON, including infinities."""
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
+
+def _read_variant_info(ds: xr.Dataset) -> list[HCVariantInfo]:
     key = "hc_variants"
     try:
         raw = json.loads(ds.attrs.get(key, "[]"))
     except Exception:
         return []
-    out: List[HCVariantInfo] = []
+    out: list[HCVariantInfo] = []
     for r in raw:
+        time = r.get("time")
         out.append(
             HCVariantInfo(
                 idx=int(r["idx"]),
                 stability_index=str(r["stability_index"]),
                 groupby=tuple(r["groupby"]),
                 depth_var=str(r["depth_var"]),
+                xaxis_scaling=str(r.get("xaxis_scaling", "McClung2009")),
+                time=None if time is None else tuple(str(t) for t in time),
+                layer_context=(
+                    None if r.get("layer_context") is None
+                    else dict(r["layer_context"])
+                ),
+                classes=(
+                    None if r.get("classes") is None
+                    else tuple(
+                        (str(label), float(bound))
+                        for label, bound in r["classes"]
+                    )
+                ),
             )
         )
     return out
 
 
-def _safe_argreduce(arr: xr.DataArray, dim: str, func: str = "min") -> xr.DataArray:
-    """
-    Like argmin/argmax, but returns NaN where all-NaN slices would fail.
-    Keeps original dims except `dim`.
-    """
-    f = np.nanargmin if func == "min" else np.nanargmax
-    axis = arr.get_axis_num(dim)
-
-    data = arr.values
-    nan_mask = np.isnan(data)
-
-    # Move target axis to end for consistent indexing
-    data_swapped = np.moveaxis(data, axis, -1)
-    nan_swapped = np.moveaxis(nan_mask, axis, -1)
-
-    flat = data_swapped.reshape(-1, data_swapped.shape[-1])
-    flat_nan = nan_swapped.reshape(-1, nan_swapped.shape[-1])
-
-    idx = np.full(flat.shape[0], np.nan, dtype=float)
-    for i in range(flat.shape[0]):
-        if np.all(flat_nan[i]):
-            continue
-        idx[i] = f(flat[i])
-
-    idx = idx.reshape(data_swapped.shape[:-1])
-
-    # Wrap back into DataArray, dropping the reduced dim
-    out_dims = [d for d in arr.dims if d != dim]
-    coords = {d: arr.coords[d] for d in out_dims if d in arr.coords}
-    return xr.DataArray(idx, dims=out_dims, coords=coords)
-
-
-def _ensure_int_indexer(indexer: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
-    """Make an integer indexer for isel, returning (idx_int, valid_mask)."""
-    valid = indexer.notnull()
-    idx_int = indexer.fillna(0).astype(int)
-    return idx_int, valid
-
-
-def _isel_with_nan_index(arr: xr.DataArray, dim: str, indexer: xr.DataArray) -> xr.DataArray:
-    """
-    isel with a possibly-NaN vectorized indexer: fill invalid with 0 for indexing,
-    then mask invalid positions back to NaN afterwards.
-    """
-    idx_int, valid = _ensure_int_indexer(indexer)
-    out = arr.isel({dim: idx_int})
-    return out.where(valid)
-
-
-def _depth_metric(z_da: xr.DataArray, layer_dim: str) -> xr.DataArray:
-    """
-    Return a DataArray with same values as z but transformed so that
-    'larger' means 'deeper', regardless of sign convention.
-    """
-    positive_down = (z_da.attrs.get("positive", "").lower() == "down")
-    med = z_da.median(dim=layer_dim, skipna=True)
-    if positive_down or (np.nanmedian(med.values) > 0):
-        return z_da  # larger is deeper
-    else:
-        return -z_da  # more negative is deeper → flip sign for comparisons
+def _variant_info(
+    ds: xr.Dataset,
+    hc_variant: int,
+    *,
+    required: bool = True,
+) -> HCVariantInfo | None:
+    """Metadata selected by the ``hc_variant`` coordinate value."""
+    wanted = int(hc_variant)
+    for info in _read_variant_info(ds):
+        if info.idx == wanted:
+            return info
+    if required:
+        raise KeyError(f"No metadata found for hc_variant={hc_variant}")
+    return None
 
 
 def _unique_labels_to_ids(labels_da: xr.DataArray) -> tuple[xr.DataArray, dict[int, str]]:
-    """
-    Map an object/string labels DataArray to integer ids with the same shape.
-    Returns (ids_da, mapping).
-    """
+    """Integer ids of an object/string label array, same shape, plus the
+    id-to-label mapping."""
     flat = labels_da.values.reshape(-1).astype(object)
     uniq, inv = np.unique(flat, return_inverse=True)
     ids = inv.reshape(labels_da.shape).astype(np.int64)
     mapping = {int(i): str(uniq[i]) for i in range(len(uniq))}
-    ids_da = xr.DataArray(ids, dims=labels_da.dims, coords={d: labels_da.coords[d] for d in labels_da.dims})
+    ids_da = xr.DataArray(ids, dims=labels_da.dims,
+                          coords={d: labels_da.coords[d] for d in labels_da.dims})
     return ids_da, mapping
 
 
 def _update_group_mapping_attr(
-    ds: xr.Dataset, *, variant_idx: int, keys: Sequence[str], labels_map: Dict[int, str]
+    ds: xr.Dataset, *, variant_idx: int, keys: Sequence[str], labels_map: dict[int, str]
 ) -> xr.Dataset:
-    """
-    Store/update a per-variant mapping in hc_group_id variable attrs:
-    {
-      "<variant_idx>": { "keys": [...], "labels": { "0": "P1|E", "1": "P2|W", ... } }
-    }
-    """
-    import json
+    """Per-variant mapping in the ``hc_group_id`` attrs:
+    ``{"<variant_idx>": {"keys": [...], "labels": {"0": "P1|E", ...}}}``."""
     var = ds["hc_group_id"]
     attrs = dict(var.attrs)
     all_maps = {}
@@ -519,17 +1624,230 @@ def _update_group_mapping_attr(
             all_maps = json.loads(attrs["mapping"])
         except Exception:
             all_maps = {}
-    all_maps[str(variant_idx)] = {"keys": list(keys), "labels": {str(k): v for k, v in labels_map.items()}}
+    all_maps[str(variant_idx)] = {
+        "keys": list(keys), "labels": {str(k): v for k, v in labels_map.items()},
+    }
     attrs["mapping"] = json.dumps(all_maps)
     ds["hc_group_id"].attrs = attrs
     return ds
 
 
-def _to_timestr(time_values: Any) -> str:
-    try:
-        val = np.array(time_values).item()
-        if isinstance(val, (np.datetime64,)):
-            return np.datetime_as_string(val, unit="s")
-        return str(val)
-    except Exception:
-        return str(time_values)
+def _to_timestr(value: Any) -> str:
+    """ISO timestamp preserving sub-second precision when it exists."""
+    timestamp = np.asarray(value).astype("datetime64[ns]")
+    text = str(np.datetime_as_string(timestamp, unit="ns"))
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _to_host(values) -> np.ndarray:
+    """Copy back to the CPU for string, pandas or numpy-only work."""
+    return values.get() if hasattr(values, 'get') else np.asarray(values)
+
+
+def _label_layers(index_da: xr.DataArray, labels: np.ndarray) -> xr.DataArray:
+    """Name the driving layers after their labels; ``''`` where there is none."""
+    def block(idx):
+        idx = _to_host(idx)
+        out = np.full(idx.shape, '', dtype=labels.dtype)
+        valid = np.isfinite(idx)
+        out[valid] = labels[idx[valid].astype(int)]
+        return out
+    return xr.apply_ufunc(block, index_da, dask='parallelized',
+                          output_dtypes=[labels.dtype])
+
+
+def _depth_axis(ax, scaling: str) -> None:
+    """Depth ticks [cm] at the evenly spaced anchors of ``scaling``."""
+    anchors = XAXIS_ANCHORS[scaling]
+    ax.set_xticks(range(len(anchors)), labels=[f"{100 * d:g}" for d in anchors])
+    ax.set_xlim(0, len(anchors) - 1)
+    ax.set_xlabel("Depth / cm")
+
+
+def _compute_variant_timeseries(
+    data: xr.Dataset,
+    meta: HCVariantInfo,
+    *,
+    group: int | str | None = None,
+    time: Any | None = None,
+) -> xsnowDataset:
+    """Aggregate the already-computed points of one variant and group."""
+    index = meta.stability_index
+    if time is not None and not isinstance(time, slice):
+        time = np.atleast_1d(time)
+    variant = HazardChart(xsnowDataset(data)).subset_hazard_points(
+        hc_variant=meta.idx, group=group, time=time,
+    )
+    points = xr.Dataset({
+        index: variant["hc_instability"].assign_attrs(
+            dict(variant["hc_instability"].attrs)
+        ),
+        f"{index}_depth": variant["hc_depth"].assign_attrs(
+            dict(variant["hc_depth"].attrs)
+        ),
+    })
+    return compute_hc_timeseries(
+        xsnowDataset(points), indices=[index],
+        xaxis_scaling=meta.xaxis_scaling,
+        classes=(None if meta.classes is None else {index: meta.classes}),
+    )
+
+
+def _draw_class_lines(
+    ax,
+    index: str,
+    *,
+    classes: Sequence[tuple[str, float]] | None = None,
+) -> None:
+    """Dashed lines on the class boundaries, coloured like the more
+    unstable of the two classes each boundary separates."""
+    cfg = stability_index_info(index)
+    classes = classes or cfg["classes"]
+    for i, (label, bound) in enumerate(classes[:-1]):
+        worse = classes[i + 1][0] if cfg["weak"] == "max" else label
+        ax.axhline(bound, ls="--", lw=1.2, zorder=1.5,
+                   color=CLASS_COLORS.get(worse, "grey"))
+
+
+def _index_label(index: str) -> str:
+    """Axis label of an index: its display name over the '-' unit."""
+    return f"{stability_index_info(index)['label']} / -"
+
+
+def _argreduce_layer(values: np.ndarray, side: str):
+    """NaN-safe argmax/argmin over the last axis with a validity flag."""
+    xp = get_backend(values)
+    fill = -np.inf if side == 'max' else np.inf
+    filled = xp.where(xp.isnan(values), fill, values)
+    idx = filled.argmax(-1) if side == 'max' else filled.argmin(-1)
+    return idx, xp.isfinite(filled).any(-1)
+
+
+def take_layer(values: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    """The entry ``idx`` of every profile along the last axis."""
+    xp = get_backend(values)
+    return xp.take_along_axis(values, idx[..., None], -1)[..., 0]
+
+
+def _hazard_chart_block(*arrays, n_context_vars, has_masks, contexts, index_specs,
+                        xaxis_scaling='McClung2009'):
+    """Reduce one block of complete profiles to the hazard-chart summary of
+    every index for every context.
+
+    ``arrays`` holds the context variables, the stacked masks
+    ``(..., mask, layer)`` if any, then per index the values, the depth
+    and, with grain codes, the codes of the weakest and the deepest layer.
+    The layer axis is last; every output gets the context axis instead.
+    """
+    pos = 0
+    context_vars = arrays[:n_context_vars]
+    pos += n_context_vars
+    masks = None
+    if has_masks:
+        masks = arrays[pos]
+        pos += 1
+    xp = get_backend(arrays[pos])
+    coded = [_context_coded(var) for var in context_vars]
+    layer_masks = []
+    for spec in contexts:
+        if spec[0] == "value":
+            layer_masks.append(coded[spec[1]] == spec[2])
+        elif spec[0] == "mask":
+            layer_masks.append(masks[..., spec[1], :])
+        else:
+            layer_masks.append(None)
+    n_ctx = len(contexts)
+
+    outputs = []
+    for spec in index_specs:
+        values, depths = arrays[pos], arrays[pos + 1]
+        pos += 2
+        gcodes = gcodes_deep = None
+        if spec["with_gcode"]:
+            gcodes, gcodes_deep = arrays[pos], arrays[pos + 1]
+            pos += 2
+        if spec["flip_depth"]:
+            depths = -depths          # e.g. 'z' counts up from the surface
+        # a layer's class does not depend on the context
+        poor_all = classify_poor_or_worse(values, spec["classes"])
+        has_depth = xp.isfinite(depths)
+        shape = values.shape[:-1] + (n_ctx,)
+        dtypes = [values.dtype, values.dtype, "float64", "float64", "float64"]
+        if spec["with_gcode"]:
+            dtypes += [values.dtype, values.dtype]
+        outs = [xp.full(shape, np.nan, dtype=dtype) for dtype in dtypes]
+        count = xp.zeros(shape, dtype="int16")
+        for k, mask in enumerate(layer_masks):
+            if mask is None:
+                stab, poor, present = values, poor_all, has_depth
+            else:
+                mask = xp.asarray(mask)
+                stab = xp.where(mask, values, np.nan)
+                poor = poor_all & mask
+                present = has_depth & mask
+            weak_idx, valid, deep_idx = select_weak_and_deep(
+                stab, spec["side"], None, poor=poor
+            )
+            depth = xp.where(valid, take_layer(depths, deep_idx), np.nan)
+            outs[0][..., k] = xp.where(valid, take_layer(stab, weak_idx), np.nan)
+            outs[1][..., k] = depth
+            outs[2][..., k] = xp.where(valid, scale_depth(depth, xaxis_scaling), np.nan)
+            outs[3][..., k] = xp.where(valid, weak_idx, np.nan)
+            outs[4][..., k] = xp.where(valid, deep_idx, np.nan)
+            if spec["with_gcode"]:
+                outs[5][..., k] = xp.where(valid, take_layer(gcodes, weak_idx), np.nan)
+                outs[6][..., k] = xp.where(valid, take_layer(gcodes_deep, deep_idx), np.nan)
+            count[..., k] = present.sum(-1)
+        outputs += outs + [count]
+    return tuple(outputs)
+
+
+def _aggregate_block(values, depths, *rest, side, classes, with_gcode, with_count,
+                     variant_ids, xaxis_scaling):
+    """Combine the points of several variants (last axis) by the selection:
+    weakest value, deepest poor-or-worse depth by its value."""
+    xp = get_backend(values)
+    gcodes = gcodes_deep = counts = None
+    rest = list(rest)
+    if with_gcode:
+        gcodes, gcodes_deep = rest[0], rest[1]
+        rest = rest[2:]
+    if with_count:
+        counts = rest[0]
+    weak_idx, valid = _argreduce_layer(values, side)
+    poor = classify_poor_or_worse(values, classes)
+    candidates = xp.where(poor & xp.isfinite(depths), depths, -np.inf)
+    deep_idx = xp.where(poor.any(-1), candidates.argmax(-1), weak_idx)
+    depth = xp.where(valid, take_layer(depths, deep_idx), np.nan)
+    ids = xp.asarray(variant_ids)
+    outputs = [
+        xp.where(valid, take_layer(values, weak_idx), np.nan),
+        depth,
+        xp.where(valid, scale_depth(depth, xaxis_scaling), np.nan),
+        xp.where(valid, ids[weak_idx], np.nan),
+        xp.where(valid, ids[deep_idx], np.nan),
+    ]
+    if with_gcode:
+        outputs += [xp.where(valid, take_layer(gcodes, weak_idx), np.nan),
+                    xp.where(valid, take_layer(gcodes_deep, deep_idx), np.nan)]
+    if with_count:
+        outputs.append(counts.sum(-1).astype("int16"))
+    return tuple(outputs)
+
+
+def select_weak_and_deep(values: np.ndarray, side: str, cls_steps,
+                         poor: np.ndarray | None = None):
+    """
+    Weakest entry and depth-driving entry along the last axis.
+
+    Entry 0 is the deepest, so the first poor-or-worse entry is the deepest
+    one; without any such entry the weakest entry drives the depth as well.
+    ``poor`` skips the classification when the caller already has it (see
+    ``classify_poor_or_worse``). Returns ``(weak_idx, valid, depth_idx)``.
+    """
+    xp = get_backend(values)
+    weak_idx, valid = _argreduce_layer(values, side)
+    if poor is None:
+        poor = classify_poor_or_worse(values, cls_steps)
+    depth_idx = xp.where(poor.any(-1), poor.argmax(-1), weak_idx)
+    return weak_idx, valid, depth_idx

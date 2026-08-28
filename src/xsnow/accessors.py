@@ -155,6 +155,8 @@ class LabelsAccessor:
             DataArray of string labels with dataset dimensions preserved or dict with the 
             integer-to-labels mapping (empty dict if no mapping exists).
 
+            Labels remain Dask-backed when the source DataArray is Dask-backed.
+
         Examples:
         ---------
             >>> from xsnow.sample_data import single_profile
@@ -193,7 +195,8 @@ class LabelsAccessor:
         return xr.apply_ufunc(
             np.vectorize(_lookup, otypes=[object]),
             self._obj,
-            dask="allowed",
+            dask="parallelized",
+            vectorize=False,
             output_dtypes=[object]
         )
 

@@ -38,7 +38,7 @@ from .profile_block_computation import (
     get_backend,
 )
 from .critical_crack_length import compute_rc_slope_richter2019
-from .rta import compute_rta
+from .rta import RTA_THRESHOLD, compute_rta
 from .sk38 import (
     _compute_skier_mechanics,
     alpha_max_skier_stress,
@@ -46,7 +46,6 @@ from .sk38 import (
 )
 
 INDEX_CAP = 5.0
-RTA_THRESHOLD = 0.8       # weak-layer candidate threshold
 _BISECT_ITERATIONS = 60   # bisection depth for the crack-tip angles
 
 
@@ -239,7 +238,9 @@ def compute_sk38_ccl(ds: 'xsnowDataset') -> 'xsnowDataset':
 
 
 @register_xsnowDataset_method
-def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
+def compute_sk38_ccl_rta(
+    ds: 'xsnowDataset', rta_threshold: float = RTA_THRESHOLD
+) -> 'xsnowDataset':
     """
     Compute the RTA-gated stability index ``sk38_ccl_rta``.
 
@@ -250,7 +251,7 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
 
     Notes
     -----
-    ``sk38_ccl`` where ``rta >= RTA_THRESHOLD``, ``INDEX_CAP`` where
+    ``sk38_ccl`` where ``rta >= rta_threshold``, ``INDEX_CAP`` where
     below (NaN stays NaN). Layers with a finite index but undefined
     (NaN) ``rta`` are not gated and keep their ``sk38_ccl`` value, i.e.
     they conservatively count as weak-layer candidates. Uses the
@@ -276,7 +277,7 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
 
     rta_da = rta_da.broadcast_like(index_da)
     gated = index_da.where(
-        ~(np.isfinite(index_da) & (rta_da < RTA_THRESHOLD)),
+        ~(np.isfinite(index_da) & (rta_da < rta_threshold)),
         INDEX_CAP,
     )
 
@@ -286,7 +287,7 @@ def compute_sk38_ccl_rta(ds: 'xsnowDataset') -> 'xsnowDataset':
         '1',
     )
     attrs['index_cap'] = INDEX_CAP
-    attrs['rta_threshold'] = RTA_THRESHOLD
+    attrs['rta_threshold'] = rta_threshold
 
     gated.attrs = attrs
     new_xr = ungated.data.assign(sk38_ccl_rta=gated)

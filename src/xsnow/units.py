@@ -48,6 +48,8 @@ UNIT_ALIASES = {
     "pa s": "Pa s",
     "w/m2": "W m-2",
     "w m-2": "W m-2",
+    "kj/m2": "kJ m-2",
+    "kj m-2": "kJ m-2",
     "mj/m2": "MJ m-2",
     "mj m-2": "MJ m-2",
     "j/m2": "J m-2",
@@ -82,6 +84,10 @@ CONVERSION_FACTORS = {
     ("Pa", "kPa"): 0.001,
     ("GPa s", "Pa s"): 1.0e9,
     ("Pa s", "GPa s"): 1.0e-9,
+    ("kJ m-2", "J m-2"): 1.0e3,
+    ("J m-2", "kJ m-2"): 1.0e-3,
+    ("kJ m-2", "MJ m-2"): 1.0e-3,
+    ("MJ m-2", "kJ m-2"): 1.0e3,
     ("MJ m-2", "J m-2"): 1.0e6,
     ("J m-2", "MJ m-2"): 1.0e-6,
     ("kg m-2 h-1", "kg m-2 s-1"): 1.0 / 3600.0,
@@ -272,6 +278,9 @@ def validate_xsnow_unit_attrs(
             continue
         expected_unit = reg_entry.get("xsnow_units")
         if expected_unit is None or isinstance(expected_unit, list):
+            continue
+        if np.issubdtype(data_array.dtype, np.datetime64):
+            # datetime vars carry no units attr (CF encoding owns it)
             continue
 
         stored_unit = data_array.attrs.get("units")

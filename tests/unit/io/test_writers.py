@@ -1054,3 +1054,46 @@ def read_compressed(filepath: Path):
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+def test_smet_column_formatting_matches_scalar_path():
+    """The whole-column formatter must reproduce _format_smet_value exactly."""
+    from xsnow.io.smet import _format_smet_column, _format_smet_value
+
+    values = np.array([np.nan, 0.0, -0.0, 1e-4, -1e-4, 5e-4, 1e-3, 0.999, 1.0, 2.5, 3.5,
+        99999.999, 1e5, -1e5, 1e6, 270.123456])
+    nodata = -999.0
+    for name in ("TA", "profile_status"):
+        column = _format_smet_column(name, values, nodata)
+        expected = [_format_smet_value(name, value, nodata) for value in values]
+        assert list(column) == expected, name
+    infinite = np.array([np.inf, -np.inf, 1.0])
+    assert list(_format_smet_column("TA", infinite, nodata)) == \
+        [_format_smet_value("TA", value, nodata) for value in infinite]
+    with pytest.raises(OverflowError):
+        _format_smet_value("profile_status", np.inf, nodata)
+    with pytest.raises(OverflowError):
+        _format_smet_column("profile_status", infinite, nodata)
+    flags = np.array([True, False])
+    assert list(_format_smet_column("flag", flags, nodata)) == \
+        [_format_smet_value("flag", value, nodata) for value in flags]
+    assert _format_smet_column("weather", np.array(["clear", "storm"], dtype=object), nodata) is None
+
+
+def test_to_smet_ignores_scalar_coordinates(smet_writer_dataset, tmp_path):
+    """Scalar coordinates (region labels, geometry text) must not change the output."""
+    plain = tmp_path / "plain.smet"
+    smet_writer_dataset.to_smet(plain)
+    decorated = xsnowDataset(smet_writer_dataset.data.assign_coords(
+        region_id="AT-07-01", location_geometry="{" + "x" * 100000 + "}"))
+    labelled = tmp_path / "labelled.smet"
+    decorated.to_smet(labelled)
+    assert labelled.read_text() == plain.read_text()
+
+
+def test_to_smet_reports_nat_timestamps_as_value_error(smet_writer_dataset, tmp_path):
+    times = smet_writer_dataset.data.time.values.astype("datetime64[ns]").copy()
+    times[1] = np.datetime64("NaT")
+    broken = xsnowDataset(smet_writer_dataset.data.assign_coords(time=times))
+    with pytest.raises(ValueError, match="NaT"):
+        broken.to_smet(tmp_path / "nat.smet")

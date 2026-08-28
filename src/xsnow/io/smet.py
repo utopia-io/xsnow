@@ -72,6 +72,7 @@ _SMET_UNIT_TOKENS = {
     "Pa": "Pa",
     "kPa": "kPa",
     "W m-2": "W/m2",
+    "kJ m-2": "kJ/m2",
     "J m-2": "J/m2",
     "MJ m-2": "MJ/m2",
     "kg m-2": "kg/m2",
@@ -98,6 +99,19 @@ def _unit_allowed(unit: str, allowed_units: UnitLike) -> bool:
     if isinstance(normalized_allowed, list):
         return normalized_unit in normalized_allowed
     return normalized_unit == normalized_allowed
+
+
+def _smet_storage_unit(
+    source_unit: str,
+    reg_entry: Mapping[str, Any],
+) -> tuple[str, bool]:
+    """Resolve historically mislabeled SMET values to their physical unit."""
+    normalized_source = normalize_unit(source_unit) or "1"
+    aliases = reg_entry.get("smet_unit_aliases", {})
+    for legacy_unit, actual_unit in aliases.items():
+        if normalized_source == normalize_unit(legacy_unit):
+            return normalize_unit(actual_unit) or "1", True
+    return normalized_source, False
 
 
 def _fallback_smet_unit(reg_entry: Mapping[str, Any]) -> Optional[str]:
@@ -224,9 +238,52 @@ def _timestamp_from_smet_index(index_value: Any, index_names: List[Optional[str]
     return index_value
 
 
+def _format_smet_column(var_name: str, values: np.ndarray, nodata: float) -> np.ndarray | None:
+    """Format a whole numeric SMET column like _format_smet_value does per value.
+
+    Returns None for columns that need the per-value path (strings, objects,
+    datetimes).
+    """
+    if values.dtype.kind not in "fiub":
+        return None
+    numeric = values.astype(float)
+    missing = np.isnan(numeric)
+    safe = np.where(missing, 0.0, numeric)
+    if var_name in _SMET_INTEGER_VARS:
+        if np.isinf(safe).any():
+            raise OverflowError("cannot convert float infinity to integer")
+        # np.rint rounds half to even like the built-in round().
+        text = np.char.mod("%d", np.rint(safe).astype(np.int64)).astype(object)
+    else:
+        text = np.char.mod("%.3f", safe).astype(object)
+        magnitude = np.abs(safe)
+        wide = (magnitude != 0) & ((magnitude < 1e-3) | (magnitude >= 1e5))
+        if wide.any():
+            text[wide] = np.char.mod("%.6e", safe[wide])
+    text[missing] = f"{nodata:.1f}"
+    return text
+
+
 def _write_smet_data_rows(path: Union[str, Path], df: pd.DataFrame, nodata: float) -> None:
-    """Append SMET data rows using column-aware value formatting."""
+    """Append SMET data rows using column-aware value formatting.
+
+    Columns are formatted whole; a frame the vectorized path cannot take (a
+    multi-level index, a non-datetime index, an object column) is written
+    value by value instead.
+    """
+    columns = [_format_smet_column(name, df[name].to_numpy(), nodata) for name in df.columns]
+    timestamps = None
+    if df.index.nlevels == 1 and all(column is not None for column in columns):
+        try:
+            timestamps = pd.DatetimeIndex(df.index).strftime('%Y-%m-%dT%H:%M:%S')
+        except (TypeError, ValueError):
+            timestamps = None
+        if timestamps is not None and pd.isna(timestamps).any():
+            timestamps = None  # a NaT is reported by the per-value path
     with _open_any_as_text(path, 'at') as f:
+        if timestamps is not None:
+            f.writelines("\t".join(parts) + "\n" for parts in zip(timestamps, *columns))
+            return
         for timestamp, row in df.iterrows():
             timestamp = _timestamp_from_smet_index(timestamp, list(df.index.names))
             timestamp_str = pd.to_datetime(timestamp).strftime('%Y-%m-%dT%H:%M:%S')
@@ -253,8 +310,17 @@ def _convert_smet_var_to_xsnow_units(
     reg_entry: Mapping[str, Any],
     filepath: Path,
     logger: logging.Logger,
+    unit_validation: str = "strict",
 ) -> xr.Dataset:
     """Validate and convert one SMET variable to xsnow units when possible."""
+
+    def _keep_declared(reason: str) -> xr.Dataset:
+        if unit_validation == "strict":
+            raise UnitConversionError(reason)
+        logger.warning("%s Keeping the values in %r.", reason, source_unit)
+        ds[var_name].attrs['units'] = str(source_unit)
+        return ds
+
     source_unit = spec.storage_unit if spec is not None else None
     assumed_from_registry = False
     if source_unit is None:
@@ -279,8 +345,16 @@ def _convert_smet_var_to_xsnow_units(
         )
 
     expected_smet_units = reg_entry.get("smet_units")
-    if expected_smet_units is not None and not _unit_allowed(source_unit, expected_smet_units):
-        raise UnitConversionError(
+    conversion_source_unit, is_legacy_alias = _smet_storage_unit(
+        source_unit,
+        reg_entry,
+    )
+    if (
+        expected_smet_units is not None
+        and not _unit_allowed(source_unit, expected_smet_units)
+        and not is_legacy_alias
+    ):
+        return _keep_declared(
             f"SMET variable {var_name!r} in {filepath.name} declares storage "
             f"unit {source_unit!r}, but xsnow expects {expected_smet_units!r}."
         )
@@ -295,12 +369,16 @@ def _convert_smet_var_to_xsnow_units(
         )
 
     try:
-        converted = convert_units(ds[var_name].values, source_unit, target_unit)
-    except UnitConversionError as exc:
-        raise UnitConversionError(
+        converted = convert_units(
+            ds[var_name].values,
+            conversion_source_unit,
+            target_unit,
+        )
+    except UnitConversionError:
+        return _keep_declared(
             f"Cannot convert SMET variable {var_name!r} in {filepath.name} "
             f"from {source_unit!r} to xsnow unit {target_unit!r}."
-        ) from exc
+        )
 
     ds[var_name] = xr.DataArray(
         converted,
@@ -548,10 +626,9 @@ def read_smet(
             this time is dropped.
         logger: An optional, pre-configured logger instance. If None,
             the default module logger is used.
-        unit_validation: SMET unit validation mode. Both `'strict'` (default)
-            and `'light'` parse this file's unit metadata, warn when registered
-            variables have no usable unit metadata, and raise for incompatible
-            declared units.
+        unit_validation: SMET unit validation mode. `'strict'` (default)
+            raises for incompatible declared units; `'light'` warns and keeps
+            such variables in their declared units instead.
         float_dtype: Floating-point storage dtype; see `read()`. None
             preserves parsed dtypes (float64).
 
@@ -693,6 +770,7 @@ def read_smet(
                 reg_entry=reg_entry,
                 filepath=file_path,
                 logger=logger,
+                unit_validation=unit_validation,
             )
             ds[var_name].attrs['standard_name'] = reg_entry.get('standard_name', str(var_name))
             ds[var_name].attrs.setdefault('units', 'unknown')
@@ -813,8 +891,7 @@ def to_smet(
         if slope_azi is not None and slope_angle is None:
             raise ValueError("Cannot write SlopeAzi without a finite SlopeAngle.")
 
-    # Squeeze and convert to dataframe, keeping only data variables
-    df = ds.data[smet_vars].squeeze(drop=True).to_dataframe()[smet_vars]
+    df = ds.data[smet_vars].reset_coords(drop=True).squeeze(drop=True).to_dataframe()[smet_vars]
     smet_units = {
         name: _target_smet_unit(name, ds.data[name], unit_type)
         for name in smet_vars

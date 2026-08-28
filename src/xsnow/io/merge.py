@@ -21,7 +21,7 @@ import xarray as xr
 from ..core import xsnowDataset
 from ..registry import registry
 from ..selectors import TimeSelector, LocationSelector, SlopeSelector, RealizationSelector
-from ..utils import get_logger
+from ..utils import DEFAULT_CRS, attach_registry_attrs, get_logger
 
 from .base import (
     _apply_norm_slopes,
@@ -295,6 +295,35 @@ def _align_dataset_to_profile_slope_template(
         f"Conflicting slope metadata while aligning time-series data for "
         f"location {loc_name!r}: {signature!r} does not match any profile slope."
     )
+
+
+# PRO and SMET headers print station coordinates with different precision;
+# differences within these tolerances snap to the profile values
+_STATION_COORD_ATOL = {'latitude': 2e-6, 'longitude': 2e-6, 'altitude': 0.51}
+
+
+def _snap_station_coords(
+    datasets: Sequence[xr.Dataset],
+    reference: Optional[xr.Dataset],
+) -> List[xr.Dataset]:
+    """Align near-equal station coordinates to the reference values."""
+    if reference is None:
+        return list(datasets)
+    out = []
+    for ds in datasets:
+        updates = {}
+        for name, tol in _STATION_COORD_ATOL.items():
+            if name not in ds.coords or name not in reference.coords:
+                continue
+            a = np.asarray(ds[name].values, dtype=float)
+            b = np.asarray(reference[name].values, dtype=float)
+            if a.shape != b.shape or np.array_equal(a, b):
+                continue
+            close = np.isfinite(a) & np.isfinite(b) & (np.abs(a - b) <= tol)
+            if close.any():
+                updates[name] = (ds[name].dims, np.where(close, b, a))
+        out.append(ds.assign_coords(updates) if updates else ds)
+    return out
 
 
 def _align_timeseries_slope_indices(
@@ -727,6 +756,9 @@ def _merge_and_finalize(
             ds.data if hasattr(ds, 'data') else ds
             for ds in timeseries_dsets
         ]
+        timeseries_xr_datasets = _snap_station_coords(
+            timeseries_xr_datasets, combined_profiles_ds
+        )
         all_to_merge.extend(
             _align_timeseries_slope_indices(
                 timeseries_xr_datasets,
@@ -768,34 +800,20 @@ def _merge_and_finalize(
     if not final_xr_dataset.attrs:
         final_xr_dataset.attrs = {
             'Conventions': 'CF-1.8',
-            'crs': 'EPSG:4326'
+            'crs': DEFAULT_CRS
         }
 
     # Add variable metadata
-    for var_name_hashable in list(final_xr_dataset.variables):
+    final_xr_dataset = attach_registry_attrs(final_xr_dataset, variables=True)
+    for var_name_hashable in list(final_xr_dataset.data_vars):
         var_name = str(var_name_hashable)
-        if reg_entry := registry.get(var_name):
-            final_xr_dataset[var_name].attrs.setdefault(
-                'standard_name',
-                reg_entry.get('standard_name', 'unknown'),
-            )
-            final_xr_dataset[var_name].attrs.setdefault(
-                'units',
-                reg_entry.get('xsnow_units', reg_entry.get('si_units', 'unknown')),
-            )
-            final_xr_dataset[var_name].attrs.setdefault(
-                'long_name',
-                reg_entry.get('standard_name', var_name).replace('_', ' '),
-            )
-        else:
-            # Set defaults for variables not in registry if not already set
-            if var_name in final_xr_dataset.data_vars:
-                if 'units' not in final_xr_dataset[var_name].attrs:
-                    final_xr_dataset[var_name].attrs['units'] = '1'
-                if 'standard_name' not in final_xr_dataset[var_name].attrs:
-                    final_xr_dataset[var_name].attrs['standard_name'] = var_name
-                if 'long_name' not in final_xr_dataset[var_name].attrs:
-                    final_xr_dataset[var_name].attrs['long_name'] = var_name.replace('_', ' ')
+        if var_name in registry:
+            continue
+        # Set defaults for variables not in registry if not already set
+        attrs = final_xr_dataset[var_name].attrs
+        attrs.setdefault('units', '1')
+        attrs.setdefault('standard_name', var_name)
+        attrs.setdefault('long_name', var_name.replace('_', ' '))
 
     # Normalize slope coordinates
     try:

@@ -41,6 +41,16 @@ A_RICHTER = 4.6e-9       # Richter et al. (2019) parameter "a"
 B_RICHTER = -2.0         # Richter et al. (2019) parameter "b"
 E0 = 5.07e9              # Pa, modulus prefactor in Richter et al. (2019)
 E_EXP = 5.13             # exponent on (rho_slab / rho_ice)
+#: Stability classes of the flat-field crack length [m]: ascending
+#: (label, upper bound] steps; short crack lengths are unstable.
+RC_WEAK = 'min'
+RC_CLASSES = [
+    ('very poor', 0.28),
+    ('poor', 0.4),
+    ('fair', 0.7),
+    ('rather stable', math.inf),
+]
+RC_AXLIM = (0.0, 1.5)
 
 
 @dataclass(frozen=True, slots=True)

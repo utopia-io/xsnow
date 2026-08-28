@@ -38,6 +38,7 @@ from .critical_crack_length import (
     compute_slab_mechanics,
     slab_weighted_mean,
 )
+from .rta import RTA_THRESHOLD, compute_rta  # noqa: F401 (registers rta)
 
 DEFAULT_INCLINATION = 38.0   # deg, virtual slope angle of the index
 # N m^-1, effective skier line load (~85 kg, 1.7 m skis, dynamic factor 2.5)
@@ -51,6 +52,17 @@ CRUST_MIN_DENSITY = 500.0    # kg m^-3, supporting crust density
 CRUST_MIN_THICKNESS = 0.03   # m, supporting crust thickness
 # treatment of the partially penetrated layer ('full' or 'residual')
 PENETRATED_LAYER = 'full'
+#: Stability classes of the SK38 family (sk38, sk38_rta, sk38_ccl,
+#: sk38_ccl_rta): ascending (label, upper bound] steps; low values are
+#: unstable. The hazard chart reads these.
+SK38_WEAK = 'min'
+SK38_CLASSES = [
+    ('very poor', 0.5),
+    ('poor', 0.95),
+    ('fair', 1.05),
+    ('rather stable', math.inf),
+]
+SK38_AXLIM = (0.0, 1.5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,3 +367,36 @@ def compute_sk38(ds: 'xsnowDataset') -> 'xsnowDataset':
     sk38.attrs = registry_attrs('sk38', 'skier stability index SK38', '1')
     result = ds.data.assign(sk38=sk38)
     return ds.__class__(result)
+
+
+STABLE_SK38 = 6.0   # SNOWPACK's SK38 cap, reported where the RTA gate closes
+
+
+@register_xsnowDataset_method
+def compute_sk38_rta(
+    ds: 'xsnowDataset', rta_threshold: float = RTA_THRESHOLD
+) -> 'xsnowDataset':
+    """
+    RTA-gated native SK38: layers that are no weak-layer candidates
+    (``rta`` < ``rta_threshold``) report the stable cap 6.0 instead of
+    their SK38.
+
+    Requires ``sk38``; a missing ``rta`` is computed and kept. NaN rta
+    leaves the SK38 value ungated.
+    """
+    xs = ds if isinstance(ds, xsnowDataset) else xsnowDataset(ds)
+    require_vars(xs, ('sk38',), 'compute_sk38_rta')
+    pure = xs.compute_rta() if 'rta' not in xs.data else xs
+
+    index_da = pure.data['sk38']
+    rta_da = pure.data['rta'].broadcast_like(index_da)
+    gated = index_da.where(
+        ~(np.isfinite(index_da) & (rta_da < rta_threshold)),
+        STABLE_SK38,
+    )
+
+    attrs = registry_attrs('sk38_rta', 'RTA-gated stability index SK38', '1')
+    attrs['rta_threshold'] = rta_threshold
+    gated.attrs = attrs
+    new_xr = pure.data.assign(sk38_rta=gated)
+    return ds.__class__(new_xr)

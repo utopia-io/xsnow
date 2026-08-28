@@ -13,6 +13,8 @@ Unit fields:
     xsnow_units: Canonical in-memory unit used by xsnow.
     pro_units: Expected storage unit in SNOWPACK .pro files, when applicable.
     smet_units: Expected storage unit(s) in SNOWPACK .smet files, when applicable.
+    smet_unit_aliases: Historical SMET unit labels whose values should be
+        interpreted as another unit without numerical conversion.
     smet_units_input: Optional SMET storage unit for forcing/input files.
     smet_units_output: Optional SMET storage unit for model-output files.
     plot_units: Preferred display unit, taken from SNOWPACK .smet plot_unit
@@ -292,14 +294,25 @@ registry = {
         "plot_units": "1",
         "si_units": "1"
     },
-    "date_of_birth": {
-        "param_code": "0540",
+    "deposition_date": {
+        # SNOWPACK's 0505 is dual-use (ini key PROF_AGE_OR_DATE): the ISO date
+        # variant is parsed, the "element age (days)" variant is skipped.
+        "param_code": "0505",
         "aliases": ["element deposition date", "deposition date"],
         "standard_name": "deposition_date_of_snow_element",
         "xsnow_units": "ISO",
         "pro_units": "ISO",
         "plot_units": "ISO",
         "si_units": "ISO"
+    },
+    "bulk_salinity": {
+        "param_code": "0540",
+        "aliases": ["bulk salinity"],
+        "standard_name": "bulk_salinity_of_snow_element",
+        "xsnow_units": "g/kg",
+        "pro_units": "g/kg",
+        "plot_units": "g/kg",
+        "si_units": "g/kg"
     },
     "accumulated_temperature_gradient": {
         "param_code": "0607",
@@ -447,19 +460,23 @@ registry = {
         "param_code": None,
         "aliases": ['dIntEnergySnow', 'snow_internal_energy_change'],
         'standard_name': 'snow_internal_energy_change',
-        'xsnow_units': 'W m-2',
-        'smet_units': 'W m-2',
-        'plot_units': 'W/m2',
-        'si_units': 'W m-2',
+        'xsnow_units': 'kJ m-2',
+        'smet_units': 'kJ m-2',
+        # SNOWPACK historically labeled these unchanged energy values W/m2.
+        'smet_unit_aliases': {'W m-2': 'kJ m-2'},
+        'plot_units': 'kJ/m2',
+        'si_units': 'kJ m-2',
     },
     'meltFreezeEnergySnow': {
         "param_code": None,
         "aliases": ['meltFreezeEnergySnow', 'snow_melt_freeze_energy'],
         'standard_name': 'snow_melt_freeze_energy',
-        'xsnow_units': 'W m-2',
-        'smet_units': 'W m-2',
-        'plot_units': 'W/m2',
-        'si_units': 'W m-2',
+        'xsnow_units': 'kJ m-2',
+        'smet_units': 'kJ m-2',
+        # SNOWPACK historically labeled these unchanged energy values W/m2.
+        'smet_unit_aliases': {'W m-2': 'kJ m-2'},
+        'plot_units': 'kJ/m2',
+        'si_units': 'kJ m-2',
     },
     'ColdContentSnow': {
         "param_code": None,
