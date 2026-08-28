@@ -141,7 +141,6 @@ class TestReducedInput:
         assert _flat(out, 'hc_gcode') == 550
 
 
-
 class TestVariants:
     def test_one_variant_per_index(self, reduced):
         out = HazardChart(reduced).compute_hazard_chart(
@@ -257,12 +256,50 @@ class TestLayerContext:
                     '2026-01-01T00:00:00.2',
                 ]
 
-    def test_only_one_context_variable_is_supported(self, full):
-        with pytest.raises(ValueError, match='exactly one context variable'):
+    def test_mapping_keys_concatenate_in_order(self, full):
+        data = full.data.assign(
+            new_snow=full.data['grain_type'].isin([120, 420]),
+        )
+        hc = HazardChart(xsnowDataset(data)).compute_hazard_chart(
+            indices=['sk38'], depth_var='z',
+            layer_context={'datetag': [T1, T2], 'new_snow': True},
+        )
+        infos = hc.list_hc_variants()
+        assert [i.layer_context['kind'] for i in infos] == ['value', 'value', 'mask']
+        assert [_flat(hc.data, 'hc_instability', i) for i in range(3)] == \
+            pytest.approx([0.8, 3.0, 4.0])
+        assert [_flat(hc.data, 'hc_layer_count', i) for i in range(3)] == [2, 1, 2]
+        with pytest.raises(ValueError, match='selects a boolean'):
             HazardChart(full).compute_hazard_chart(
-                indices=['sk38'], depth_var='z',
-                layer_context={'datetag': [T1], 'other': ['x']},
+                indices=['sk38'], depth_var='z', layer_context={'datetag': True},
             )
+
+    def test_deep_grain_code_and_count(self, full):
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['punstable', 'sk38'], depth_var='z',
+        )
+        # punstable: weakest and deepest poor layer are both layer 0 (DH)
+        assert _flat(hc.data, 'hc_gcode', 0) == 550 == _flat(hc.data, 'hc_gcode_deep', 0)
+        # sk38: weakest layer 1 (FC 440) is the only poor layer
+        assert _flat(hc.data, 'hc_gcode', 1) == 440 == _flat(hc.data, 'hc_gcode_deep', 1)
+        assert _flat(hc.data, 'hc_layer_count', 1) == 5
+        assert hc.data['hc_layer_count'].dtype == np.dtype('int16')
+
+    def test_one_block_call_for_all_variants(self, full, monkeypatch):
+        from xsnow.extensions import hazard_chart as module
+        calls = []
+        original = module.apply_profile_block
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(module, 'apply_profile_block', counting)
+        HazardChart(full).compute_hazard_chart(
+            indices=['punstable', 'sk38'], depth_var='z',
+            layer_context={'datetag': [T1, T2]},
+        )
+        assert calls == [1]
 
     def test_variant_timeseries_uses_selected_context_and_classes(self, full):
         custom = [
@@ -292,6 +329,66 @@ class TestLayerContext:
                 f'non-standard JSON constant: {value}'
             ),
         )
+
+
+class TestAggregate:
+    def test_union_of_datetag_variants_equals_the_points_filter(self, reduced, full):
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['punstable'], depth_var='z',
+            layer_context={'datetag': [T1, T2]},
+        ).aggregate_hc_variants(hc_variants=[0, 1])
+        points = reduced.compute_hc_points(
+            indices=['punstable'], datetags=['2025-11-01', '2025-12-06'],
+        ).data
+        assert _flat(hc.data, 'hc_instability', 2) == pytest.approx(
+            float(points['punstable'].values.ravel()[0]))
+        assert _flat(hc.data, 'hc_depth', 2) == pytest.approx(
+            float(points['punstable_depth'].values.ravel()[0]))
+        assert _flat(hc.data, 'hc_gcode', 2) == 550
+        assert _flat(hc.data, 'hc_instabilityDrivenBy', 2) == 0    # the T1 variant
+        assert _flat(hc.data, 'hc_layer_count', 2) == 3
+        info = hc.list_hc_variants()[2]
+        assert info.layer_context == {'kind': 'aggregate', 'variants': [0, 1]}
+        assert info.stability_index == 'punstable'
+
+    def test_depth_is_picked_by_value_not_by_order(self):
+        """The deepest poor-or-worse variant drives the depth even when it
+        comes last."""
+        dims = ('location', 'time', 'layer')
+        data = xr.Dataset(
+            {
+                'sk38': (dims, [[[0.9, 0.7, 3.0]]]),
+                'z': (dims, [[[0.2, 0.6, 0.0]]]),
+                'ctx': (dims, [[['a', 'b', 'c']]]),
+            },
+            coords={'location': ['L'], 'time': [pd.to_datetime('2026-01-15')],
+                    'layer': np.arange(3)},
+        )
+        hc = HazardChart(xsnowDataset(data)).compute_hazard_chart(
+            indices=['sk38'], depth_var='z', layer_context={'ctx': ['a', 'b', 'c']},
+        ).aggregate_hc_variants(hc_variants=[0, 1, 2])
+        assert _flat(hc.data, 'hc_instability', 3) == pytest.approx(0.7)
+        assert _flat(hc.data, 'hc_depth', 3) == pytest.approx(0.6)
+        assert _flat(hc.data, 'hc_depthDrivenBy', 3) == 1
+        assert _flat(hc.data, 'hc_instabilityDrivenBy', 3) == 1
+
+    def test_mixed_variants_are_refused(self, full):
+        hc = HazardChart(full).compute_hazard_chart(
+            indices=['punstable', 'sk38'], depth_var='z',
+        )
+        with pytest.raises(ValueError, match="differ in 'stability_index'"):
+            hc.aggregate_hc_variants(hc_variants=[0, 1])
+
+    def test_lazy_aggregate(self, full):
+        chunked = _chunk_data_vars(full, location=1, layer=-1)
+        started = []
+        with Callback(pretask=lambda key, *_: started.append(key)):
+            hc = HazardChart(chunked).compute_hazard_chart(
+                indices=['sk38'], depth_var='z', layer_context={'datetag': [T1, T2]},
+            ).aggregate_hc_variants(hc_variants=[0, 1])
+        assert started == []
+        assert hc.data['hc_instability'].chunks is not None
+        assert _flat(hc.data, 'hc_instability', 2) == pytest.approx(0.8)
 
 
 class TestGrouping:
